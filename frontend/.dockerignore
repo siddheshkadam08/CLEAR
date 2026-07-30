@@ -1,0 +1,19 @@
+# Without this, `COPY . .` ships ~256 MB of node_modules into the build context
+# and the image, only for the next layer to overwrite it from the deps stage.
+# The build goes from minutes to seconds.
+node_modules
+dist
+.vite
+coverage
+
+# Never bake local configuration or secrets into an image.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db

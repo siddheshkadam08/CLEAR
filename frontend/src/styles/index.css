@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface-muted: #eff6ff;
+  --color-border: #dbe4f0;
+  --color-text: #0f172a;
+  --color-text-muted: #475569;
+  --color-brand: #1d4ed8;
+  --color-brand-strong: #1e3a8a;
+  --color-success: #059669;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+}
+
+@layer base {
+  * {
+    @apply border-slate-200;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-50 text-slate-900 antialiased;
+    background:
+      radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 24%),
+      linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+
+  a {
+    @apply transition-colors duration-200;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-slate-200 bg-white shadow-panel;
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between gap-4 border-b border-slate-100 px-6 py-4;
+  }
+
+  .panel-body {
+    @apply px-6 py-5;
+  }
+
+  .label {
+    @apply text-xs font-semibold uppercase tracking-[0.18em] text-slate-500;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50;
+  }
+}

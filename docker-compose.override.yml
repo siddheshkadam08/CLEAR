@@ -1,0 +1,101 @@
+# =============================================================================
+# Local development overrides - applied automatically by `docker compose up`.
+#
+# Mounts source for hot reload, drops the production frontend build in favour
+# of the Vite dev server, and disables the heavier observability services.
+# Delete/rename this file to run the stack exactly as production does.
+# =============================================================================
+
+services:
+  backend:
+    build:
+      target: dev
+    volumes:
+      - ./backend/app:/app/app:cached
+      - ./backend/migrations:/app/migrations:cached
+      - ./backend/tests:/app/tests:cached
+    environment:
+      DEBUG: "true"
+      LOG_FORMAT: console
+      DB_ECHO: "false"
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+
+  worker-parser:
+    build:
+      target: dev
+    volumes:
+      - ./backend/app:/app/app:cached
+    environment:
+      LOG_FORMAT: console
+    command:
+      - uvicorn
+      - app.worker_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
+      - --reload-dir
+      - /app/app
+
+  worker-ai:
+    build:
+      target: dev
+    volumes:
+      - ./backend/app:/app/app:cached
+    environment:
+      LOG_FORMAT: console
+    command:
+      - uvicorn
+      - app.worker_app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
+      - --reload-dir
+      - /app/app
+
+  scheduler:
+    build:
+      target: dev
+    volumes:
+      - ./backend/app:/app/app:cached
+    environment:
+      LOG_FORMAT: console
+
+  queue:
+    build:
+      target: dev
+    volumes:
+      - ./queue/src:/app/src:cached
+    command: ["npm", "run", "dev"]
+
+  frontend:
+    build:
+      target: dev
+    volumes:
+      - ./frontend/src:/app/src:cached
+      - ./frontend/public:/app/public:cached
+      - ./frontend/index.html:/app/index.html:cached
+    # No `ports:` here on purpose - see the note in docker-compose.yml. The dev
+    # server listens on 5173, which is FRONTEND_TARGET_PORT's default.
+    environment:
+      # Same-origin through Vite's own proxy, NOT http://localhost:8000. A
+      # cross-origin base URL puts the HttpOnly refresh cookie at the mercy of
+      # SameSite=None plus CORS credentials, and `localhost` inside the container
+      # is the container, not the backend.
+      VITE_API_BASE_URL: /api/v1
+      # Where Vite's /api proxy forwards to - the backend service on the compose
+      # network.
+      VITE_PROXY_TARGET: http://backend:8000
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

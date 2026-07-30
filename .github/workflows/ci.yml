@@ -1,0 +1,311 @@
+name: CI
+
+# Fail on the cheap checks before spending time on the expensive ones: lint and
+# type-check run in parallel with the test jobs, but a red lint blocks the merge
+# just as hard as a red test.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the run in flight for the same ref. Merge-queue runs are
+  # never cancelled - that would let an untested commit through.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ===========================================================================
+  # Backend
+  # ===========================================================================
+  backend-lint:
+    name: Backend lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install
+        working-directory: backend
+        # The `ai` and `local-ml` extras are deliberately omitted: the platform must
+        # lint and type-check without any vendor SDK installed, and CI is where that
+        # claim gets tested rather than asserted.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev,parsers,s3]'
+
+      - run: ruff check app tests
+        working-directory: backend
+
+      - run: ruff format --check app tests
+        working-directory: backend
+
+      - run: mypy app
+        working-directory: backend
+
+  backend-test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector >= 0.7 is required for halfvec, which the embedding column uses.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: cip
+          POSTGRES_PASSWORD: cip
+          POSTGRES_DB: cip_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cip -d cip_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://cip:cip@localhost:5432/cip_test
+      TEST_DATABASE_URL: postgresql+asyncpg://cip:cip@localhost:5432/cip_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+      INTERNAL_API_TOKEN: ci-only-internal-token-0123456789abcdef
+      APP_ENV: test
+      OTEL_ENABLED: "false"
+      STORAGE_PROVIDER: local
+      LLM_PROVIDER: mock
+      EMBEDDING_PROVIDER: mock
+      # No network in CI, so the startup probe would only add flakiness.
+      EMBEDDING_VERIFY_ON_STARTUP: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev,parsers,s3]'
+
+      - name: Migrate
+        working-directory: backend
+        # Runs the real migrations against a real Postgres, so a migration that only
+        # works on an empty SQLite is caught here rather than on deploy.
+        run: python -m app.cli migrate
+
+      - name: Verify the vector schema
+        working-directory: backend
+        # Asserts the applied schema matches the configured model: column type,
+        # dimension, and that every HNSW index is valid. Exits non-zero on drift.
+        run: python -m app.tools.verify_pgvector --skip-provider
+
+      - name: Test
+        working-directory: backend
+        run: pytest tests -q --cov=app --cov-report=xml --cov-report=term-missing
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          retention-days: 7
+
+  # ===========================================================================
+  # Frontend
+  # ===========================================================================
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  # ===========================================================================
+  # Queue dispatcher
+  # ===========================================================================
+  queue:
+    name: Queue dispatcher
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: queue
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: queue/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run typecheck
+
+  # ===========================================================================
+  # Cross-cutting contract checks
+  # ===========================================================================
+  contracts:
+    name: Interface contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev,parsers,s3]'
+
+      - name: Every frontend endpoint resolves to a backend route
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://cip:cip@localhost:5432/cip
+          JWT_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+          OTEL_ENABLED: "false"
+        # A typo'd path is a 404 that only appears when a user reaches that screen,
+        # and a renamed response field renders as `undefined` while every typecheck
+        # stays green. Neither is visible to a per-project test suite.
+        run: |
+          python ../scripts/check_api_contract.py
+          python ../scripts/check_api_shapes.py
+          python ../scripts/check_path_params.py
+
+  # ===========================================================================
+  # Images
+  # ===========================================================================
+  build-images:
+    name: Build images
+    runs-on: ubuntu-latest
+    needs: [backend-lint, frontend, queue]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+          - name: frontend
+            context: ./frontend
+          - name: queue
+            context: ./queue
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          target: runtime
+          # Built but not pushed: publishing is a release concern, and a PR from a
+          # fork must never be able to push to the registry.
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # ===========================================================================
+  # Security
+  # ===========================================================================
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the secret scan can inspect every commit on the branch,
+          # not just the tip - a key removed in the latest commit is still leaked.
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Dependency audit
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip install -e '.[dev,parsers,s3]'
+          # Reported, not gated: a CVE in a transitive dependency should not block an
+          # unrelated fix, but it must be visible on every run.
+          pip-audit --desc || true
+
+  # ===========================================================================
+  # Gate
+  # ===========================================================================
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    needs: [backend-lint, backend-test, frontend, queue, contracts, build-images]
+    if: always()
+    steps:
+      # One required check to configure in branch protection, rather than seven that
+      # drift as jobs are added and renamed.
+      - name: Verify every job succeeded
+        run: |
+          if echo '${{ toJSON(needs) }}' | grep -q '"result": *"failure"'; then
+            echo "One or more CI jobs failed."
+            exit 1
+          fi
+          if echo '${{ toJSON(needs) }}' | grep -q '"result": *"cancelled"'; then
+            echo "One or more CI jobs were cancelled."
+            exit 1
+          fi
+          echo "All CI jobs succeeded."

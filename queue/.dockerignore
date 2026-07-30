@@ -1,0 +1,14 @@
+# See frontend/.dockerignore - the deps layer installs node_modules, so copying
+# the host's copy in is pure cost.
+node_modules
+dist
+coverage
+
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+*.log
+npm-debug.log*

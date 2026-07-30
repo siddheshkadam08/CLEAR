@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "useDefineForClassFields": true,
+    // No `baseUrl`: it is deprecated in TypeScript 6+, and `ignoreDeprecations:
+    // "6.0"` - the suggested silencer - is itself rejected by the 5.9.3 the project
+    // pins, so the two cannot both be satisfied. Paths without a baseUrl resolve
+    // relative to this file, which works in both. Vite has its own alias in
+    // vite.config.ts; this half only teaches the type-checker.
+    "paths": { "@/*": ["./src/*"] },
+    "types": ["vite/client", "vitest/globals"]
+  },
+  "include": ["src"]
+}

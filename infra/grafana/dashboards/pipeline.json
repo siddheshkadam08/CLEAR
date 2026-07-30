@@ -1,0 +1,166 @@
+{
+  "title": "CIP - Ingestion Pipeline",
+  "uid": "cip-pipeline",
+  "tags": ["cip", "pipeline"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Jobs in flight",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(cip_jobs_active)", "legendFormat": "active" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Queue depth (all stages)",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "expr": "sum(cip_queue_depth)", "legendFormat": "waiting" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Dead letter queue",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [{ "expr": "cip_queue_dlq_size", "legendFormat": "dlq" }]
+    },
+    {
+      "type": "stat",
+      "title": "Contracts READY",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum(cip_jobs_total{state=\"READY\"})", "legendFormat": "ready" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Failed jobs (1h)",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        { "expr": "increase(cip_jobs_failed_total[1h])", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Duplicate vector reuse rate",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(cip_embedding_reused_total[30m])) / clamp_min(sum(rate(cip_embedding_requested_total[30m])), 0.001)",
+          "legendFormat": "reuse"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stage duration p95 (seconds)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(cip_stage_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue depth by stage",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "cip_queue_depth", "legendFormat": "{{queue}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput (stage completions/min)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum by (stage) (rate(cip_stage_completed_total[5m])) * 60",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries by stage",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum by (stage) (rate(cip_stage_retry_total[5m])) * 60",
+          "legendFormat": "{{stage}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval + RAG latency p95",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(cip_retrieval_duration_seconds_bucket[5m])))",
+          "legendFormat": "retrieval"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(cip_rag_duration_seconds_bucket[5m])))",
+          "legendFormat": "rag"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval strategy mix",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        {
+          "expr": "sum by (strategy) (rate(cip_retrieval_strategy_total[15m]))",
+          "legendFormat": "{{strategy}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM tokens / cost",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(cip_llm_tokens_total[5m]))",
+          "legendFormat": "{{model}} tokens/s"
+        },
+        {
+          "expr": "sum(rate(cip_llm_cost_usd_total[1h]))",
+          "legendFormat": "usd/hour"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Citation coverage & answer regeneration",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        { "expr": "cip_rag_citation_coverage", "legendFormat": "citation coverage" },
+        {
+          "expr": "sum(rate(cip_rag_regenerated_total[15m]))",
+          "legendFormat": "regenerations"
+        }
+      ]
+    }
+  ]
+}

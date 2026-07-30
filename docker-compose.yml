@@ -1,0 +1,470 @@
+# =============================================================================
+# Contract Intelligence Platform - full local stack
+#
+#   podman compose up -d --build      (or: make up)
+#   docker compose up -d --build
+#
+# Runs on Podman and Docker unchanged. `make up` picks Podman when it is on PATH.
+#
+# Podman notes
+# ------------
+# * Bind mounts carry `:z` so they are readable under SELinux (Fedora, RHEL,
+#   CentOS). Without it a rootless container cannot read ./infra and the symptom
+#   is a config file that "does not exist" while `ls` shows it plainly. Docker
+#   and non-SELinux hosts ignore the flag.
+# * Every published port is above 1024, so rootless Podman can bind them all
+#   without extra privilege.
+# * The API, workers and scheduler run as an unprivileged user inside the image,
+#   which composes correctly with Podman's user-namespace mapping.
+#
+# * Every published host port is overridable (REDIS_PORT, BACKEND_PORT, ...).
+#   Podman fails a container outright when a host port is taken rather than
+#   picking another, and a dev box running several stacks will have one taken.
+# * Container names are prefixed with ${COMPOSE_PROJECT:-cip}. Podman fails hard
+#   on a name collision, and a machine running several stacks will have one.
+#   Set COMPOSE_PROJECT=cip2 to run a second copy side by side.
+#
+# The API, each worker pool, the queue dispatcher and the frontend are separate
+# deployables sharing Postgres + Redis + object storage, so a pool can be scaled
+# on its own:  podman compose up -d --scale worker-ai=4
+# =============================================================================
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-development}
+  DEBUG: ${DEBUG:-true}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-cip_dev_password}@postgres:5432/${POSTGRES_DB:-cip}
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
+  STORAGE_CONTAINER: ${STORAGE_CONTAINER:-contracts}
+  # Two endpoints, deliberately. The app reaches MinIO by service name on the
+  # compose network; the browser cannot resolve that name, so presigned URLs are
+  # signed for the host-published address instead. Without the second one the PDF
+  # viewer silently shows nothing while every server-side check reports healthy.
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+  S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://127.0.0.1:9000}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+  S3_USE_PATH_STYLE: "true"
+  # --- parsing ---
+  # `idoc` is the active adapter: the in-house layout service, which returns real
+  # layout roles and coordinates. `pymupdf` is the local fallback. Docling is not
+  # used by this deployment and is not an accepted value.
+  ACTIVE_PARSER: ${ACTIVE_PARSER:-idoc}
+  # `fixture` replays recorded parser responses and never touches the network.
+  # Set `live` to call the real layout service; responses are recorded on the
+  # way through so the next run can replay them.
+  PARSER_MODE: ${PARSER_MODE:-fixture}
+  PARSER_FIXTURE_DIR: ${PARSER_FIXTURE_DIR:-/app/storage/fixtures/parser}
+  IDOC_ENDPOINT: ${IDOC_ENDPOINT:-https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json}
+
+  # --- inference and embeddings ---
+  # This stack runs end to end with no LLM vendor account and no API key: both
+  # providers default to `mock`, and neither the `anthropic` nor the `openai`
+  # package is installed in the base image.
+  #
+  # What that costs you: mock extractions are SYNTHESISED rather than read from the
+  # contract, and mock embeddings are not semantically meaningful, so clause
+  # attributes, risk scores and semantic search are demo-grade. The API logs a
+  # warning on every start while either is active, and `APP_ENV=production` refuses
+  # to boot unless ALLOW_MOCK_AI is set deliberately.
+  #
+  # To use a real provider, set LLM_PROVIDER/EMBEDDING_PROVIDER and the matching key
+  # below, and build the image with the `ai` extra.
+  LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+  ALLOW_MOCK_AI: ${ALLOW_MOCK_AI:-false}
+  # Model names used only when a real provider is selected; inert under `mock`.
+  LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+  # NVIDIA Nemotron 3 Embed 1B. 2048 is the model's real output width, and
+  # `halfvec` is required rather than preferred: pgvector's HNSW index stops at
+  # 2000 dimensions for the `vector` type, so a vector(2048) column cannot be
+  # indexed and every similarity search becomes a sequential scan.
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+  EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
+  EMBEDDING_VERIFY_ON_STARTUP: ${EMBEDDING_VERIFY_ON_STARTUP:-true}
+  NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+  NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
+  # All optional. Left empty the platform stays on the mock providers.
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+  GEMINI_MODEL_SIMPLE: ${GEMINI_MODEL_SIMPLE:-gemini-2.5-flash-lite}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+  AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-internal-token}
+  OTEL_ENABLED: ${OTEL_ENABLED:-true}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@irisregtech.com}
+  SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-Abc@1234}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------- datastores
+  postgres:
+    # Must match the major version of any existing pgdata volume: a server
+    # refuses to start on a data directory written by a different major, and
+    # the error reads like corruption rather than a version mismatch.
+    image: pgvector/pgvector:pg${POSTGRES_MAJOR:-17}
+    container_name: ${COMPOSE_PROJECT:-cip}-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cip}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cip_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-cip}
+      # Tuned for vector workloads on a dev box.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - max_parallel_workers_per_gather=4
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cip} -d ${POSTGRES_DB:-cip}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT:-cip}-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+
+  minio:
+    image: minio/minio:latest
+    container_name: ${COMPOSE_PROJECT:-cip}-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin} &&
+      mc mb --ignore-existing local/${STORAGE_CONTAINER:-contracts} &&
+      mc mb --ignore-existing local/${STORAGE_CONTAINER:-contracts}-artifacts &&
+      mc mb --ignore-existing local/${STORAGE_CONTAINER:-contracts}-exports &&
+      echo 'minio buckets ready'"
+    restart: "no"
+
+  # --------------------------------------------------------------- migrations
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ${COMPOSE_PROJECT:-cip}-migrate
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "app.cli", "migrate", "--seed"]
+    restart: "no"
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- API layer
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ${COMPOSE_PROJECT:-cip}-backend
+    environment:
+      <<: *backend-env
+      OTEL_SERVICE_NAME: cip-backend
+      # Under `--profile nvidia`, EMBEDDING_PROVIDER is exported as `nvidia` by
+      # `make nvidia-up` (or set in .env). Startup validation then probes the
+      # endpoint and refuses to boot on a bad configuration.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *default-logging
+
+  # -------------------------------------------------------- queue dispatcher
+  # Node/BullMQ is a logic-free dispatch shim: it pulls a job and calls the
+  # Python stage service over internal HTTP (see §1.2).
+  queue:
+    build:
+      context: ./queue
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT:-cip}-queue
+    environment:
+      NODE_ENV: ${APP_ENV:-development}
+      REDIS_URL: redis://redis:6379/0
+      QUEUE_PREFIX: ${QUEUE_PREFIX:-cip}
+      INTERNAL_API_BASE_URL: http://backend:8000
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-internal-token}
+      QUEUE_STAGE_TIMEOUT_MS: ${QUEUE_STAGE_TIMEOUT_MS:-1800000}
+      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-3}
+      QUEUE_BACKOFF_MS: ${QUEUE_BACKOFF_MS:-5000}
+      WORKER_CONCURRENCY_VALIDATION: ${WORKER_CONCURRENCY_VALIDATION:-10}
+      WORKER_CONCURRENCY_PARSER: ${WORKER_CONCURRENCY_PARSER:-20}
+      WORKER_CONCURRENCY_ENRICHMENT: ${WORKER_CONCURRENCY_ENRICHMENT:-10}
+      WORKER_CONCURRENCY_CLASSIFICATION: ${WORKER_CONCURRENCY_CLASSIFICATION:-10}
+      WORKER_CONCURRENCY_CHUNKING: ${WORKER_CONCURRENCY_CHUNKING:-20}
+      WORKER_CONCURRENCY_AI_EXTRACTION: ${WORKER_CONCURRENCY_AI_EXTRACTION:-10}
+      WORKER_CONCURRENCY_EMBEDDING: ${WORKER_CONCURRENCY_EMBEDDING:-15}
+      WORKER_CONCURRENCY_INDEXING: ${WORKER_CONCURRENCY_INDEXING:-5}
+      WORKER_CONCURRENCY_EXPORT: ${WORKER_CONCURRENCY_EXPORT:-4}
+      OTEL_SERVICE_NAME: cip-queue
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "${QUEUE_PORT:-9100}:9100" # queue metrics + admin introspection
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    logging: *default-logging
+
+  # ---------------------------------------------------------- worker services
+  # Stage worker pools run the same image as the API but expose only the
+  # internal stage endpoints. Scale independently: `docker compose up -d
+  # --scale worker-parser=4`.
+  worker-parser:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    environment:
+      <<: *backend-env
+      OTEL_SERVICE_NAME: cip-worker-parser
+      WORKER_ROLE: parser
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    logging: *default-logging
+
+  worker-ai:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    environment:
+      <<: *backend-env
+      OTEL_SERVICE_NAME: cip-worker-ai
+      WORKER_ROLE: ai
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    logging: *default-logging
+
+  # Periodic evaluator: alerts, expiry windows, DLQ sweep, index maintenance.
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ${COMPOSE_PROJECT:-cip}-scheduler
+    environment:
+      <<: *backend-env
+      OTEL_SERVICE_NAME: cip-scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.cli", "scheduler"]
+    logging: *default-logging
+
+  # ------------------------------------------------------------ nvidia profile
+  #
+  #   docker compose --profile nvidia up embedding-check
+  #
+  # A gate, not a service. It runs the same probe the API runs at startup and exits
+  # non-zero if NVIDIA is unreachable, the credentials are rejected, or the model's
+  # dimension disagrees with the schema - so a bad configuration fails here, in
+  # seconds, instead of on stage seven of the first upload.
+  #
+  # The default stack does not include it: `EMBEDDING_PROVIDER=mock` needs no vendor
+  # account, and `docker compose up` must keep working with no credentials at all.
+  embedding-check:
+    profiles: ["nvidia"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: ${COMPOSE_PROJECT:-cip}-embedding-check
+    environment:
+      <<: *backend-env
+      EMBEDDING_PROVIDER: nvidia
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+      EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
+      # Plain substitution, NOT `${NVIDIA_API_KEY:?...}`. podman-compose evaluates
+      # the required-variable form for every service at parse time, including ones
+      # behind an inactive profile - so a `:?` here breaks `podman compose up` for
+      # the default stack, which needs no NVIDIA key at all. The probe below fails
+      # with a clearer message anyway.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        python -m app.tools.embedding_probe &&
+        python -m app.tools.verify_pgvector
+    restart: "no"
+    logging: *default-logging
+
+  # ------------------------------------------------------------------ frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        # Same-origin by default: nginx proxies /api to the backend, so the
+        # HttpOnly refresh cookie is a first-party cookie. Pointing this at
+        # http://localhost:8000 would make every API call cross-origin and put
+        # that cookie at the mercy of SameSite=None plus CORS credentials.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+        VITE_ENABLE_MICROSOFT_SSO: ${VITE_ENABLE_MICROSOFT_SSO:-false}
+        API_HOST: backend
+        API_PORT: "8000"
+    container_name: ${COMPOSE_PROJECT:-cip}-frontend
+    ports:
+      # The container serves on 8080 and runs as an unprivileged user.
+      # The container port is a variable because the dev override runs Vite on
+      # 5173 while the runtime image serves nginx on 8080. Overriding `ports` in
+      # the override file would *append* a second binding on the same host port,
+      # which fails to start - so the switch is made here, once.
+      - "${FRONTEND_PORT:-5173}:${FRONTEND_TARGET_PORT:-5173}"
+    depends_on:
+      - backend
+    logging: *default-logging
+
+  # ------------------------------------------------------------ observability
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: ${COMPOSE_PROJECT:-cip}-otel
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/otel/collector-config.yaml:/etc/otel/config.yaml:ro,z
+    ports:
+      - "${OTLP_GRPC_PORT:-4317}:4317"   # OTLP gRPC
+      - "${OTLP_HTTP_PORT:-4318}:4318"   # OTLP HTTP
+      - "${OTEL_METRICS_PORT:-8889}:8889"   # Prometheus scrape of collector-internal metrics
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ${COMPOSE_PROJECT:-cip}-prometheus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ${COMPOSE_PROJECT:-cip}-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro,z
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro,z
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+    logging: *default-logging
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: ${COMPOSE_PROJECT:-cip}-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_PORT:-16686}:16686"
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  promdata:
+  grafanadata:

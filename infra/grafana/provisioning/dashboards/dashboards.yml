@@ -1,0 +1,12 @@
+apiVersion: 1
+providers:
+  - name: cip
+    orgId: 1
+    folder: Contract Intelligence
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
