@@ -69,4 +69,5 @@ scratch/
 
 # ---- Build artifacts ----
 *.log
+*.tsbuildinfo
 frontend/stats.html
