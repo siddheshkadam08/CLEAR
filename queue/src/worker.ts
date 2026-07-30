@@ -23,7 +23,7 @@
 import { Worker, type Job } from 'bullmq';
 import { request } from 'undici';
 
-import { type Stage, concurrencyFor, config, queueName } from './config.js';
+import { type Stage, concurrencyFor, config, queueId, queueName, queueOptions } from './config.js';
 import { logger } from './logger.js';
 import {
   dispatchDuration,
@@ -188,7 +188,7 @@ export function createWorker(stage: Stage): Worker<StageMessage> {
   const concurrency = concurrencyFor(stage);
 
   const worker = new Worker<StageMessage>(
-    queueName(stage),
+    queueId(stage),
     async (job: Job<StageMessage>) => {
       const message: StageMessage = {
         ...job.data,
@@ -250,6 +250,9 @@ export function createWorker(stage: Stage): Worker<StageMessage> {
     {
       connection: createConnection(),
       concurrency,
+      // Must match the producer's prefix exactly, or the worker watches a set of
+      // Redis keys nobody writes to and every job sits in the queue forever.
+      ...queueOptions,
       // A stage legitimately runs for minutes; the lock has to outlive it or BullMQ
       // would consider the job stalled and hand it to a second worker.
       lockDuration: config.QUEUE_STAGE_TIMEOUT_MS + 60_000,

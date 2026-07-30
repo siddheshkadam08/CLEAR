@@ -9,7 +9,7 @@
 import { Queue, QueueEvents } from 'bullmq';
 import { Redis } from 'ioredis';
 
-import { DLQ_NAME, STAGES, type Stage, config, queueName } from './config.js';
+import { DLQ_ID, STAGES, type Stage, config, queueId, queueOptions } from './config.js';
 import { logger } from './logger.js';
 
 /**
@@ -50,7 +50,7 @@ const queues = new Map<Stage, Queue>();
 for (const stage of STAGES) {
   queues.set(
     stage,
-    new Queue(queueName(stage), { connection, defaultJobOptions }),
+    new Queue(queueId(stage), { connection, defaultJobOptions, ...queueOptions }),
   );
 }
 
@@ -61,8 +61,9 @@ for (const stage of STAGES) {
  * job that exhausted its attempts is a thing an operator has to *decide* about, so
  * it is moved somewhere durable where it can be listed, inspected and replayed.
  */
-export const deadLetterQueue = new Queue(DLQ_NAME, {
+export const deadLetterQueue = new Queue(DLQ_ID, {
   connection,
+  ...queueOptions,
   defaultJobOptions: {
     // Never auto-retried. A DLQ entry is replayed deliberately or not at all.
     attempts: 1,
@@ -85,7 +86,7 @@ export function allQueues(): ReadonlyMap<Stage, Queue> {
 
 /** Queue-level events, for depth metrics and dispatch logging. */
 export function createQueueEvents(stage: Stage): QueueEvents {
-  return new QueueEvents(queueName(stage), { connection: createConnection() });
+  return new QueueEvents(queueId(stage), { connection: createConnection(), ...queueOptions });
 }
 
 export async function closeQueues(): Promise<void> {

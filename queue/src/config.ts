@@ -95,13 +95,34 @@ export function concurrencyFor(stage: Stage): number {
     : defaultConcurrency[stage];
 }
 
-/** Queue name for a stage. Must match `IQueueClient.queue_name` in Python. */
+/**
+ * The BullMQ queue name for a stage.
+ *
+ * Bare stage, no prefix: BullMQ uses `:` as its own Redis key separator and
+ * rejects any queue name containing one - `new Queue('cip:validation')` throws
+ * `Queue name cannot contain :` at construction, which crash-loops the whole
+ * service before it ever accepts a job. The prefix belongs in BullMQ's own
+ * `prefix` option, which is what {@link queueOptions} supplies; the resulting
+ * Redis keys are `cip:validation:*` either way.
+ */
+export function queueId(stage: Stage): string {
+  return stage;
+}
+
+/**
+ * Display name for a stage's queue. Matches `IQueueClient.queue_name` in Python,
+ * which uses it as a label in logs, stats and API responses - never as a Redis key.
+ */
 export function queueName(stage: Stage): string {
   return `${config.QUEUE_PREFIX}:${stage}`;
 }
 
 /** The dead-letter queue: jobs that exhausted their attempts. */
+export const DLQ_ID = 'dlq';
 export const DLQ_NAME = `${config.QUEUE_PREFIX}:dlq`;
+
+/** Shared BullMQ options that put the prefix where BullMQ expects it. */
+export const queueOptions = { prefix: config.QUEUE_PREFIX } as const;
 
 export function isStage(value: unknown): value is Stage {
   return typeof value === 'string' && (STAGES as readonly string[]).includes(value);
