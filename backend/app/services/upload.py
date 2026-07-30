@@ -427,7 +427,10 @@ class UploadService:
                 # Title starts as the filename and is replaced by the extracted
                 # title once processing completes.
                 title=None,
-                agreement_type=options.agreement_type.value if options.agreement_type else None,
+                # `str(...)`, not `.value`: `use_enum_values=True` on BaseSchema
+                # means this field is already a plain string, and `.value` would
+                # raise. See `_resolve_priority` for the same trap.
+                agreement_type=str(options.agreement_type) if options.agreement_type else None,
                 status=ContractStatus.UPLOADED,
                 current_version=1,
                 tags=options.tags,
@@ -518,9 +521,21 @@ class UploadService:
             )
 
     def _resolve_priority(self, project: Project, options: UploadOptions) -> JobPriority:
-        """Explicit option wins, then the project default, then normal."""
-        if options.priority is not JobPriority.NORMAL:
-            return options.priority
+        """Explicit option wins, then the project default, then normal.
+
+        ``BaseSchema`` sets ``use_enum_values=True``, so ``options.priority`` arrives
+        as a plain ``str`` rather than a ``JobPriority``. Two consequences, both of
+        which this coercion exists to prevent:
+
+        * ``"normal" is not JobPriority.NORMAL`` is always true, so an identity check
+          here returned early on every upload and the project's configured
+          ``processing_priority`` was never read;
+        * the caller records a metric label from ``priority.value``, which raises
+          ``AttributeError`` on a str and turned every upload into a 500.
+        """
+        requested = JobPriority(options.priority)
+        if requested != JobPriority.NORMAL:
+            return requested
         configured = project.setting("processing_priority")
         if configured:
             try:
