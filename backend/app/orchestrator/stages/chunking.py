@@ -110,6 +110,10 @@ class ChunkingStage(StageHandler):
                     "sections": document.statistics.section_count,
                     "paragraphs": document.statistics.paragraph_count,
                     "rejected": result.validation.rejection_count,
+                    # The whole point of the failure message is "check the parser
+                    # output and the chunking config" - so ship the evidence that
+                    # says which one, instead of making someone reproduce the run.
+                    "diagnostics": result.validation.diagnostics(sample_limit=25),
                 },
             )
 
@@ -134,6 +138,10 @@ class ChunkingStage(StageHandler):
             ).inc(count)
         for rejection in result.validation.rejected:
             metrics.chunk_validation_failures_total.labels(reason=rejection.reason).inc()
+            if rejection.rule:
+                metrics.chunk_rejections_total.labels(
+                    rule=rejection.rule, chunk_type=rejection.chunk_type or "unknown"
+                ).inc()
 
         await ctx.report_progress(59, f"{len(result.chunks)} chunks")
 
@@ -199,11 +207,17 @@ class ChunkingStage(StageHandler):
                 ),
                 StageArtifact(
                     kind=ArtifactKind.CHUNK_VALIDATION,
-                    payload=result.validation.as_dict(),
+                    # The full diagnostic report, not the summary. This artifact is
+                    # what the profile-tuning view reads, and the questions it has
+                    # to answer - which rule, which page, how far off the threshold
+                    # - are unanswerable from counts alone.
+                    payload=result.validation.diagnostics(),
                     summary={
                         "accepted": result.validation.accepted,
                         "rejected": result.validation.rejection_count,
                         "healthy": result.validation.is_healthy,
+                        "dominant_rule": result.validation.dominant_rule,
+                        "by_rule": result.validation.by_rule,
                     },
                 ),
             ],
@@ -213,6 +227,7 @@ class ChunkingStage(StageHandler):
                 "chunk_tokens_total": stats.total_tokens,
                 "chunk_tokens_mean": stats.mean_tokens,
                 "chunks_rejected": result.validation.rejection_count,
+                "chunks_rejected_by_rule": result.validation.by_rule,
                 "chunks_cross_page": stats.cross_page_count,
             },
             context_updates={

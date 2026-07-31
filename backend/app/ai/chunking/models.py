@@ -17,6 +17,7 @@ Every chunk carries the three things the rest of the platform depends on:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from app.ai.cdm.models import Coordinates
@@ -87,13 +88,61 @@ class SemanticChunk:
         }
 
 
+class RejectionRule(StrEnum):
+    """The specific check that refused a chunk.
+
+    ``reason`` is a category; this is the rule. They differ where one category has
+    several causes - "too_small" fires for a boilerplate fragment and for a page of
+    OCR noise, and the fix is different in each case. Naming the rule also makes
+    the rejections countable per rule, which is what tells you a *threshold* is
+    wrong rather than a document.
+    """
+
+    EMPTY_TEXT = "empty_text"
+    BELOW_MIN_TOKENS = "below_min_tokens"
+    ABOVE_MAX_TOKENS = "above_max_tokens"
+    ENDS_MID_CLAUSE = "ends_mid_clause"
+    #: A section that yielded no text at all, so no chunk was ever built. This one
+    #: was previously invisible: the builder returned None and moved on, so the
+    #: content vanished without appearing in any count.
+    SECTION_PRODUCED_NO_TEXT = "section_produced_no_text"
+
+
 @dataclass(slots=True)
 class ChunkRejection:
-    """A chunk the validator refused, with the reason."""
+    """A chunk the validator refused, with everything needed to diagnose it.
+
+    Recorded at the point of rejection because none of it is recoverable
+    afterwards: the chunk is gone, and "129 chunks became 96" gives an operator
+    nothing to act on. Page and text preview locate it in the document, the counts
+    say how far off the threshold it was, and the rule says which threshold.
+    """
 
     chunk_id: str
     reason: str
     detail: str = ""
+    rule: str = ""
+    chunk_type: str = ""
+    page: int | None = None
+    token_count: int = 0
+    char_count: int = 0
+    section_title: str = ""
+    #: Enough text to recognise the content, not enough to bloat the artifact.
+    text_preview: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "chunk_id": self.chunk_id,
+            "reason": self.reason,
+            "rule": self.rule,
+            "detail": self.detail,
+            "chunk_type": self.chunk_type,
+            "page": self.page,
+            "token_count": self.token_count,
+            "char_count": self.char_count,
+            "section_title": self.section_title,
+            "text_preview": self.text_preview,
+        }
 
 
 @dataclass(slots=True)
@@ -125,19 +174,95 @@ class ChunkValidationReport:
             return False
         return (self.accepted / self.total) >= 0.8
 
-    def as_dict(self) -> dict[str, Any]:
-        by_reason: dict[str, int] = {}
+    # ------------------------------------------------------------- aggregation
+    @property
+    def by_reason(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
         for rejection in self.rejected:
-            by_reason[rejection.reason] = by_reason.get(rejection.reason, 0) + 1
+            counts[rejection.reason] = counts.get(rejection.reason, 0) + 1
+        return counts
+
+    @property
+    def by_rule(self) -> dict[str, int]:
+        """Rejections per rule - the view that says a threshold is miscalibrated."""
+        counts: dict[str, int] = {}
+        for rejection in self.rejected:
+            if rejection.rule:
+                counts[rejection.rule] = counts.get(rejection.rule, 0) + 1
+        return counts
+
+    @property
+    def by_page(self) -> dict[int, int]:
+        """Rejections per page.
+
+        Clustering is the tell. Rejections spread evenly across a document are
+        ordinary boilerplate; forty on one page mean the parser mangled that page,
+        and no amount of chunking tuning will fix it.
+        """
+        counts: dict[int, int] = {}
+        for rejection in self.rejected:
+            if rejection.page is not None:
+                counts[rejection.page] = counts.get(rejection.page, 0) + 1
+        return counts
+
+    @property
+    def by_chunk_type(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for rejection in self.rejected:
+            if rejection.chunk_type:
+                counts[rejection.chunk_type] = counts.get(rejection.chunk_type, 0) + 1
+        return counts
+
+    @property
+    def dominant_rule(self) -> str | None:
+        """The rule responsible for most rejections, if one clearly is.
+
+        "Most rejections were below_min_tokens" is actionable in a way that a list
+        of 96 individual rejections is not.
+        """
+        counts = self.by_rule
+        if not counts:
+            return None
+        rule, count = max(counts.items(), key=lambda item: item[1])
+        return rule if count >= max(2, self.rejection_count // 2) else None
+
+    def diagnostics(self, sample_limit: int = 100) -> dict[str, Any]:
+        """The full rejection report.
+
+        Separate from :meth:`as_dict` so the artifact keeps its existing shape
+        while the diagnostic view can grow.
+        """
+        pages = self.by_page
         return {
             "total": self.total,
             "accepted": self.accepted,
             "rejected": self.rejection_count,
-            "rejections_by_reason": by_reason,
-            "rejections": [
-                {"chunk_id": r.chunk_id, "reason": r.reason, "detail": r.detail}
-                for r in self.rejected[:100]
+            "acceptance_rate": round(self.accepted / self.total, 4) if self.total else 0.0,
+            "healthy": self.is_healthy,
+            "by_reason": self.by_reason,
+            "by_rule": self.by_rule,
+            "by_chunk_type": self.by_chunk_type,
+            "by_page": {str(page): count for page, count in sorted(pages.items())},
+            "worst_pages": [
+                {"page": page, "rejected": count}
+                for page, count in sorted(pages.items(), key=lambda kv: -kv[1])[:5]
             ],
+            "dominant_rule": self.dominant_rule,
+            "rejections": [r.as_dict() for r in self.rejected[:sample_limit]],
+            "truncated": max(0, self.rejection_count - sample_limit),
+            "warnings": self.warnings,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "accepted": self.accepted,
+            "rejected": self.rejection_count,
+            "rejections_by_reason": self.by_reason,
+            "rejections_by_rule": self.by_rule,
+            "rejections_by_page": {str(p): c for p, c in sorted(self.by_page.items())},
+            "dominant_rule": self.dominant_rule,
+            "rejections": [r.as_dict() for r in self.rejected[:100]],
             "warnings": self.warnings,
             "healthy": self.is_healthy,
         }
