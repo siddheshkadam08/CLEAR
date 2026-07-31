@@ -49,7 +49,18 @@ def get_engine() -> AsyncEngine:
             "application_name": settings.observability.service_name,
             # Stops a runaway query from pinning a connection forever.
             "statement_timeout": str(settings.db.statement_timeout_ms),
-            "idle_in_transaction_session_timeout": "120000",
+            # Was hardcoded to 2 minutes, which silently capped how long a stage
+            # could take. A stage runs inside one transaction and `ai_extraction`
+            # spends minutes in provider calls, so the connection is idle *in
+            # transaction* for the whole run - and Postgres terminated it partway
+            # through every non-trivial contract. The stage then failed with a
+            # message about missing clauses, because by the time anything noticed,
+            # the connection that would have explained it was gone.
+            #
+            # The right fix is for provider work not to hold a transaction at all;
+            # until then this has to accommodate the slowest stage, not the
+            # fastest query.
+            "idle_in_transaction_session_timeout": str(settings.db.idle_in_transaction_timeout_ms),
             "jit": "off",  # JIT hurts the many short OLTP queries we issue
             # Set per connection rather than on the role: the role may be shared
             # with another application in the same database, and changing its

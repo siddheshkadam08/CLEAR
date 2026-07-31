@@ -116,6 +116,26 @@ class DatabaseSettings(BaseSettings):
     statement_timeout_ms: Annotated[
         int, Field(validation_alias="DB_STATEMENT_TIMEOUT_MS", ge=0)
     ] = 60_000
+    #: How long a connection may sit inside an open transaction before Postgres
+    #: terminates the session. 0 disables it.
+    #:
+    #: This is not a tuning knob - it decides whether the pipeline works. A stage
+    #: runs inside one transaction, and ``ai_extraction`` spends minutes in
+    #: provider calls with that transaction open, so the connection is *idle in
+    #: transaction* for the whole run. At the previous hardcoded 2 minutes,
+    #: Postgres killed the session partway through every non-trivial contract:
+    #: the extraction results were lost, the failure handler could not even
+    #: record why (its own write hit ``PendingRollbackError`` on the dead
+    #: session), and the job surfaced the generic "Extraction produced no
+    #: clauses, parties or dates" - which points at prompts and profiles rather
+    #: than at the database that severed the connection.
+    #:
+    #: The default is generous rather than absent so a genuinely stuck
+    #: transaction still gets reclaimed. See the note in db/session.py: the real
+    #: fix is for long provider work not to hold a transaction at all.
+    idle_in_transaction_timeout_ms: Annotated[
+        int, Field(validation_alias="DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", ge=0)
+    ] = 1_800_000
 
     @computed_field  # type: ignore[prop-decorator]
     @property

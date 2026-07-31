@@ -44,6 +44,12 @@ x-backend-env: &backend-env
   # the database is shared with another application that already owns table names
   # we also use - see DatabaseSettings.schema_name.
   DB_SCHEMA: ${DB_SCHEMA:-}
+  DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-60000}
+  # Must exceed the slowest stage. A stage runs in one transaction and
+  # ai_extraction spends minutes in provider calls, so the connection is idle
+  # *in transaction* throughout - set this too low and Postgres kills the
+  # session mid-extraction, which surfaces as "no clauses could be identified".
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: ${DB_IDLE_IN_TRANSACTION_TIMEOUT_MS:-1800000}
   REDIS_URL: redis://redis:6379/0
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
@@ -87,7 +93,27 @@ x-backend-env: &backend-env
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
   ALLOW_MOCK_AI: ${ALLOW_MOCK_AI:-false}
   # Model names used only when a real provider is selected; inert under `mock`.
+  #
+  # All three tiers must be forwarded. Compose passes only the variables named
+  # here, so a tier left out of this block silently falls back to its Pydantic
+  # default no matter what .env says - and the default is an Anthropic-native
+  # model id, which a gateway like OpenRouter rejects with
+  # `<model> is not a valid model ID`. Every simple-tier call then 400s, which is
+  # most of the pipeline.
   LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+  LLM_MODEL_SIMPLE: ${LLM_MODEL_SIMPLE:-claude-haiku-4-5}
+  LLM_MODEL_COMPLEX: ${LLM_MODEL_COMPLEX:-claude-opus-5}
+  # Empty falls back to LLM_MODEL_COMPLEX - see ModelRouter._model_for_tier.
+  LLM_MODEL_REASONING: ${LLM_MODEL_REASONING:-}
+  LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-4096}
+  # Per-tier deadlines: a simple-tier call that has not answered inside its
+  # window is not going to, and holding a worker slot for the reasoning-tier
+  # timeout starves the pool behind it.
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+  LLM_TIMEOUT_SECONDS_SIMPLE: ${LLM_TIMEOUT_SECONDS_SIMPLE:-90}
+  LLM_TIMEOUT_SECONDS_COMPLEX: ${LLM_TIMEOUT_SECONDS_COMPLEX:-300}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
+  LLM_RETRY_BACKOFF_SECONDS: ${LLM_RETRY_BACKOFF_SECONDS:-1.0}
   # `none` for models behind an OpenAI-compatible gateway that do not implement
   # the strict json_schema response format - see LLMSettings.llm_structured_output.
   LLM_STRUCTURED_OUTPUT: ${LLM_STRUCTURED_OUTPUT:-json_schema}
