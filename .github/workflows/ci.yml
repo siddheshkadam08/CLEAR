@@ -190,6 +190,25 @@ jobs:
   # ===========================================================================
   # Cross-cutting contract checks
   # ===========================================================================
+  secrets:
+    name: Secret audit
+    runs-on: ubuntu-latest
+    steps:
+      # Full history, so the scan covers what is committed rather than only the
+      # tip. A credential is compromised the moment it is pushed, not when it is
+      # merged - which is why this gates every branch and not just main.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # No dependencies: standard library only, so it runs before anything is
+      # installed and cannot be skipped by an install failure.
+      - name: No credentials in tracked files
+        run: python scripts/audit_secrets.py --verbose
+
+  # ===========================================================================
   contracts:
     name: Interface contracts
     runs-on: ubuntu-latest

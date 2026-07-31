@@ -137,9 +137,21 @@ else
   set_var S3_ACCESS_KEY_ID "cip-$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   set_var S3_SECRET_ACCESS_KEY "$(gen_secret)"
 
-  # DATABASE_URL embeds the password, so it has to be rewritten to match.
-  DB_PASS="$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
-  set_var DATABASE_URL "postgresql+asyncpg://cip:${DB_PASS}@postgres:5432/cip"
+  # DATABASE_URL is only regenerated when it targets the bundled container - in
+  # that case it embeds the password just generated above and has to match.
+  #
+  # When .env.example points at an external database it is kept, with one
+  # rewrite: this VM cannot reach the shared server's *public* address (there is
+  # no hairpin route back to a peer's public IP inside the VPC), only its private
+  # one. Blindly overwriting the URL here is how a deployment silently ends up on
+  # a throwaway container while everyone believes it is on the shared database.
+  if grep -qE '^DATABASE_URL=.*@postgres:5432/' .env; then
+    DB_PASS="$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
+    set_var DATABASE_URL "postgresql+asyncpg://cip:${DB_PASS}@postgres:5432/cip"
+  else
+    sed -i 's|@35\.154\.17\.203:|@172.15.151.102:|' .env
+    log "External DATABASE_URL kept (public address rewritten to the private one)."
+  fi
 
   # Infrastructure binds to loopback only. This host has a public IP; publishing
   # Postgres, Redis or the MinIO console on 0.0.0.0 would put them on the open
@@ -163,10 +175,20 @@ else
   # port against a container port nothing is listening on.
   set_var FRONTEND_TARGET_PORT 8080
 
-  # VITE_API_BASE_URL is deliberately left at its same-origin default (/api/v1).
-  # Pointing the SPA at http://host:8000 would make every call cross-origin and
-  # put the HttpOnly refresh cookie at the mercy of SameSite=None plus CORS
-  # credentials; through nginx it stays a first-party cookie.
+  # Forced to the same-origin path, NOT left to .env.example.
+  #
+  # This used to be a no-op on the belief that .env.example already defaulted to
+  # `/api/v1`. It does not - it ships `http://localhost:8000/api/v1`, which is
+  # correct for local development (Vite on 5173 calling the API on 8000) and
+  # catastrophic once deployed: the value is baked into the bundle at build time,
+  # so every browser then calls *its own* localhost:8000. Nothing is listening
+  # there, so every request fails and **login is impossible** - with no
+  # server-side error to show for it, because the request never arrives.
+  #
+  # Same-origin is also the correct security posture: nginx proxies /api to the
+  # backend, so the HttpOnly refresh cookie stays first-party rather than
+  # depending on SameSite=None plus CORS credentials.
+  set_var VITE_API_BASE_URL /api/v1
 
   # The bucket name doubles as the nginx location that proxies object storage, so
   # it must not collide with a route the SPA owns - `contracts` would shadow
@@ -194,6 +216,43 @@ fi
 if [[ -f docker-compose.override.yml ]]; then
   warn "Moving docker-compose.override.yml aside - it is a local-development file."
   mv docker-compose.override.yml docker-compose.override.yml.local
+fi
+
+# -----------------------------------------------------------------------------
+# Preflight: refuse to deploy a simulation
+#
+# The mock providers and the fixture parser exist so tests and offline work are
+# possible without a key, and .env.example carries them as the *local* default
+# for exactly that reason. Deployed, they are indistinguishable from the real
+# thing at a glance: the pipeline runs green, contracts reach READY, and every
+# clause, date and party in the output was synthesised rather than read from the
+# document. Nothing downstream can tell, so it has to be caught here.
+#
+# Set ALLOW_SIMULATED_AI=1 to deploy one deliberately (a UI demo with no keys).
+# -----------------------------------------------------------------------------
+env_value() { grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'; }
+
+SIMULATED=()
+[[ "$(env_value LLM_PROVIDER)"       == "mock"    ]] && SIMULATED+=("LLM_PROVIDER=mock")
+[[ "$(env_value EMBEDDING_PROVIDER)" == "mock"    ]] && SIMULATED+=("EMBEDDING_PROVIDER=mock")
+[[ "$(env_value ACTIVE_PARSER)"      == "mock"    ]] && SIMULATED+=("ACTIVE_PARSER=mock")
+[[ "$(env_value PARSER_MODE)"        == "fixture" ]] && SIMULATED+=("PARSER_MODE=fixture")
+
+if [[ ${#SIMULATED[@]} -gt 0 ]]; then
+  if [[ "${ALLOW_SIMULATED_AI:-0}" == "1" ]]; then
+    warn "Deploying with simulated AI: ${SIMULATED[*]}"
+    warn "Extractions will be SYNTHESISED, not read from the uploaded documents."
+  else
+    warn "This .env would deploy a simulation, not the product:"
+    for entry in "${SIMULATED[@]}"; do warn "    ${entry}"; done
+    warn ""
+    warn "Set the real providers in .env on this host, then re-run:"
+    warn "    LLM_PROVIDER=anthropic|openai|gemini  + the matching API key"
+    warn "    EMBEDDING_PROVIDER=nvidia|openai      + the matching API key"
+    warn "    PARSER_MODE=live                      + IDOC_BASE_URL / IDOC_API_KEY"
+    warn ""
+    die "Refusing to deploy simulated AI. Re-run with ALLOW_SIMULATED_AI=1 to override."
+  fi
 fi
 
 # -----------------------------------------------------------------------------
