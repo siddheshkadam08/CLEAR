@@ -11,6 +11,7 @@ provider-level impossibility rather than something the validator must catch.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -72,10 +73,17 @@ class OpenAIProvider(IInferenceProvider):
             else:
                 from openai import AsyncOpenAI
 
+                # `base_url` only when configured: passing None would override the
+                # SDK's own default and break plain OpenAI use.
                 self._client = AsyncOpenAI(
                     api_key=self.settings.llm.openai_api_key or None,
                     timeout=float(self.settings.llm.timeout_seconds),
                     max_retries=self.settings.llm.max_retries,
+                    **(
+                        {"base_url": self.settings.llm.openai_base_url}
+                        if self.settings.llm.openai_base_url
+                        else {}
+                    ),
                 )
         except ImportError as exc:  # pragma: no cover
             raise ProviderError(
@@ -120,20 +128,38 @@ class OpenAIProvider(IInferenceProvider):
         max_tokens: int | None = None,
         cache_prefix: bool = True,
     ) -> StructuredResult:
-        result = await self._invoke(
-            system=system,
-            prompt=prompt,
-            purpose=purpose,
-            max_tokens=max_tokens,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "extraction",
-                    "strict": True,
-                    "schema": _sanitise_schema(schema),
+        # Models behind an OpenAI-compatible gateway frequently do not implement
+        # the strict schema modes. When that is the case the schema is carried in
+        # the prompt instead and the object is recovered from the text, which
+        # `parse_json` already does for providers without enforcement.
+        if self.settings.llm.llm_structured_output == "none":
+            result = await self._invoke(
+                system=(
+                    f"{system}\n\n"
+                    "Respond with a single JSON object conforming to this schema. "
+                    "Output JSON only - no prose, no explanation, no code fence.\n"
+                    f"{json.dumps(_sanitise_schema(schema))}"
+                ),
+                prompt=prompt,
+                purpose=purpose,
+                max_tokens=max_tokens,
+                response_format=None,
+            )
+        else:
+            result = await self._invoke(
+                system=system,
+                prompt=prompt,
+                purpose=purpose,
+                max_tokens=max_tokens,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "extraction",
+                        "strict": True,
+                        "schema": _sanitise_schema(schema),
+                    },
                 },
-            },
-        )
+            )
         if result.stop_reason == "length":
             raise SchemaValidationError(
                 "The structured response was truncated before completing.",
@@ -183,7 +209,13 @@ class OpenAIProvider(IInferenceProvider):
         max_tokens: int | None,
         response_format: dict[str, Any] | None,
     ) -> InferenceResult:
+        from app.ai.resilience import call_with_retries, record_payload_sizes
+        from app.ai.routing import get_router
+
         client = self._get_client()
+        choice_spec = get_router().resolve(purpose)
+        # Azure addresses a deployment rather than a model name; the router's
+        # tier decision still applies to timeout and effort.
         model = self._model_for(purpose)
         started = time.perf_counter()
 
@@ -198,8 +230,21 @@ class OpenAIProvider(IInferenceProvider):
         if response_format is not None:
             request["response_format"] = response_format
 
+        async def _attempt() -> Any:
+            return await client.chat.completions.create(**request)
+
         try:
-            response = await client.chat.completions.create(**request)
+            # Per-tier deadline: an extraction that has not answered inside the
+            # simple-tier window is not going to, and holding a worker slot for
+            # the reasoning-tier timeout starves the pool.
+            response, _outcome = await call_with_retries(
+                _attempt,
+                provider=self.name,
+                tier=choice_spec.tier.value,
+                model=model,
+                task=choice_spec.task.value,
+                attempt_timeout=choice_spec.timeout_seconds,
+            )
         except Exception as exc:
             metrics.llm_requests_total.labels(
                 provider=self.name, model=model, outcome="error"
@@ -207,6 +252,13 @@ class OpenAIProvider(IInferenceProvider):
             raise _translate_openai_error(exc, self.name) from exc
 
         latency_ms = int((time.perf_counter() - started) * 1000)
+        record_payload_sizes(
+            tier=choice_spec.tier.value,
+            prompt_chars=len(system) + len(prompt),
+            completion_chars=len(
+                (response.choices[0].message.content or "") if response.choices else ""
+            ),
+        )
         choice = response.choices[0] if response.choices else None
         text = (choice.message.content if choice and choice.message else "") or ""
         finish_reason = getattr(choice, "finish_reason", None) if choice else None

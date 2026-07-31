@@ -273,24 +273,32 @@ class IInferenceProvider(ABC):
         }
 
     # ------------------------------------------------------------------ routing
+    #
+    # Delegated to `app.ai.routing`, which owns the task -> tier table. These stay
+    # as the public surface because every provider and several services call them;
+    # what changed is that they no longer fall through to `settings.llm.model` for
+    # anything unlisted. `extraction`, `classification` and `summary` - the three
+    # highest-volume workloads - previously inherited that default, so pointing it
+    # at a reasoning model silently made the whole pipeline slow.
     @staticmethod
-    def route_model(purpose: Purpose) -> str:
-        """Pick the model for a purpose (§17 cost optimisation)."""
-        settings = get_settings()
-        if purpose in _COMPLEX_PURPOSES:
-            return settings.llm.model_complex
-        if purpose in _SIMPLE_PURPOSES:
-            return settings.llm.model_simple
-        return settings.llm.model
+    def route_model(purpose: Purpose | str) -> str:
+        """The model for a task or legacy purpose."""
+        from app.ai.routing import get_router
+
+        return get_router().resolve(purpose).model
 
     @staticmethod
-    def route_effort(purpose: Purpose) -> str:
-        settings = get_settings()
-        if purpose in _COMPLEX_PURPOSES:
-            return settings.llm.effort_complex
-        if purpose in _SIMPLE_PURPOSES:
-            return settings.llm.effort_simple
-        return settings.llm.effort
+    def route_effort(purpose: Purpose | str) -> str:
+        from app.ai.routing import get_router
+
+        return get_router().resolve(purpose).effort
+
+    @staticmethod
+    def route_timeout(purpose: Purpose | str) -> float:
+        """Per-tier request timeout, in seconds."""
+        from app.ai.routing import get_router
+
+        return get_router().resolve(purpose).timeout_seconds
 
     # -------------------------------------------------------------- JSON parsing
     @staticmethod
