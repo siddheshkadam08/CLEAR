@@ -50,14 +50,18 @@ async def _call(provider: Any) -> StructuredResult:
 
 
 @pytest.mark.asyncio
-async def test_calls_are_capped_rather_than_using_the_full_budget() -> None:
-    """A reasoning model spends whatever budget it is given, and the answers
-    here are a few hundred tokens."""
+async def test_no_cap_is_applied_by_default() -> None:
+    """Capping was measured and abandoned - see DEFAULT_MAX_TOKENS.
+
+    glm-4.7 spends the budget on thinking, so a 4000-token cap truncated three
+    of fourteen calls and tripled the wall clock.
+    """
     provider = RecordingProvider()
 
     await _call(provider)
 
-    assert provider.budgets == [DEFAULT_MAX_TOKENS]
+    assert provider.budgets == [None]
+    assert DEFAULT_MAX_TOKENS is None
 
 
 @pytest.mark.asyncio
@@ -68,12 +72,19 @@ async def test_truncation_is_retried_once_with_headroom() -> None:
         fail_first_with=SchemaValidationError(TRUNCATED, stage="ai_extraction")
     )
 
-    result = await _call(provider)
+    result = await call_structured(
+        provider,
+        system="s",
+        prompt="p",
+        schema=SCHEMA,
+        task=LLMTask.CLAUSE_EXTRACTION,
+        max_tokens=1000,
+    )
 
     assert result.data == {"ok": True}
     assert len(provider.budgets) == 2
-    assert provider.budgets[0] == DEFAULT_MAX_TOKENS
-    assert provider.budgets[1] > DEFAULT_MAX_TOKENS
+    assert provider.budgets[0] == 1000
+    assert provider.budgets[1] > 1000
 
 
 @pytest.mark.asyncio
@@ -90,6 +101,26 @@ async def test_unparsable_json_is_not_retried_here() -> None:
     )
 
     with pytest.raises(SchemaValidationError, match="not valid JSON"):
+        await call_structured(
+            provider,
+            system="s",
+            prompt="p",
+            schema=SCHEMA,
+            task=LLMTask.CLAUSE_EXTRACTION,
+            max_tokens=1000,
+        )
+
+    assert len(provider.budgets) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_truncation_does_not_retry() -> None:
+    """With no cap there is no larger budget to retry with."""
+    provider = RecordingProvider(
+        fail_first_with=SchemaValidationError(TRUNCATED, stage="ai_extraction")
+    )
+
+    with pytest.raises(SchemaValidationError, match="truncated"):
         await _call(provider)
 
     assert len(provider.budgets) == 1

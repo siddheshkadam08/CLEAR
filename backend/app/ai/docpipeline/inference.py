@@ -27,10 +27,18 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: Output budget for this pipeline's calls. Comfortably above the largest real
-#: answer (a chunk search naming ten clauses with their refs) and far below the
-#: 16000 the provider would otherwise allow a reasoning model to spend.
-DEFAULT_MAX_TOKENS = 4000
+#: Output budget for this pipeline's calls. ``None`` means the provider default.
+#:
+#: Capping this was tried and abandoned, and the measurement is worth keeping
+#: because the idea is an obvious one to have again. The answers really are a few
+#: hundred tokens, so 4000 looked generous. It was not: glm-4.7's *thinking*
+#: counts against the same budget, three of fourteen calls hit the ceiling and
+#: had to be re-issued at the full budget, and the run went from 251s to 759s -
+#: three times slower for the change that was supposed to make it faster.
+#:
+#: The retry below is kept, and so is the parameter. A model that answers within
+#: a cap would benefit, and the machinery to find out is one constant away.
+DEFAULT_MAX_TOKENS: int | None = None
 
 
 async def call_structured(
@@ -40,7 +48,7 @@ async def call_structured(
     prompt: str,
     schema: dict[str, Any],
     task: LLMTask,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
+    max_tokens: int | None = DEFAULT_MAX_TOKENS,
 ) -> StructuredResult:
     """Call ``generate_structured`` on a budget, retrying once with headroom.
 
@@ -64,7 +72,9 @@ async def call_structured(
             raise
 
         headroom = get_settings().llm.max_output_tokens
-        if headroom <= max_tokens:
+        if max_tokens is None or headroom <= max_tokens:
+            # No cap was applied, so there is no larger budget to retry with -
+            # the answer genuinely does not fit.
             raise
 
         logger.warning(
