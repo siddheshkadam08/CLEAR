@@ -24,12 +24,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.cdm.models import CanonicalDocument
+from app.core import metrics
 from app.core.enums import AgreementType
 from app.core.logging import get_logger
 from app.core.versions import (
@@ -54,6 +56,67 @@ _DEFAULT_MIN_SCORE = 0.40
 #: parties and recitals - the parts that identify a contract type.
 _LLM_SAMPLE_CHARS = 6000
 
+#: Operator-facing text per reason. These reach the UI as review notes, so each one
+#: says what to *do*, not only what happened.
+_FALLBACK_EXPLANATIONS: dict[str, str] = {
+    "low_score": "No document type matched with sufficient confidence.",
+    "ambiguous": "The top two document types scored too closely to separate.",
+    "llm_unavailable": (
+        "The document was ambiguous and the tie-break model could not be reached, "
+        "so the type was not determined. This is a provider fault, not a property "
+        "of the document - reprocessing may classify it correctly."
+    ),
+    "llm_invalid_response": (
+        "The document was ambiguous and the tie-break model returned a document "
+        "type that is not configured, so its answer was discarded."
+    ),
+    "llm_disabled": (
+        "Rule scoring was inconclusive and the tie-break model was disabled for this run."
+    ),
+    "forced_profile_missing": (
+        "The uploader pinned a document profile that is not configured. The "
+        "document was NOT processed with the requested profile."
+    ),
+    "no_rules_configured": (
+        "No document profile declares any classification hints, so nothing can "
+        "score above zero. This is a configuration fault - seed or configure the "
+        "profiles' classification_hints."
+    ),
+    "none": "Classified without a fallback.",
+}
+
+
+#: How many candidates ``top_predictions`` reports. Enough to see the runner-up
+#: and why it lost, without dumping every profile in the system.
+_TOP_PREDICTIONS = 5
+
+
+class FallbackReason(StrEnum):
+    """Why the default profile was applied.
+
+    A named reason rather than a prose string: the fallback used to report "no
+    document type matched with sufficient confidence" no matter what actually
+    happened, so a provider outage during the tie-break was indistinguishable
+    from a genuinely ambiguous document. The two need completely different
+    responses - one is retried, the other is reviewed.
+    """
+
+    NONE = "none"
+    #: Nothing scored above its own threshold.
+    LOW_SCORE = "low_score"
+    #: Top two candidates too close to separate.
+    AMBIGUOUS = "ambiguous"
+    #: The tie-break model was unreachable or errored.
+    LLM_UNAVAILABLE = "llm_unavailable"
+    #: The model answered with a profile key that does not exist.
+    LLM_INVALID_RESPONSE = "llm_invalid_response"
+    #: The tie-break was disabled by the caller.
+    LLM_DISABLED = "llm_disabled"
+    #: The uploader pinned a profile key that is not configured.
+    FORCED_PROFILE_MISSING = "forced_profile_missing"
+    #: No profile declares any classification hints - nothing can ever score.
+    NO_RULES_CONFIGURED = "no_rules_configured"
+
 
 @dataclass(slots=True)
 class ClassificationSignal:
@@ -68,6 +131,10 @@ class ClassificationSignal:
     heading_score: float = 0.0
     matched: list[str] = field(default_factory=list)
     blocked_by: list[str] = field(default_factory=list)
+    #: The literal phrases found in the document, without the rule prefix.
+    matched_keywords: list[str] = field(default_factory=list)
+    #: Which rule families contributed: title / required_phrases / heading_patterns.
+    matched_rules: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +145,8 @@ class ClassificationSignal:
             "phrases": round(self.phrase_score, 4),
             "headings": round(self.heading_score, 4),
             "matched": self.matched[:12],
+            "matched_keywords": self.matched_keywords[:12],
+            "matched_rules": self.matched_rules,
             "blocked_by": self.blocked_by,
         }
 
@@ -97,7 +166,54 @@ class ClassificationResult:
     language: str | None = None
     #: True when the profile is the configured default rather than a real match.
     is_fallback: bool = False
+    #: *Why* the fallback was used. Never NONE when ``is_fallback`` is true.
+    fallback_reason: FallbackReason = FallbackReason.NONE
     notes: list[str] = field(default_factory=list)
+
+    # ------------------------------------------------------------------ views
+    @property
+    def classification(self) -> str:
+        """The decision itself: the profile key that will process the document."""
+        return self.profile.key
+
+    @property
+    def fallback_used(self) -> bool:
+        return self.is_fallback
+
+    @property
+    def top_predictions(self) -> list[dict[str, Any]]:
+        """The ranked candidates, best first.
+
+        Reported even on a confident match. When a classification is wrong, the
+        question is always "what was the runner-up and why did it lose", and that
+        is unanswerable after the fact unless it was recorded at the time.
+        """
+        return [
+            {
+                "profile_key": signal.profile_key,
+                "contract_type": signal.contract_type,
+                "score": round(signal.score, 4),
+                "matched_rules": signal.matched_rules,
+                "matched_keywords": signal.matched_keywords[:8],
+                "blocked_by": signal.blocked_by,
+            }
+            for signal in self.signals[:_TOP_PREDICTIONS]
+        ]
+
+    @property
+    def matched_keywords(self) -> list[str]:
+        """Phrases that fired for the *winning* profile."""
+        winner = self._winning_signal()
+        return list(winner.matched_keywords) if winner else []
+
+    @property
+    def matched_rules(self) -> list[str]:
+        """Rule families that fired for the winning profile."""
+        winner = self._winning_signal()
+        return list(winner.matched_rules) if winner else []
+
+    def _winning_signal(self) -> ClassificationSignal | None:
+        return next((s for s in self.signals if s.profile_key == self.profile.key), None)
 
     def as_artifact(self) -> dict[str, Any]:
         return {
@@ -107,7 +223,15 @@ class ClassificationResult:
             "profile_name": self.profile.name,
             "agreement_type": self.agreement_type,
             "agreement_subtype": self.agreement_subtype,
+            # The brief's contract, alongside the original keys so existing
+            # readers of this artifact keep working.
+            "classification": self.classification,
             "confidence": round(self.confidence, 4),
+            "top_predictions": self.top_predictions,
+            "matched_keywords": self.matched_keywords,
+            "matched_rules": self.matched_rules,
+            "fallback_used": self.fallback_used,
+            "fallback_reason": self.fallback_reason.value,
             "method": self.method,
             "is_fallback": self.is_fallback,
             "detected_title": self.detected_title,
@@ -203,25 +327,54 @@ class DocumentClassifier:
                 language=language,
             )
 
+        # Why the rules did not decide. Established *before* the tie-break so it is
+        # not overwritten by whatever happens there.
+        rule_reason = (
+            FallbackReason.AMBIGUOUS if self._is_close_call(signals) else FallbackReason.LOW_SCORE
+        )
+        if not any(p.classification_hints for p in profiles):
+            # Nothing can ever score above zero. Distinct from "this document is
+            # ambiguous" - it is a configuration fault, and reporting it as low
+            # confidence sends an operator to review documents instead of profiles.
+            rule_reason = FallbackReason.NO_RULES_CONFIGURED
+
         # Inconclusive: either nothing scored well, or the top two are too close to
         # separate. Both are cases where an LLM's judgement is worth its cost.
+        reason = rule_reason
         if use_llm_tiebreak:
-            resolved = await self._llm_tiebreak(document, profiles, signals, title)
+            resolved, reason = await self._llm_tiebreak(document, profiles, signals, title)
             if resolved is not None:
                 return resolved
+            # A tie-break that failed for an infrastructure reason must not be
+            # reported as an ambiguous document.
+            if reason is FallbackReason.NONE:
+                reason = rule_reason
+        elif rule_reason is not FallbackReason.NO_RULES_CONFIGURED:
+            # A misconfiguration outranks "the tie-break was off" - the latter is a
+            # choice, the former is broken setup.
+            reason = FallbackReason.LLM_DISABLED
+
+        if forced_profile_key:
+            # The uploader named a profile that does not exist. Silently classifying
+            # by rules instead means a batch pinned to the wrong key processes with
+            # the wrong mandatory clauses and nobody is told.
+            reason = FallbackReason.FORCED_PROFILE_MISSING
 
         fallback = self._fallback_profile(profiles)
-        reason = (
-            "The top two document types scored too closely to separate."
-            if self._is_close_call(signals)
-            else "No document type matched with sufficient confidence."
-        )
-        logger.info(
+        explanation = _FALLBACK_EXPLANATIONS[reason]
+        # Warning, not info: every fallback is a document processed with a profile
+        # nobody chose. At info level this scrolled past unnoticed while every
+        # affected contract got the default clause set.
+        logger.warning(
             "classification_fallback",
             profile_key=fallback.key,
             best_score=round(best.score, 3) if best else 0.0,
-            reason=reason,
+            best_candidate=best.profile_key if best else None,
+            fallback_reason=reason.value,
+            candidates=len(signals),
         )
+        metrics.classification_fallback_total.labels(reason=reason.value).inc()
+
         return ClassificationResult(
             profile=fallback,
             agreement_type=fallback.contract_type,
@@ -234,7 +387,8 @@ class DocumentClassifier:
             detected_title=title,
             language=language,
             is_fallback=True,
-            notes=[reason, f"Applied the default profile '{fallback.key}'."],
+            fallback_reason=reason,
+            notes=[explanation, f"Applied the default profile '{fallback.key}'."],
         )
 
     # =========================================================================
@@ -346,6 +500,11 @@ class DocumentClassifier:
 
         matched: list[str] = []
         blocked: list[str] = []
+        # Kept apart from `matched`: the prefixed strings are for a human reading a
+        # log line, while these two answer "which words did this?" and "which rule
+        # family did this?" - the questions asked when tuning a profile's hints.
+        keywords: list[str] = []
+        rules: list[str] = []
 
         # --- negative phrases: a hard veto -----------------------------------
         for phrase in negative:
@@ -358,6 +517,7 @@ class DocumentClassifier:
                 contract_type=profile.contract_type,
                 score=0.0,
                 blocked_by=blocked,
+                matched_rules=["negative_phrases"],
             )
 
         # --- title ------------------------------------------------------------
@@ -366,12 +526,16 @@ class DocumentClassifier:
             if pattern in title_text:
                 title_score = 1.0
                 matched.append(f"title:{pattern}")
+                keywords.append(pattern)
+                rules.append("title_patterns")
                 break
             if pattern in headings:
                 # A heading match is weaker than a filename/title match but still
                 # strong - contracts usually name themselves in their first heading.
                 title_score = max(title_score, 0.7)
                 matched.append(f"heading-title:{pattern}")
+                keywords.append(pattern)
+                rules.append("title_patterns:heading")
 
         # --- required phrases --------------------------------------------------
         phrase_hits = 0
@@ -379,13 +543,19 @@ class DocumentClassifier:
             if phrase in head_text or phrase in headings:
                 phrase_hits += 1
                 matched.append(f"phrase:{phrase}")
+                keywords.append(phrase)
         phrase_score = (phrase_hits / len(required)) if required else 0.0
+        if phrase_hits:
+            rules.append("required_phrases")
 
         # --- structural headings ------------------------------------------------
-        heading_hits = sum(1 for pattern in heading_patterns if pattern in headings)
+        matched_headings = [pattern for pattern in heading_patterns if pattern in headings]
+        heading_hits = len(matched_headings)
         heading_score = (heading_hits / len(heading_patterns)) if heading_patterns else 0.0
         if heading_hits:
             matched.append(f"headings:{heading_hits}/{len(heading_patterns)}")
+            keywords.extend(matched_headings)
+            rules.append("heading_patterns")
 
         # Renormalise across whichever signals this profile actually declares, so a
         # profile that only specifies a title pattern is not penalised for it.
@@ -412,6 +582,8 @@ class DocumentClassifier:
             phrase_score=phrase_score,
             heading_score=heading_score,
             matched=matched,
+            matched_keywords=keywords,
+            matched_rules=rules,
         )
 
     # =========================================================================
@@ -477,11 +649,15 @@ class DocumentClassifier:
         profiles: list[DocumentProfile],
         signals: list[ClassificationSignal],
         title: str | None,
-    ) -> ClassificationResult | None:
+    ) -> tuple[ClassificationResult | None, FallbackReason]:
         """Ask the model to choose when rules cannot.
 
         Constrained to the configured profile keys and required to return structured
         output, so it selects among real options rather than inventing a type.
+
+        Returns the reason alongside the result because the caller cannot otherwise
+        tell a failed call from an ambiguous document - and those need different
+        responses. A provider outage is retried; an ambiguous contract is reviewed.
         """
         from app.ai.rag.providers import get_inference_provider
         from app.core.errors import ProviderError
@@ -528,17 +704,21 @@ class DocumentClassifier:
             )
         except ProviderError as exc:
             logger.warning("classification_llm_unavailable", error=str(exc))
-            return None
+            return None, FallbackReason.LLM_UNAVAILABLE
         except Exception as exc:  # noqa: BLE001 - never fail the pipeline on a tie-break
             logger.warning("classification_llm_failed", error=str(exc))
-            return None
+            return None, FallbackReason.LLM_UNAVAILABLE
 
         response = structured.data
         key = str(response.get("profile_key", ""))
         profile = next((p for p in profiles if p.key == key), None)
         if profile is None:
-            logger.warning("classification_llm_unknown_key", key=key)
-            return None
+            logger.warning(
+                "classification_llm_unknown_key",
+                key=key,
+                configured=[p.key for p in profiles],
+            )
+            return None, FallbackReason.LLM_INVALID_RESPONSE
 
         confidence = float(response.get("confidence", 0.5))
         logger.info(
@@ -550,19 +730,22 @@ class DocumentClassifier:
             cost_usd=structured.cost_usd,
         )
 
-        return ClassificationResult(
-            profile=profile,
-            agreement_type=profile.contract_type,
-            agreement_subtype=profile.contract_subtype,
-            confidence=min(max(confidence, 0.0), 0.95),
-            method="llm",
-            signals=signals,
-            detected_title=title,
-            language=document.metadata.language,
-            notes=[
-                "Rule scoring was inconclusive; resolved by model.",
-                str(response.get("reason", ""))[:400],
-            ],
+        return (
+            ClassificationResult(
+                profile=profile,
+                agreement_type=profile.contract_type,
+                agreement_subtype=profile.contract_subtype,
+                confidence=min(max(confidence, 0.0), 0.95),
+                method="llm",
+                signals=signals,
+                detected_title=title,
+                language=document.metadata.language,
+                notes=[
+                    "Rule scoring was inconclusive; resolved by model.",
+                    str(response.get("reason", ""))[:400],
+                ],
+            ),
+            FallbackReason.NONE,
         )
 
 
@@ -587,6 +770,7 @@ __all__ = [
     "ClassificationResult",
     "ClassificationSignal",
     "DocumentClassifier",
+    "FallbackReason",
     "agreement_type_or_other",
     "confidence_to_decimal",
 ]
