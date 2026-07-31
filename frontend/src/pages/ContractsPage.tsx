@@ -290,7 +290,6 @@ export function ContractsPage() {
                   <tr>
                     <th className="px-5 py-3 font-semibold">Contract</th>
                     <th className="px-5 py-3 font-semibold">Type</th>
-                    <th className="px-5 py-3 font-semibold">Parties</th>
                     <th className="px-5 py-3 font-semibold">Status</th>
                     <th className="px-5 py-3 font-semibold">Risk</th>
                     <th className="px-5 py-3 text-right font-semibold">Value</th>
@@ -461,11 +460,7 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
           </div>
         ) : null}
       </td>
-      <td className="px-5 py-3 text-slate-600">{humanise(contract.agreement_type)}</td>
-      <td className="max-w-[12rem] px-5 py-3">
-        <p className="truncate text-slate-700">{contract.party_a ?? '—'}</p>
-        <p className="truncate text-xs text-slate-500">{contract.party_b ?? '—'}</p>
-      </td>
+      <td className="px-5 py-3 text-slate-600 uppercase">{humanise(contract.agreement_type)}</td>
       <td className="px-5 py-3">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge

@@ -5,14 +5,18 @@
  * as sloppiness in a product whose whole claim is precision.
  */
 
-import { differenceInDays, format, parseISO } from 'date-fns';
+import { differenceInDays, format, fromUnixTime, parseISO } from 'date-fns';
 
-export function formatDate(value?: string | null): string {
-  if (!value) return '—';
+export function formatDate(value?: string | number | null): string {
+  if (value === null || value === undefined || value === '') return '—';
   try {
-    return format(parseISO(value), 'd MMM yyyy');
+    const num = Number(value);
+    const date = Number.isFinite(num) && String(value).match(/^\d+$/)
+      ? fromUnixTime(num)
+      : parseISO(String(value));
+    return format(date, 'dd-MM-yyyy');
   } catch {
-    return value;
+    return String(value);
   }
 }
 
@@ -25,10 +29,25 @@ export function formatDateTime(value?: string | null): string {
   }
 }
 
-export function daysUntil(value?: string | null): number | null {
-  if (!value) return null;
+export function formatDateTimeFull(value?: string | number | null): string {
+  if (value === null || value === undefined || value === '') return '—';
   try {
-    return differenceInDays(parseISO(value), new Date());
+    const num = Number(value);
+    const date = Number.isFinite(num) ? fromUnixTime(num) : parseISO(String(value));
+    return format(date, 'dd-MM-yyyy hh:mm:ss a');
+  } catch {
+    return String(value);
+  }
+}
+
+export function daysUntil(value?: string | number | null): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  try {
+    const num = Number(value);
+    const date = Number.isFinite(num) && String(value).match(/^\d+$/)
+      ? fromUnixTime(num)
+      : parseISO(String(value));
+    return differenceInDays(date, new Date());
   } catch {
     return null;
   }

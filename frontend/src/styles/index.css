@@ -26,10 +26,13 @@
   }
 
   body {
-    @apply min-h-screen bg-slate-50 text-slate-900 antialiased;
-    background:
-      radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 24%),
-      linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
+    @apply min-h-screen text-[#0F172A] antialiased;
+    background: #F7F8FA;
+    font-family: 'Inter', sans-serif;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: 'Manrope', sans-serif;
   }
 
   #root {

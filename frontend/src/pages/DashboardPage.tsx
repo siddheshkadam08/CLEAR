@@ -22,6 +22,8 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -56,6 +58,8 @@ const RISK_FILLS: Record<string, string> = {
   medium: '#f59e0b',
   low: '#10b981',
 };
+
+const PIE_COLORS = ['#2563EB', '#10B981', '#D97706', '#94A0B4', '#8B5CF6', '#F43F5E', '#06B6D4', '#F59E0B'];
 
 const KPI_ICONS = [FileText, CalendarClock, ShieldAlert, AlertTriangle, BarChart3];
 
@@ -152,7 +156,7 @@ export function DashboardPage() {
           </div>
 
           <div className="grid gap-4 xl:grid-cols-2">
-            <Card>
+            {/* <Card>
               <SectionHeader
                 title="Risk distribution"
                 subtitle="How the repository scores overall."
@@ -200,11 +204,11 @@ export function DashboardPage() {
                   </ResponsiveContainer>
                 </div>
               ) : (
-                <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                <p className="rounded-lg border border-dashed border-[#E4E7EC] px-4 py-10 text-center text-[13px] text-[#5B6478]">
                   Nothing scored yet. Risk appears once extraction finishes.
                 </p>
               )}
-            </Card>
+            </Card> */}
 
             <Card>
               <SectionHeader
@@ -213,26 +217,55 @@ export function DashboardPage() {
                 icon={FileText}
               />
               {data.agreement_type_distribution.length ? (
-                <ul className="space-y-3">
-                  {data.agreement_type_distribution.slice(0, 8).map((bucket) => (
-                    <li key={bucket.label} className="flex items-center gap-3">
-                      <span className="w-32 shrink-0 truncate text-sm text-slate-700 sm:w-44">
-                        {humanise(bucket.label)}
-                      </span>
-                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
-                        <div
-                          className="h-full rounded-full bg-blue-600"
-                          style={{ width: `${Math.max(bucket.percentage, 2)}%` }}
+                <div className="flex items-center gap-6">
+                  <div className="h-[180px] w-[180px] shrink-0">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={data.agreement_type_distribution.slice(0, 8)}
+                          dataKey="value"
+                          nameKey="label"
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={42}
+                          outerRadius={80}
+                          strokeWidth={0}
+                          paddingAngle={2}
+                        >
+                          {data.agreement_type_distribution.slice(0, 8).map((bucket, i) => (
+                            <Cell key={bucket.label} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          contentStyle={{
+                            background: '#fff',
+                            border: '1px solid #E4E7EC',
+                            borderRadius: 8,
+                            fontSize: 12,
+                          }}
+                          formatter={(val) => [String(val), 'Contracts']}
+                          labelFormatter={(label) => humanise(String(label))}
                         />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    {data.agreement_type_distribution.slice(0, 6).map((bucket, i) => (
+                      <div key={bucket.label} className="flex items-center justify-between border-b border-[#E4E7EC] py-[5px] text-[12.5px] last:border-b-0">
+                        <span className="flex items-center gap-2 truncate text-[#0F172A]">
+                          <span
+                            className="inline-block h-2 w-2 shrink-0 rounded-full"
+                            style={{ background: PIE_COLORS[i % PIE_COLORS.length] }}
+                          />
+                          <span className="truncate">{humanise(bucket.label.toLocaleUpperCase())}</span>
+                        </span>
+                        <span className="ml-2 shrink-0 text-[#5B6478]">{bucket.percentage}%</span>
                       </div>
-                      <span className="w-8 shrink-0 text-right text-xs tabular-nums text-slate-500">
-                        {bucket.value}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                    ))}
+                  </div>
+                </div>
               ) : (
-                <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                <p className="rounded-lg border border-dashed border-[#E4E7EC] px-4 py-10 text-center text-[13px] text-[#5B6478]">
                   No agreements classified yet.
                 </p>
               )}
@@ -240,31 +273,31 @@ export function DashboardPage() {
           </div>
 
           <div className="grid gap-4 xl:grid-cols-2">
-            <Card className="overflow-hidden">
+            {/* <Card className="overflow-hidden">
               <SectionHeader
                 title="Expiring soon"
                 subtitle="The next 90 days."
                 icon={CalendarClock}
               />
               {data.expiring_soon.length ? (
-                <ul className="divide-y divide-slate-100">
+                <ul className="divide-y divide-[#E4E7EC]">
                   {data.expiring_soon.slice(0, 8).map((row) => (
                     <li key={row.contract_id}>
                       <button
                         type="button"
                         onClick={() => navigate(`/contracts/${row.contract_id}`)}
-                        className="flex w-full items-center justify-between gap-3 py-3 text-left transition hover:bg-slate-50"
+                        className="flex w-full items-center justify-between gap-3 py-2.5 text-left transition hover:bg-[#F7F8FA]"
                       >
                         <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-slate-900">
-                            {row.title ?? 'Untitled'}
-                          </p>
-                          <p className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                            <span>{formatDate(row.expiration_date)}</span>
+                            <p className="truncate text-[13px] font-semibold text-[#0F172A]">
+                              {row.title ?? 'Untitled'}
+                            </p>
+                            <p className="mt-0.5 flex flex-wrap items-center gap-2 text-[11.5px] text-[#94A0B4]">
+                            <span>{formatDate(row.expiration_date)}</span> */}
                             {/* Auto-renewal is called out because the notice deadline
                                 falls *before* the expiry date - by the time the expiry
                                 looks close, the window may already have closed. */}
-                            {row.auto_renewal ? (
+                            {/* {row.auto_renewal ? (
                               <Badge text="Auto-renews" variant="warning" />
                             ) : null}
                           </p>
@@ -282,33 +315,33 @@ export function DashboardPage() {
                   ))}
                 </ul>
               ) : (
-                <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                <p className="rounded-lg border border-dashed border-[#E4E7EC] px-4 py-10 text-center text-[13px] text-[#5B6478]">
                   Nothing expiring in the next 90 days.
                 </p>
               )}
-            </Card>
+            </Card> */}
 
-            <Card className="overflow-hidden">
+            {/* <Card className="overflow-hidden">
               <SectionHeader
                 title="Highest risk"
                 subtitle="Where to look first."
                 icon={ShieldAlert}
               />
               {data.top_risks.length ? (
-                <ul className="divide-y divide-slate-100">
+                <ul className="divide-y divide-[#E4E7EC]">
                   {data.top_risks.slice(0, 8).map((row) => (
                     <li key={row.contract_id}>
                       <button
                         type="button"
                         onClick={() => navigate(`/contracts/${row.contract_id}`)}
-                        className="flex w-full items-center justify-between gap-3 py-3 text-left transition hover:bg-slate-50"
+                        className="flex w-full items-center justify-between gap-3 py-2.5 text-left transition hover:bg-[#F7F8FA]"
                       >
-                        <p className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">
+                        <p className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[#0F172A]">
                           {row.title ?? 'Untitled'}
                         </p>
                         <div className="flex shrink-0 items-center gap-2">
                           {row.risk_score !== null && row.risk_score !== undefined ? (
-                            <span className="text-xs tabular-nums text-slate-500">
+                            <span className="text-[11.5px] tabular-nums text-[#94A0B4]">
                               {Math.round(row.risk_score)}
                             </span>
                           ) : null}
@@ -322,11 +355,11 @@ export function DashboardPage() {
                   ))}
                 </ul>
               ) : (
-                <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">
+                <p className="rounded-lg border border-dashed border-[#E4E7EC] px-4 py-10 text-center text-[13px] text-[#5B6478]">
                   No risks identified yet.
                 </p>
               )}
-            </Card>
+            </Card> */}
           </div>
         </>
       )}
@@ -336,7 +369,7 @@ export function DashboardPage() {
   );
 }
 
-/** Local tile so the value can be a node (number plus unit) rather than a string. */
+/** Local tile matching the CLEAR stat-card style (big Manrope number, muted label, small accent icon). */
 function MetricTile({
   label,
   value,
@@ -353,11 +386,11 @@ function MetricTile({
   const body = (
     <div className="flex items-start justify-between gap-3">
       <div className="min-w-0">
-        <p className="truncate text-sm font-medium text-slate-500">{label}</p>
-        <p className="mt-3 text-2xl font-semibold text-slate-900 sm:text-3xl">{value}</p>
+        <p className="text-[12.5px] text-[#5B6478]">{label}</p>
+        <p className="mt-2 text-[26px] font-semibold leading-tight text-[#0F172A]">{value}</p>
       </div>
-      <div className={['shrink-0 rounded-2xl p-3', accent].join(' ')}>
-        <Icon className="h-5 w-5 sm:h-6 sm:w-6" />
+      <div className={['shrink-0 rounded-lg p-2', accent].join(' ')}>
+        <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
       </div>
     </div>
   );
@@ -367,14 +400,14 @@ function MetricTile({
       <button
         type="button"
         onClick={onClick}
-        className="rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:border-blue-200 hover:shadow-md sm:p-6"
+        className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] text-left shadow-sm transition hover:border-blue-200 hover:shadow-md"
       >
         {body}
       </button>
     );
   }
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+    <div className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm">
       {body}
     </div>
   );

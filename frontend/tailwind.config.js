@@ -2,6 +2,11 @@ export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ["'Inter'", 'sans-serif'],
+        display: ["'Manrope'", 'sans-serif'],
+        mono: ["'IBM Plex Mono'", 'monospace'],
+      },
       colors: {
         brand: {
           50: '#f2f7ff',

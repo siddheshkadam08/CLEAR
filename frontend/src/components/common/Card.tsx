@@ -19,8 +19,8 @@ export const Card = ({
 }) => (
   <div
     className={[
-      'rounded-2xl border border-slate-200 bg-white shadow-sm',
-      dense ? 'p-5' : 'p-6',
+      'rounded-xl border border-[#E4E7EC] bg-white shadow-sm',
+      dense ? 'p-4' : 'p-[18px]',
       className,
     ].join(' ')}
   >
@@ -39,17 +39,13 @@ export const SectionHeader = ({
   icon?: LucideIcon;
   action?: ReactNode;
 }) => (
-  <div className="mb-6 flex items-start justify-between gap-4">
-    <div className="flex items-center gap-3">
-      {Icon ? (
-        <div className="rounded-xl bg-blue-50 p-2 text-blue-600">
-          <Icon className="h-5 w-5" />
-        </div>
-      ) : null}
-      <div>
-        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
-        <p className="text-sm text-slate-500">{subtitle}</p>
+  <div className="mb-4 flex items-start justify-between gap-3">
+    <div>
+      <div className="flex items-center gap-2">
+        {Icon ? <Icon className="h-4 w-4 shrink-0 text-[#94A0B4]" /> : null}
+        <h3 className="text-sm font-semibold text-[#0F172A]">{title}</h3>
       </div>
+      {subtitle ? <p className="mt-0.5 text-xs text-[#5B6478]">{subtitle}</p> : null}
     </div>
     {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
   </div>
@@ -64,10 +60,10 @@ export const PageHeader = ({
   subtitle: string;
   actions?: ReactNode;
 }) => (
-  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
     <div>
-      <h1 className="text-xl font-semibold text-slate-900">{title}</h1>
-      <p className="text-sm text-slate-500">{subtitle}</p>
+      <h1 className="text-[21px] font-semibold text-[#0F172A]">{title}</h1>
+      <p className="mt-0.5 text-[13px] text-[#5B6478]">{subtitle}</p>
     </div>
     {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
   </div>
@@ -88,13 +84,13 @@ export const MetricCard = ({
   onClick?: () => void;
 }) => {
   const body = (
-    <div className="flex items-start justify-between">
-      <div>
-        <p className="text-sm font-medium text-slate-500">{label}</p>
-        <p className="mt-4 text-3xl font-semibold text-slate-900">{value}</p>
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-[12.5px] text-[#5B6478]">{label}</p>
+        <p className="mt-2 text-[26px] font-semibold leading-tight text-[#0F172A]">{value}</p>
       </div>
-      <div className={['rounded-2xl p-3', accent].join(' ')}>
-        <Icon className="h-6 w-6" />
+      <div className={['shrink-0 rounded-lg p-2', accent].join(' ')}>
+        <Icon className="h-4 w-4" />
       </div>
     </div>
   );
@@ -104,14 +100,14 @@ export const MetricCard = ({
       <button
         type="button"
         onClick={onClick}
-        className="rounded-2xl border border-slate-200 bg-white p-6 text-left shadow-sm transition hover:border-blue-200 hover:shadow-md"
+        className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] text-left shadow-sm transition hover:border-blue-200 hover:shadow-md"
       >
         {body}
       </button>
     );
   }
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">{body}</div>
+    <div className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm">{body}</div>
   );
 };
 
@@ -129,9 +125,9 @@ export const ACCENTS = [
 ] as const;
 
 export const KpiSkeleton = () => (
-  <div className="animate-pulse rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-    <div className="h-10 w-10 rounded-xl bg-slate-200" />
-    <div className="mt-5 h-4 w-28 rounded bg-slate-200" />
-    <div className="mt-3 h-8 w-20 rounded bg-slate-200" />
+  <div className="animate-pulse rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm">
+    <div className="h-7 w-7 rounded-lg bg-slate-200" />
+    <div className="mt-3 h-3 w-24 rounded bg-slate-200" />
+    <div className="mt-2 h-7 w-16 rounded bg-slate-200" />
   </div>
 );

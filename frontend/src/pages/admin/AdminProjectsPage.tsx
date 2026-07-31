@@ -25,7 +25,7 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { Field, inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Modal } from '@/components/common/Modal';
-import { formatDate, formatNumber } from '@/lib/format';
+import { formatDate, formatDateTimeFull, formatNumber } from '@/lib/format';
 
 /** Roles an administrator can hand out. `system_admin` is deliberately absent:
  *  platform administration is granted on the account, not per project. */
@@ -137,7 +137,7 @@ export function AdminProjectsPage() {
                         {formatNumber(project.member_count)}
                       </td>
                       <td className="px-5 py-3 text-slate-500">
-                        {formatDate(project.created_at)}
+                        {formatDateTimeFull(project.created_at)}
                       </td>
                       <td className="px-5 py-3 text-right">
                         <Button
@@ -187,7 +187,7 @@ export function AdminProjectsPage() {
                   <div className="rounded-xl bg-slate-50 py-2">
                     <dt className="text-xs text-slate-500">Created</dt>
                     <dd className="text-sm font-semibold text-slate-900">
-                      {formatDate(project.created_at)}
+                      {formatDateTimeFull(project.created_at)}
                     </dd>
                   </div>
                 </dl>
@@ -358,6 +358,7 @@ function ManageMembersDialog({
 }) {
   const [userId, setUserId] = useState<UUID | ''>('');
   const [role, setRole] = useState<RoleName>('project_manager');
+  const [confirmRemove, setConfirmRemove] = useState<{ id: UUID; name: string } | null>(null);
   const projectId = project?.id;
 
   const members = useQuery({
@@ -488,15 +489,19 @@ function ManageMembersDialog({
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <Badge text={member.role_display_name} variant="info" />
-                    <button
-                      type="button"
-                      aria-label={`Remove ${member.user.full_name}`}
-                      onClick={() => removeMember.mutate(member.user.id)}
-                      disabled={removeMember.isPending}
-                      className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                    {member.role !== 'system_admin' && (
+                      <button
+                        type="button"
+                        aria-label={`Remove ${member.user.full_name}`}
+                        onClick={() =>
+                          setConfirmRemove({ id: member.user.id, name: member.user.full_name })
+                        }
+                        disabled={removeMember.isPending}
+                        className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}
@@ -508,6 +513,33 @@ function ManageMembersDialog({
           )}
         </div>
       </div>
+
+      <Modal
+        open={Boolean(confirmRemove)}
+        onClose={() => setConfirmRemove(null)}
+        title="Remove member"
+        description={
+          confirmRemove ? `Are you sure you want to remove ${confirmRemove.name} from this project?` : ''
+        }
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setConfirmRemove(null)}>
+              No
+            </Button>
+            <Button
+              busy={removeMember.isPending}
+              onClick={() => {
+                if (confirmRemove) {
+                  removeMember.mutate(confirmRemove.id);
+                  setConfirmRemove(null);
+                }
+              }}
+            >
+              Yes, remove
+            </Button>
+          </>
+        }
+      />
     </Modal>
   );
 }

@@ -27,7 +27,7 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { Field, inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Modal } from '@/components/common/Modal';
-import { formatDate } from '@/lib/format';
+import { formatDateTimeFull } from '@/lib/format';
 
 const ASSIGNABLE_ROLES: { value: RoleName; label: string; hint: string }[] = [
   { value: 'project_manager', label: 'Contract Manager', hint: 'Upload, manage and review' },
@@ -125,7 +125,7 @@ export function AdminUsersPage() {
                         {user.project_count}
                       </td>
                       <td className="px-5 py-3 text-slate-500">
-                        {user.last_login_at ? formatDate(user.last_login_at) : 'Never'}
+                        {user.last_login_at ? formatDateTimeFull(user.last_login_at) : 'Never'}
                       </td>
                       <td className="px-5 py-3">
                         <Badge
@@ -168,7 +168,7 @@ export function AdminUsersPage() {
                   <span aria-hidden>·</span>
                   <span>
                     {user.last_login_at
-                      ? `Last seen ${formatDate(user.last_login_at)}`
+                      ? `Last seen ${formatDateTimeFull(user.last_login_at)}`
                       : 'Never signed in'}
                   </span>
                 </div>

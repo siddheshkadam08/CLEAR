@@ -16,7 +16,7 @@ export interface ModalProps {
   onClose: () => void;
   title: string;
   description?: string;
-  children: ReactNode;
+  children?: ReactNode;
   footer?: ReactNode;
 }
 
@@ -69,7 +69,9 @@ export const Modal = ({ open, onClose, title, description, children, footer }: M
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">{children}</div>
+        {children ? (
+          <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">{children}</div>
+        ) : null}
 
         {footer ? (
           <div className="flex flex-col-reverse gap-2 border-t border-slate-200 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
