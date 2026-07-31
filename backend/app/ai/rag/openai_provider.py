@@ -36,6 +36,11 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+#: Attempts allowed when the gateway cannot enforce a JSON schema. Two, not more:
+#: a model that returns prose twice in a row is not going to be argued into JSON,
+#: and each attempt is a full-price call.
+_UNENFORCED_JSON_ATTEMPTS = 2
+
 
 class OpenAIProvider(IInferenceProvider):
     """OpenAI-compatible chat completions."""
@@ -132,42 +137,79 @@ class OpenAIProvider(IInferenceProvider):
         # the strict schema modes. When that is the case the schema is carried in
         # the prompt instead and the object is recovered from the text, which
         # `parse_json` already does for providers without enforcement.
-        if self.settings.llm.llm_structured_output == "none":
-            result = await self._invoke(
-                system=(
-                    f"{system}\n\n"
-                    "Respond with a single JSON object conforming to this schema. "
-                    "Output JSON only - no prose, no explanation, no code fence.\n"
-                    f"{json.dumps(_sanitise_schema(schema))}"
-                ),
-                prompt=prompt,
-                purpose=purpose,
-                max_tokens=max_tokens,
-                response_format=None,
-            )
-        else:
-            result = await self._invoke(
-                system=system,
-                prompt=prompt,
-                purpose=purpose,
-                max_tokens=max_tokens,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "extraction",
-                        "strict": True,
-                        "schema": _sanitise_schema(schema),
+        unenforced = self.settings.llm.llm_structured_output == "none"
+
+        # Without provider-side enforcement, malformed JSON is not a permanent
+        # fault - it is the model occasionally wrapping the object in prose or a
+        # code fence, and the next sample usually does not. Treating it as
+        # terminal cost a mandatory confidentiality clause on a contract that
+        # plainly contained one: the category was reported `not_found`, which
+        # reads as "the document does not say" rather than "we could not parse
+        # the answer". With `json_schema` enforcement there is nothing to retry,
+        # so this stays a single attempt.
+        attempts = _UNENFORCED_JSON_ATTEMPTS if unenforced else 1
+        last_error: SchemaValidationError | None = None
+
+        for attempt in range(1, attempts + 1):
+            if unenforced:
+                result = await self._invoke(
+                    system=(
+                        f"{system}\n\n"
+                        "Respond with a single JSON object conforming to this schema. "
+                        "Output JSON only - no prose, no explanation, no code fence.\n"
+                        f"{json.dumps(_sanitise_schema(schema))}"
+                    ),
+                    prompt=prompt,
+                    purpose=purpose,
+                    max_tokens=max_tokens,
+                    response_format=None,
+                )
+            else:
+                result = await self._invoke(
+                    system=system,
+                    prompt=prompt,
+                    purpose=purpose,
+                    max_tokens=max_tokens,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "extraction",
+                            "strict": True,
+                            "schema": _sanitise_schema(schema),
+                        },
                     },
-                },
-            )
-        if result.stop_reason == "length":
-            raise SchemaValidationError(
-                "The structured response was truncated before completing.",
-                stage="ai_extraction",
-            )
-        return StructuredResult(
-            data=self.parse_json(result.text, context="structured response"),
-            inference=result,
+                )
+
+            try:
+                if result.stop_reason == "length":
+                    # Truncation is not a parsing accident: the answer did not fit
+                    # the token budget, and re-sampling produces the same overflow.
+                    raise SchemaValidationError(
+                        "The structured response was truncated before completing. "
+                        "Raise LLM_MAX_OUTPUT_TOKENS - a reasoning model spends part "
+                        "of this budget on thinking before it emits the object.",
+                        stage="ai_extraction",
+                    )
+                return StructuredResult(
+                    data=self.parse_json(result.text, context="structured response"),
+                    inference=result,
+                )
+            except SchemaValidationError as exc:
+                last_error = exc
+                truncated = result.stop_reason == "length"
+                if truncated or attempt >= attempts:
+                    raise
+                logger.warning(
+                    "structured_output_unparsable_retrying",
+                    provider=self.name,
+                    purpose=purpose,
+                    attempt=attempt,
+                    attempts=attempts,
+                    error=str(exc)[:200],
+                )
+
+        raise last_error or SchemaValidationError(
+            "The structured response could not be parsed.", stage="ai_extraction"
         )
 
     async def stream(
