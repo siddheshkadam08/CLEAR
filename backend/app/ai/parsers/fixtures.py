@@ -170,6 +170,111 @@ class FixtureStore:
         return path
 
 
+class ObjectCache:
+    """The same record/replay contract, backed by object storage.
+
+    The on-disk :class:`FixtureStore` is per-container and per-worker: a recorded
+    response is lost the moment a container is recreated, and a response recorded
+    by ``worker-parser`` is invisible to ``worker-ai``. In a deployment that is
+    exactly the wrong shape - the layout service gets called again for a document
+    it has already analysed, every time a container restarts.
+
+    Object storage fixes both: one durable, shared cache keyed by the document's
+    SHA-256, so a given PDF is sent to the vendor **once, ever**, no matter which
+    worker handles it, which project it lands in, or how many times it is
+    re-uploaded.
+
+    Every method swallows storage failures. The cache is an optimisation; a parse
+    that already succeeded must not be failed because the cache could not be
+    written, and a cache read that errors should fall through to a live call
+    rather than take the document down with it.
+    """
+
+    def __init__(self, parser: str) -> None:
+        self.parser = parser
+
+    async def load(self, file_hash: str) -> list[dict[str, Any]] | None:
+        """The cached payloads for this exact document, or ``None``."""
+        from app.storage import StorageKey, get_storage
+
+        key = StorageKey.parser_cache(self.parser, file_hash)
+        try:
+            storage = get_storage()
+            if not await storage.exists(key):
+                return None
+            raw = await storage.get_json(key)
+            record = FixtureRecord.from_dict(raw)
+        except Exception as exc:  # noqa: BLE001 - see class docstring
+            logger.warning(
+                "parser_cache_read_failed",
+                parser=self.parser,
+                file_hash=file_hash[:16],
+                error=str(exc)[:200],
+            )
+            return None
+
+        logger.info(
+            "parser_cache_hit",
+            parser=self.parser,
+            file_hash=file_hash[:16],
+            pages=len(record.payloads),
+            recorded_at=record.recorded_at,
+        )
+        return record.payloads
+
+    async def save(
+        self,
+        file_hash: str,
+        payloads: list[dict[str, Any]],
+        *,
+        file_name: str | None = None,
+        source: str | None = None,
+    ) -> bool:
+        """Store a response. Existing entries are left alone.
+
+        Not overwriting keeps replay deterministic for a given hash, and means two
+        workers racing on the same document cannot interleave a half-written
+        object over a complete one.
+        """
+        from app.storage import StorageKey, get_storage
+
+        key = StorageKey.parser_cache(self.parser, file_hash)
+        record = FixtureRecord(
+            payloads=payloads,
+            parser=self.parser,
+            file_hash=file_hash,
+            file_name=file_name,
+            recorded_at=datetime.now(UTC).isoformat(),
+            source=source,
+        )
+        try:
+            storage = get_storage()
+            if await storage.exists(key):
+                return False
+            await storage.put_json(
+                key,
+                record.as_dict(),
+                metadata={"parser": self.parser, "file_hash": file_hash},
+            )
+        except Exception as exc:  # noqa: BLE001 - see class docstring
+            logger.warning(
+                "parser_cache_write_failed",
+                parser=self.parser,
+                file_hash=file_hash[:16],
+                error=str(exc)[:200],
+            )
+            return False
+
+        logger.info(
+            "parser_cache_stored",
+            parser=self.parser,
+            file_hash=file_hash[:16],
+            pages=len(payloads),
+            key=key,
+        )
+        return True
+
+
 def resolve(
     store: FixtureStore, file_hash: str, *, file_name: str | None = None
 ) -> list[dict[str, Any]]:
@@ -219,4 +324,4 @@ def resolve(
     )
 
 
-__all__ = ["DEFAULT_FIXTURE", "FixtureRecord", "FixtureStore", "resolve"]
+__all__ = ["DEFAULT_FIXTURE", "FixtureRecord", "FixtureStore", "ObjectCache", "resolve"]

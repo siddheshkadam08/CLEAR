@@ -34,7 +34,16 @@ x-backend-env: &backend-env
   DEBUG: ${DEBUG:-true}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_FORMAT: ${LOG_FORMAT:-json}
-  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-cip_dev_password}@postgres:5432/${POSTGRES_DB:-cip}
+  # An explicit DATABASE_URL wins; otherwise the bundled Postgres service is
+  # composed from the POSTGRES_* values. Previously this was hardcoded to the
+  # `postgres` service, so setting DATABASE_URL in .env appeared to work and was
+  # silently ignored - the app kept talking to the container while the operator
+  # believed it had been repointed at an external database.
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-cip_dev_password}@postgres:5432/${POSTGRES_DB:-cip}}
+  # Schema the application's tables live in. Empty means `public`. Set this when
+  # the database is shared with another application that already owns table names
+  # we also use - see DatabaseSettings.schema_name.
+  DB_SCHEMA: ${DB_SCHEMA:-}
   REDIS_URL: redis://redis:6379/0
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
@@ -79,6 +88,9 @@ x-backend-env: &backend-env
   ALLOW_MOCK_AI: ${ALLOW_MOCK_AI:-false}
   # Model names used only when a real provider is selected; inert under `mock`.
   LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+  # `none` for models behind an OpenAI-compatible gateway that do not implement
+  # the strict json_schema response format - see LLMSettings.llm_structured_output.
+  LLM_STRUCTURED_OUTPUT: ${LLM_STRUCTURED_OUTPUT:-json_schema}
   # NVIDIA Nemotron 3 Embed 1B. 2048 is the model's real output width, and
   # `halfvec` is required rather than preferred: pgvector's HNSW index stops at
   # 2000 dimensions for the `vector` type, so a vector(2048) column cannot be
@@ -95,6 +107,14 @@ x-backend-env: &backend-env
   GEMINI_MODEL_SIMPLE: ${GEMINI_MODEL_SIMPLE:-gemini-2.5-flash-lite}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  # Points the OpenAI-compatible client at a gateway instead of OpenAI itself
+  # (OpenRouter, Together, vLLM, LM Studio). Empty means OpenAI.
+  #
+  # Must be forwarded explicitly: compose passes only the variables named here,
+  # so omitting it lets the key through while silently dropping the endpoint -
+  # every request then goes to api.openai.com and fails with "Incorrect API key
+  # provided", which reads like a bad key rather than a missing base URL.
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
   AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
   AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
   INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-internal-token}
@@ -305,6 +325,19 @@ services:
       redis:
         condition: service_healthy
     command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    # Overrides the image's HEALTHCHECK, which probes 8000 - the API's port. A
+    # worker serves `app.worker_app` on 8001, so the inherited check can never
+    # pass and every worker reports `unhealthy` while processing jobs perfectly
+    # well. A health signal that is always red is worse than none: it trains
+    # everyone to ignore the column that is supposed to show a real outage.
+    healthcheck: &worker-healthcheck
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/healthz', timeout=4).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
     logging: *default-logging
 
   worker-ai:
@@ -322,6 +355,7 @@ services:
       redis:
         condition: service_healthy
     command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    healthcheck: *worker-healthcheck
     logging: *default-logging
 
   # Periodic evaluator: alerts, expiry windows, DLQ sweep, index maintenance.
@@ -342,6 +376,13 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "app.cli", "scheduler"]
+    # The scheduler is a bare sweep loop with no HTTP server, so the image's
+    # HEALTHCHECK - an HTTP probe - cannot ever succeed. Disabled rather than
+    # replaced with a process check: podman/docker already restart the container
+    # if the process exits, which is the only failure mode a liveness probe on a
+    # single-loop process could detect anyway.
+    healthcheck:
+      disable: true
     logging: *default-logging
 
   # ------------------------------------------------------------ nvidia profile
@@ -425,6 +466,12 @@ services:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: ${COMPOSE_PROJECT:-cip}-otel
     command: ["--config=/etc/otel/config.yaml"]
+    environment:
+      # The collector config stamps this onto every span as
+      # `deployment.environment`. It has a default in the config file so an unset
+      # value cannot stop the collector booting, but passing it here is what makes
+      # the label actually correct per deployment.
+      APP_ENV: ${APP_ENV:-development}
     volumes:
       - ./infra/otel/collector-config.yaml:/etc/otel/config.yaml:ro,z
     ports:

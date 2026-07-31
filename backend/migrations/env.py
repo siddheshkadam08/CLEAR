@@ -13,6 +13,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy import text as sa_text
 
 # Importing the models package registers every mapper on Base.metadata, which is
 # what autogenerate compares the live database against.
@@ -28,7 +29,17 @@ if config.config_file_name is not None:
 logger = logging.getLogger("alembic.env")
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.db.sync_url)
+
+# `%` doubled, because Alembic stores this in a ConfigParser and ConfigParser
+# treats `%` as its interpolation character. A password containing a
+# percent-encoded byte - `@` becomes `%40`, which any password with an `@` in it
+# will have - otherwise aborts the migration before it starts with:
+#
+#     invalid interpolation syntax in '...pass%40word@host...' at position 33
+#
+# The doubling is undone by ConfigParser on read, so the driver still receives
+# the correct DSN.
+config.set_main_option("sqlalchemy.url", settings.db.sync_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -65,6 +76,7 @@ def run_migrations_offline() -> None:
         compare_server_default=True,
         include_object=include_object,
         include_schemas=False,
+        version_table_schema=(settings.db.schema_name.strip() or None),
     )
 
     with context.begin_transaction():
@@ -76,6 +88,9 @@ def run_migrations_online() -> None:
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = settings.db.sync_url
 
+    schema_name = settings.db.schema_name.strip()
+    scoped = bool(schema_name) and schema_name != "public"
+
     connectable = engine_from_config(
         section,
         prefix="sqlalchemy.",
@@ -83,6 +98,19 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        if scoped:
+            # Create the schema and put it first on the path, so `create_all`
+            # lands there and `alembic_version` sits beside the tables it
+            # describes rather than in `public`.
+            #
+            # The identifier is quoted and comes from configuration set by whoever
+            # deploys the service, not from user input. `public` stays second so
+            # extension-owned objects still resolve - see DatabaseSettings.
+            connection.execute(sa_text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
+            connection.execute(sa_text(f"SET search_path TO {settings.db.search_path}"))
+            connection.commit()
+            logger.info("migrations_scoped_to_schema", extra={"schema": schema_name})
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
@@ -90,6 +118,7 @@ def run_migrations_online() -> None:
             compare_server_default=True,
             include_object=include_object,
             include_schemas=False,
+            version_table_schema=schema_name or None,
             # Deterministic constraint names come from Base's naming convention;
             # rendering them keeps generated migrations reversible.
             render_as_batch=False,

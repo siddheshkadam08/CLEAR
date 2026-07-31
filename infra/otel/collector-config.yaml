@@ -19,7 +19,12 @@ processors:
   resource:
     attributes:
       - key: deployment.environment
-        value: ${env:APP_ENV}
+        # Defaulted, not bare `${env:APP_ENV}`. The resource processor rejects an
+        # empty value outright - `Either field "value", "from_attribute",
+        # "from_context", or "default_value" must be specified` - so an unset
+        # APP_ENV stops the whole collector from building its pipelines rather
+        # than degrading to an unlabelled environment.
+        value: ${env:APP_ENV:-development}
         action: upsert
   # Drop health-probe spans so traces stay useful.
   filter/drop-health:

@@ -70,6 +70,23 @@ ENV API_HOST=$API_HOST \
     STORAGE_PORT=$STORAGE_PORT \
     STORAGE_BUCKET=$STORAGE_BUCKET
 
+# Opts into the stock `15-local-resolvers.envsh`, which exports the
+# NGINX_LOCAL_RESOLVERS that the `resolver` directive in nginx.conf depends on.
+#
+# The script is **opt-in**, which is easy to miss - its second line is:
+#
+#     [ "${NGINX_ENTRYPOINT_LOCAL_RESOLVERS:-}" ] || return 0
+#
+# Without this the script returns immediately, the variable is never exported,
+# envsubst leaves the literal `${NGINX_LOCAL_RESOLVERS}` in the generated config,
+# and nginx exits 1 at startup with `host not found in resolver
+# "${NGINX_LOCAL_RESOLVERS}"`. The container then restart-loops and nothing is
+# served on 8080 at all.
+#
+# It belongs in the image rather than in compose: the config file cannot work
+# without it, so a deployment must not be able to omit it.
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
+
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 
@@ -103,5 +120,16 @@ EXPOSE 8080
 # avoids needing the capability to bind a privileged port.
 USER nginx
 
+# `127.0.0.1`, not `localhost`. Inside the container localhost resolves to ::1
+# first, and the server block only carries `listen 8080` - IPv4. The stock
+# 10-listen-on-ipv6-by-default.sh would have added `listen [::]:8080`, but it
+# patches /etc/nginx/conf.d/default.conf *before* 20-envsubst-on-templates.sh
+# regenerates that same file from our template, so its edit is overwritten and
+# the final config is IPv4-only.
+#
+# The result is a container that serves every real request correctly - clients
+# reach the published port over IPv4 - while reporting `unhealthy` forever,
+# because the probe is the one caller using the IPv6 loopback. Addressing IPv4
+# explicitly is safer than adding a `listen [::]:8080` the host may not support.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --quiet --spider http://localhost:8080/health || exit 1
+    CMD wget --quiet --spider http://127.0.0.1:8080/health || exit 1

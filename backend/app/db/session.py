@@ -51,6 +51,11 @@ def get_engine() -> AsyncEngine:
             "statement_timeout": str(settings.db.statement_timeout_ms),
             "idle_in_transaction_session_timeout": "120000",
             "jit": "off",  # JIT hurts the many short OLTP queries we issue
+            # Set per connection rather than on the role: the role may be shared
+            # with another application in the same database, and changing its
+            # default search_path would silently re-point *their* unqualified
+            # table names at our schema. See DatabaseSettings.schema_name.
+            "search_path": settings.db.search_path,
         },
         # asyncpg caches prepared statements per connection; pgbouncer in
         # transaction mode cannot support that, so it is disabled.
