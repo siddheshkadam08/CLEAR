@@ -51,6 +51,12 @@ x-backend-env: &backend-env
   # session mid-extraction, which surfaces as "no clauses could be identified".
   DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: ${DB_IDLE_IN_TRANSACTION_TIMEOUT_MS:-1800000}
   REDIS_URL: redis://redis:6379/0
+  # Reject a re-upload of a file already in the project. Temporarily off while
+  # the document pipeline is being iterated on - re-running the same test PDF is
+  # the workflow. Defaulted here rather than only in .env.example because
+  # deploy.sh keeps an existing server .env, so a new key added there never
+  # reaches a deployment that has already been provisioned once.
+  UPLOAD_DUPLICATE_CHECK: ${UPLOAD_DUPLICATE_CHECK:-false}
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
   STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}

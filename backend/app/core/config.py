@@ -362,6 +362,20 @@ class UploadSettings(BaseSettings):
     clamav_host: Annotated[str, Field(validation_alias="CLAMAV_HOST")] = "clamav"
     clamav_port: Annotated[int, Field(validation_alias="CLAMAV_PORT")] = 3310
 
+    #: Reject a file whose SHA-256 already exists in the project.
+    #:
+    #: Defaults to on because that is the correct behaviour: the same contract
+    #: uploaded twice is one contract, and accepting it again spends a full
+    #: pipeline run - parse, extract, embed - to produce a duplicate row.
+    #:
+    #: Currently switched **off** in configuration while the document pipeline is
+    #: being iterated on, because re-running the same test PDF is the whole
+    #: workflow. With it off, each upload of the same file creates a new contract
+    #: and a new job; `replace_existing` remains the supported way to add a
+    #: version to the existing contract. Turn it back on by setting
+    #: ``UPLOAD_DUPLICATE_CHECK=true``.
+    duplicate_check: Annotated[bool, Field(validation_alias="UPLOAD_DUPLICATE_CHECK")] = True
+
     @field_validator("allowed_file_types", mode="before")
     @classmethod
     def _parse_types(cls, value: str | list[str] | None) -> list[str]:

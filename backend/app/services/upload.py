@@ -250,8 +250,13 @@ class UploadService:
             )
 
         # --- duplicate detection ---------------------------------------------
+        # `duplicate_check` is a switch rather than a constant because re-uploading
+        # the same file is the normal loop while the pipeline is being tuned. With
+        # it off the hash is still computed and still recorded - only the
+        # rejection is skipped - so turning it back on needs no backfill.
         existing = await self.contracts.get_by_hash(project.id, validated.sha256)
-        if existing is not None and not options.replace_existing:
+        duplicate_check = self.settings.upload.duplicate_check
+        if existing is not None and duplicate_check and not options.replace_existing:
             metrics.uploads_total.labels(
                 file_type=validated.file_type.value, outcome="duplicate"
             ).inc()
