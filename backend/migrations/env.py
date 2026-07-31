@@ -44,6 +44,16 @@ config.set_main_option("sqlalchemy.url", settings.db.sync_url.replace("%", "%%")
 target_metadata = Base.metadata
 
 
+#: Tables that live in this database but are owned elsewhere.
+#:
+#: The ``cip_*`` tables are created and populated by another system; this
+#: application only reads and writes rows. They are absent from ``Base.metadata``
+#: on purpose, which means autogenerate sees them as tables to drop -
+#: ``cip_docMapping`` alone holds the clause taxonomy, so accepting that
+#: suggestion once would delete data no migration here can restore.
+EXTERNAL_TABLES = frozenset({"cip_docMapping", "cip_DocMaster", "cip_DocContentMaster"})
+
+
 def include_object(
     obj: object,
     name: str | None,
@@ -54,9 +64,16 @@ def include_object(
     """Filter objects out of autogenerate.
 
     Postgres-managed artefacts (extension-owned tables, the ``pg_stat_statements``
-    view) would otherwise show up as spurious drops on every autogenerate run.
+    view) would otherwise show up as spurious drops on every autogenerate run, as
+    would the externally-owned tables in :data:`EXTERNAL_TABLES`.
     """
     if type_ == "table" and name in {"pg_stat_statements", "pg_stat_statements_info"}:
+        return False
+    if type_ == "table" and name in EXTERNAL_TABLES:
+        return False
+    # Indexes belonging to an external table arrive with their parent attached;
+    # filtering the table alone still leaves the indexes proposed for drop.
+    if type_ == "index" and getattr(getattr(obj, "table", None), "name", None) in EXTERNAL_TABLES:
         return False
     # Indexes created by raw SQL in a migration (expression indexes on
     # to_tsvector) are not always reproducible by autogenerate; keep them.

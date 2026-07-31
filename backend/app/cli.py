@@ -734,6 +734,163 @@ async def _replay_chunking(
         )
 
 
+@app.command("process-doc")
+def process_doc(
+    json_dir: str = typer.Argument(..., help="Directory of page_*.json from the PDF service."),
+    pdf_path: str = typer.Option("", help="Path of the source PDF, recorded on the master row."),
+    pages: int = typer.Option(5, help="Pages the classifier reads."),
+    chunk_pages: int = typer.Option(4, help="Pages per clause-search call."),
+    chunk_overlap: int = typer.Option(0, help="Pages re-read at the start of each window."),
+    concurrency: int = typer.Option(4, help="Clause-search calls to run at once."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Extract and print only. No LLM, no DB."),
+    no_persist: bool = typer.Option(False, "--no-persist", help="Classify and detect, write nothing."),
+    no_early_stop: bool = typer.Option(
+        False, "--no-early-stop", help="Search every chunk even after all clauses are found."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every page, and the full text of every clause found."
+    ),
+) -> None:
+    """Classify a document, find its clauses, embed them and record the result.
+
+    Reads the per-page JSON already on disk - the PDF service is never called.
+    The document type decides which clauses to look for, via ``cip_docMapping``;
+    each clause found is written to ``cip_DocContentMaster`` with its page
+    numbers, bounding box and embedding.
+    """
+    _use_utf8_stdout()
+    configure_logging()
+
+    target = Path(json_dir).expanduser()
+    if not target.is_dir():
+        _fail(f"Not a directory: {target}")
+
+    _run(
+        _process_doc(
+            target,
+            pdf_path or None,
+            pages,
+            chunk_pages,
+            chunk_overlap,
+            concurrency,
+            classify=not dry_run,
+            persist=not (dry_run or no_persist),
+            early_stop=not no_early_stop,
+            verbose=verbose,
+        )
+    )
+
+
+async def _process_doc(
+    json_dir: Path,
+    pdf_path: str | None,
+    page_window: int,
+    chunk_pages: int,
+    chunk_overlap: int,
+    concurrency: int,
+    *,
+    classify: bool,
+    persist: bool,
+    early_stop: bool,
+    verbose: bool,
+) -> None:
+    from app.ai.docpipeline import run_document_pipeline
+
+    try:
+        await run_document_pipeline(
+            json_dir,
+            pdf_path=pdf_path,
+            page_window=page_window,
+            chunk_pages=chunk_pages,
+            chunk_overlap=chunk_overlap,
+            concurrency=concurrency,
+            early_stop=early_stop,
+            classify=classify,
+            persist=persist,
+            verbose=verbose,
+            emit=_echo,
+        )
+    except (FileNotFoundError, LookupError) as exc:
+        _fail(str(exc))
+
+
+@app.command("fix-cip-schema")
+def fix_cip_schema(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the SQL without executing it."),
+) -> None:
+    """Apply the corrective DDL for the externally-owned cip_* tables.
+
+    Idempotent: safe to re-run. See ``sql/cip_schema_fixes.sql`` for what each
+    statement fixes and why leaving it alone was not an option.
+    """
+    configure_logging()
+    script = _BACKEND_ROOT / "sql" / "cip_schema_fixes.sql"
+    if not script.is_file():
+        _fail(f"Missing {script}")
+
+    sql = script.read_text(encoding="utf-8")
+    if dry_run:
+        _echo(sql)
+        return
+
+    statements = _split_sql(sql)
+    _run(_apply_sql(statements))
+    _echo(f"cip_* schema fixes applied ({len(statements)} statements).")
+
+
+def _split_sql(sql: str) -> list[str]:
+    """Split a script into individual statements.
+
+    asyncpg sends each statement as a prepared statement and refuses more than
+    one per call, so the script cannot be handed over whole. Splitting naively on
+    ``;`` would cut the ``DO $$ ... $$`` block in half, so dollar-quoted bodies
+    are tracked and their semicolons ignored.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    in_dollar = False
+
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if not in_dollar and (not stripped or stripped.startswith("--")):
+            continue
+
+        if line.count("$$") % 2 == 1:
+            in_dollar = not in_dollar
+
+        current.append(line)
+        if not in_dollar and stripped.endswith(";"):
+            statements.append("\n".join(current).strip())
+            current = []
+
+    if current:
+        statements.append("\n".join(current).strip())
+    return [statement for statement in statements if statement]
+
+
+async def _apply_sql(statements: list[str]) -> None:
+    from app.db.session import session_scope
+
+    async with session_scope() as db:
+        connection = await db.connection()
+        for statement in statements:
+            # exec_driver_sql, not text(): `$$` and `%` in the DDL would
+            # otherwise be read as bind-parameter syntax.
+            await connection.exec_driver_sql(statement)
+
+
+def _use_utf8_stdout() -> None:
+    """Make stdout able to carry the document's own script.
+
+    Contract pages carry Devanagari, accented Latin and typographic quotes. A
+    default Windows console is cp1252, so the first such paragraph aborts the
+    command with UnicodeEncodeError - the pipeline works and the report dies.
+    """
+    stream = sys.stdout
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
+
 @app.command()
 def version() -> None:
     """Print component versions, for reproducing an extraction."""
