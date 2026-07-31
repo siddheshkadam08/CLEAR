@@ -365,6 +365,11 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
                     api_key=settings.llm.openai_api_key or None,
                     timeout=float(settings.embedding.timeout_seconds),
                     max_retries=settings.embedding.max_retries,
+                    **(
+                        {"base_url": settings.llm.openai_base_url}
+                        if settings.llm.openai_base_url
+                        else {}
+                    ),
                 )
         except ImportError as exc:  # pragma: no cover
             raise ProviderError(
@@ -383,9 +388,26 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
         settings = get_settings()
         started = time.perf_counter()
 
-        request: dict[str, Any] = {"model": self.model, "input": list(texts)}
+        request: dict[str, Any] = {
+            "model": self.model,
+            "input": list(texts),
+            # Explicit, because the OpenAI SDK otherwise sends
+            # `encoding_format: base64` on its own as a bandwidth optimisation.
+            # That is an OpenAI extension, and an OpenAI-compatible gateway
+            # fronting another vendor rejects it outright:
+            #
+            #   400 - Nvidia embeddings do not support base64 encoding_format.
+            #         Use float instead, or omit encoding_format.
+            #
+            # `float` is the format the API spec defines as the default, so it is
+            # universally accepted; the extra bytes are irrelevant next to a
+            # provider round trip.
+            "encoding_format": "float",
+        }
         # text-embedding-3-* support dimension reduction; asking for the configured
-        # width avoids storing a vector we would have to truncate ourselves.
+        # width avoids storing a vector we would have to truncate ourselves. Not
+        # sent to other models: a gateway that only serves one width rejects the
+        # parameter even when the value matches.
         if self.model.startswith("text-embedding-3"):
             request["dimensions"] = self.dim
 
@@ -542,6 +564,18 @@ class MockEmbeddingProvider(IEmbeddingProvider):
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
+    @property
+    def model(self) -> str:
+        """``mock-`` prefixed, so a fake vector can never be mistaken for a real one.
+
+        The prefix has to live on the property rather than only on the result, or
+        the two write paths disagree: generated rows were stamped ``mock-<model>``
+        while *reused* rows took the bare provider model. Two names for one space
+        make ``existing_hashes`` - which filters on ``model`` - miss every reuse
+        candidate, and leave a table that looks like it holds two spaces.
+        """
+        return f"mock-{get_settings().embedding.model}"
+
     async def embed_many(
         self, texts: Sequence[str], *, input_type: InputType = "passage"
     ) -> EmbeddingResult:
@@ -555,7 +589,7 @@ class MockEmbeddingProvider(IEmbeddingProvider):
 
         return EmbeddingResult(
             vectors=vectors,
-            model=f"mock-{self.model}",
+            model=self.model,
             dim=self.dim,
             usage=EmbeddingUsage(
                 input_tokens=sum(max(1, len(text) // 4) for text in texts), requests=1

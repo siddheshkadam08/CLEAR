@@ -485,7 +485,9 @@ async def _embedding_status() -> None:
 
     async with session_scope() as db:
         report = await diagnose(db)
-        counts = await EmbeddingReindexer(db).stale_model_counts()
+        reindexer = EmbeddingReindexer(db)
+        counts = await reindexer.stale_model_counts()
+        audit = await reindexer.audit()
 
     _echo(f"Provider   : {report.provider}")
     _echo(f"Model      : {report.model}")
@@ -505,6 +507,16 @@ async def _embedding_status() -> None:
         for model, count in sorted(counts.items()):
             _echo(f"  {model}: {count:,}")
 
+    # The check that matters more than the counts: are the stored vectors all in
+    # one space? A mixed store answers queries without erroring, so nothing else
+    # in the system will report this.
+    if not audit.is_consistent:
+        _echo(f"\n  [FAIL] {audit.incompatible_rows:,} vector(s) are not in {audit.active.label}:")
+        for label in audit.foreign_spaces:
+            _echo(f"    {label}: {audit.spaces[label]:,}")
+        _echo("    Similarity search across these is meaningless. Run:")
+        _echo("      cip reindex-embeddings")
+
     if not report.ok:
         _fail("The embedding configuration has problems (see above).")
 
@@ -513,41 +525,81 @@ async def _embedding_status() -> None:
 def reindex_embeddings(
     project_id: str = typer.Option("", help="Limit to one project."),
     limit: int = typer.Option(0, help="Stop after N contracts. 0 means all."),
+    all_contracts: bool = typer.Option(
+        False,
+        "--all",
+        help="Re-embed every contract, including ones already in the target space.",
+    ),
+    batch_size: int = typer.Option(25, help="Contracts between progress log lines."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report what would run."),
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
 ) -> None:
-    """Regenerate vectors for contracts embedded with a different model.
+    """Regenerate vectors that are not in the configured embedding space.
+
+    "Not in the space" means any of provider, model, dimension, embedding version
+    or strategy version differs - not just the model name. Vectors from two spaces
+    cannot be compared, so a partially-migrated index answers queries with a
+    ranking that has no meaning.
 
     Safe to interrupt and re-run: the work list is derived from the database, so a
     second run picks up whatever is left rather than starting over. Contracts are
     queued through the normal pipeline from the embedding stage, so progress is
     visible on the Processing screen and retries behave as they do for any job.
+
+    ``--all`` forces every contract, for when the vectors are suspect for a reason
+    the provenance columns cannot express.
     """
     configure_logging()
-    _run(_reindex(project_id or None, limit or None, dry_run, yes))
+    _run(
+        _reindex(
+            project_id or None,
+            limit or None,
+            dry_run,
+            yes,
+            include_current=all_contracts,
+            batch_size=batch_size,
+        )
+    )
 
 
-async def _reindex(project_id: str | None, limit: int | None, dry_run: bool, yes: bool) -> None:
+async def _reindex(
+    project_id: str | None,
+    limit: int | None,
+    dry_run: bool,
+    yes: bool,
+    *,
+    include_current: bool = False,
+    batch_size: int = 25,
+) -> None:
     from app.ai.embedding.reindex import EmbeddingReindexer
-    from app.core.config import get_settings
     from app.db.session import session_scope
 
     scope = uuid.UUID(project_id) if project_id else None
 
     async with session_scope() as db:
         reindexer = EmbeddingReindexer(db)
-        counts = await reindexer.stale_model_counts()
-        targets = await reindexer.contracts_needing_reindex(project_id=scope, limit=limit)
+        audit = await reindexer.audit(scope)
+        targets = await reindexer.contracts_needing_reindex(
+            project_id=scope, limit=limit, include_current=include_current
+        )
 
         if not targets:
-            _echo("Every vector already matches the configured model. Nothing to do.")
+            _echo(f"Every vector is already in {audit.active.label}. Nothing to do.")
             return
 
-        _echo(f"Target model : {get_settings().embedding.model}")
+        _echo(f"Target space : {audit.active.label}")
         _echo(f"Contracts    : {len(targets)}")
-        if counts:
-            for model, count in sorted(counts.items()):
-                _echo(f"  {model}: {count:,} vector(s)")
+        if audit.spaces:
+            _echo("Stored vectors by space:")
+            for label, count in sorted(audit.spaces.items()):
+                mark = "  " if label == audit.active.label else "! "
+                _echo(f"  {mark}{label}: {count:,} vector(s)")
+        if not audit.is_consistent:
+            _echo(
+                f"\n  {audit.incompatible_rows:,} vector(s) are in a space that cannot be "
+                "compared with the active one. Search results involving them are "
+                "not meaningful until this completes."
+            )
 
         if not dry_run and not yes:
             typer.confirm(
@@ -564,7 +616,12 @@ async def _reindex(project_id: str | None, limit: int | None, dry_run: bool, yes
             )
 
         result = await reindexer.run(
-            project_id=scope, limit=limit, on_progress=report, dry_run=dry_run
+            project_id=scope,
+            limit=limit,
+            on_progress=report,
+            dry_run=dry_run,
+            include_current=include_current,
+            batch_size=batch_size,
         )
 
     if dry_run:
@@ -579,6 +636,102 @@ async def _reindex(project_id: str | None, limit: int | None, dry_run: bool, yes
         for contract_id, error in result.failures[:10]:
             _echo(f"  FAILED {contract_id}: {error}", err=True)
         _fail(f"{len(result.failures)} contract(s) could not be queued.")
+
+
+@app.command("replay-chunking")
+def replay_chunking(
+    contract_id: str = typer.Argument(..., help="Contract to re-chunk."),
+    strategy: str = typer.Option("", help="Override the chunking strategy."),
+    min_tokens: int = typer.Option(0, help="Override the minimum chunk size."),
+    max_tokens: int = typer.Option(0, help="Override the maximum chunk size."),
+    sweep: bool = typer.Option(False, "--sweep", help="Try several min_tokens values and compare."),
+    show_rejections: int = typer.Option(10, help="How many rejected chunks to print."),
+) -> None:
+    """Re-run chunking over a parsed contract and report what was rejected.
+
+    Reads the stored canonical document and runs the engine in memory. Nothing is
+    written, so this is safe to run against production data and safe to repeat
+    while tuning a threshold - which is the point: the alternative is a full
+    reprocess per attempt, so in practice thresholds never get tuned at all.
+    """
+    configure_logging()
+    _run(
+        _replay_chunking(
+            contract_id,
+            strategy or None,
+            min_tokens or None,
+            max_tokens or None,
+            sweep,
+            show_rejections,
+        )
+    )
+
+
+async def _replay_chunking(
+    contract_id: str,
+    strategy: str | None,
+    min_tokens: int | None,
+    max_tokens: int | None,
+    sweep: bool,
+    show_rejections: int,
+) -> None:
+    from app.ai.chunking.replay import ChunkingReplay
+    from app.db.session import session_scope
+    from app.storage import get_storage
+
+    target = uuid.UUID(contract_id)
+
+    async with session_scope() as db:
+        replay = ChunkingReplay(db, get_storage())
+        try:
+            if sweep:
+                outcomes = await replay.sweep(target, min_tokens_values=[20, 40, 60, 80, 120])
+            else:
+                outcomes = [
+                    await replay.run(
+                        target,
+                        strategy=strategy,
+                        min_tokens=min_tokens,
+                        max_tokens=max_tokens,
+                    )
+                ]
+        except LookupError as exc:
+            _fail(str(exc))
+            return
+
+    for outcome in outcomes:
+        config = outcome.config
+        _echo(
+            f"\n{outcome.strategy}  min={config['min_tokens']} max={config['max_tokens']}"
+            f"  ->  {outcome.accepted} kept, {outcome.rejected} rejected "
+            f"({outcome.acceptance_rate:.0%} accepted)"
+        )
+        diagnostics = outcome.diagnostics
+        if diagnostics.get("by_rule"):
+            for rule, count in sorted(diagnostics["by_rule"].items(), key=lambda kv: -kv[1]):
+                _echo(f"    {rule}: {count}")
+        if diagnostics.get("worst_pages"):
+            worst = ", ".join(
+                f"p{entry['page']}({entry['rejected']})" for entry in diagnostics["worst_pages"]
+            )
+            _echo(f"    worst pages: {worst}")
+
+    if not sweep and show_rejections:
+        for rejection in outcomes[0].diagnostics.get("rejections", [])[:show_rejections]:
+            _echo(
+                f"\n  p{rejection['page']} {rejection['chunk_type']} "
+                f"[{rejection['rule']}] {rejection['detail']}"
+            )
+            preview = (rejection.get("text_preview") or "").replace("\n", " ")
+            if preview:
+                _echo(f"    {preview[:140]}")
+
+    if sweep:
+        best = max(outcomes, key=lambda o: o.accepted)
+        _echo(
+            f"\nBest: min_tokens={best.config['min_tokens']} keeps {best.accepted} chunks "
+            f"({best.acceptance_rate:.0%})."
+        )
 
 
 @app.command()
