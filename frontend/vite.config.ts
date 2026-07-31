@@ -1,8 +1,11 @@
 import react from '@vitejs/plugin-react';
 import { fileURLToPath, URL } from 'node:url';
 // Vitest's `defineConfig` rather than Vite's: the `test` block below is not part
-// of Vite's own config type, and Vite's overload rejects it.
-import { defineConfig, loadEnv } from 'vitest/config';
+// of Vite's own config type, and Vite's overload rejects it. `loadEnv` comes from
+// Vite itself - vitest/config re-exported it until v3 and no longer does, which
+// broke `npm run build` with "no exported member 'loadEnv'".
+import { loadEnv } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig(({ mode }) => {
   // `.env` files are loaded *after* the config is evaluated, and Vite never copies

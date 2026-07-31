@@ -15,6 +15,7 @@
 import {
   AlertTriangle,
   Bot,
+  FileSearch,
   FileText,
   FolderKanban,
   LayoutDashboard,
@@ -50,6 +51,7 @@ const NAV: NavItem[] = [
   { href: '/search', label: 'Search', icon: Search },
   { href: '/copilot', label: 'Copilot', icon: Bot },
   { href: '/jobs', label: 'Processing', icon: ListChecks },
+  { href: '/doc-pipeline', label: 'Doc Pipeline', icon: FileSearch },
   { href: '/alerts', label: 'Alerts', icon: AlertTriangle },
   {
     href: '/admin/projects',

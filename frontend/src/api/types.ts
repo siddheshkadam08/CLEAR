@@ -867,3 +867,62 @@ export interface Alert {
   created_at: string;
   note?: string | null;
 }
+
+
+// =============================================================================
+// Document pipeline
+// =============================================================================
+// Sourced entirely from cip_DocMaster / cip_DocContentMaster. `coverage` is
+// clauses found divided by the number cip_docMapping expects for that document
+// type, and is null when the type has no taxonomy entry.
+export interface DocPipelineTotals {
+  documents: number;
+  clauses: number;
+  embedded: number;
+  clause_page_regions: number;
+  clauses_per_document: number;
+  average_coverage: number | null;
+}
+
+export interface DocPipelineDocumentRow {
+  docid: number;
+  doc_type: string | null;
+  doc_path: string | null;
+  json_path: string | null;
+  clauses_found: number;
+  clauses_expected: number;
+  coverage: number | null;
+}
+
+export interface DocPipelineInsights {
+  totals: DocPipelineTotals;
+  documents: DocPipelineDocumentRow[];
+  by_doc_type: { doc_type: string | null; documents: number; clauses_expected: number }[];
+  clause_frequency: { clause: string; documents: number }[];
+  missing_clauses: {
+    doc_type: string;
+    clause: string;
+    description: string;
+    expected_in: number;
+  }[];
+  expected_by_doc_type: Record<string, number>;
+}
+
+export interface DocPipelineClause {
+  id: number;
+  clause: string;
+  page_numbers: number[];
+  /** One box per page: 8 floats per entry in `page_numbers` order. */
+  polygon: number[];
+  json_file: string | null;
+  text: string;
+  chars: number;
+}
+
+export interface DocPipelineDocument {
+  docid: string;
+  doc_type: string | null;
+  doc_path: string | null;
+  json_path: string | null;
+  clauses: DocPipelineClause[];
+}

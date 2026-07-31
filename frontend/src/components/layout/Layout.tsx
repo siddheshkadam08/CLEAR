@@ -24,6 +24,7 @@ const TITLES: Record<string, string> = {
   '/search': 'Search',
   '/copilot': 'Copilot',
   '/jobs': 'Processing',
+  '/doc-pipeline': 'Document pipeline',
   '/alerts': 'Alerts',
   '/clause-master': 'Clause Master',
   '/admin/projects': 'Projects',

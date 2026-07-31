@@ -8,6 +8,8 @@
 
 import { api, apiStream, apiUpload } from './client';
 import type {
+  DocPipelineDocument,
+  DocPipelineInsights,
   Alert,
   AlertStatus,
   AnswerResponse,
@@ -302,6 +304,16 @@ export const jobs = {
 export const dashboard = {
   overview: (projectId?: UUID | null) =>
     api.get<Dashboard>('/dashboard', { query: { project_id: projectId ?? undefined } }),
+};
+
+/**
+ * Insights over the document pipeline's own tables. Separate from `dashboard`
+ * because the two count different things - see DocPipelinePage.
+ */
+export const docpipeline = {
+  insights: (limit = 50) =>
+    api.get<DocPipelineInsights>('/docpipeline', { query: { limit } }),
+  document: (docid: string) => api.get<DocPipelineDocument>(`/docpipeline/documents/${docid}`),
 };
 
 export const clauseMaster = {
