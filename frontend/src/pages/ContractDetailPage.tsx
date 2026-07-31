@@ -45,7 +45,7 @@ import { Card, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { PdfViewer } from '@/components/PdfViewer';
-import { daysUntil, formatDate, formatDateTime, formatMoney, humanise } from '@/lib/format';
+import { daysUntil, formatDate, formatDateTime, formatDateTimeFull, formatMoney, humanise } from '@/lib/format';
 
 type FixedTab = 'overview' | 'risks' | 'obligations' | 'dates' | 'parties' | 'processing';
 
@@ -427,8 +427,8 @@ const TabButton = ({
 /** Label-over-value pair. Two columns on a phone, three from `sm`. */
 const DataField = ({ label, value }: { label: string; value: ReactNode }) => (
   <div>
-    <dt className="text-xs font-semibold uppercase tracking-wider text-slate-400">{label}</dt>
-    <dd className="mt-1 text-sm text-slate-900">{value}</dd>
+    <dt className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-400">{label}</dt>
+    <dd className="mt-1 text-sm text-slate-900 dark:text-slate-100">{value}</dd>
   </div>
 );
 
@@ -503,13 +503,13 @@ function OverviewTab({
       {summary ? (
         <Card>
           <SectionHeader title="Summary" subtitle="Generated from the extracted clauses." />
-          <p className="text-sm leading-7 text-slate-700">{summary}</p>
+          <p className="text-sm leading-7 text-slate-700 dark:text-slate-300">{summary}</p>
           {topics.length ? (
             <div className="mt-4 flex flex-wrap gap-2">
               {topics.map((topic) => (
                 <span
                   key={topic}
-                  className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600"
+                  className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300"
                 >
                   {humanise(topic)}
                 </span>
@@ -536,7 +536,7 @@ function OverviewTab({
               <>
                 {formatDate(metadata?.expiration_date)}
                 {remaining !== null ? (
-                  <span className="ml-1.5 text-xs text-slate-500">
+                  <span className="ml-1.5 text-xs text-slate-500 dark:text-slate-400">
                     {remaining < 0 ? 'expired' : `in ${remaining} days`}
                   </span>
                 ) : null}
@@ -570,9 +570,9 @@ function OverviewTab({
       <Card>
         <SectionHeader title="Document" subtitle="The file this knowledge came from." />
         <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <DataField label="File" value={contract.original_file_name} />
+          <DataField label="Name" value={<span className="break-all">{contract.original_file_name}</span>} />
           <DataField label="Pages" value={contract.page_count ?? '—'} />
-          <DataField label="Uploaded" value={formatDateTime(contract.created_at)} />
+          <DataField label="Uploaded On" value={formatDateTimeFull(contract.created_at)} />
         </dl>
       </Card>
     </div>
@@ -606,7 +606,7 @@ function RisksTab({
     <div className="space-y-4">
       <Card>
         <div className="flex flex-wrap items-center gap-4">
-          <span className="text-3xl font-semibold tabular-nums text-slate-900">
+            <span className="text-3xl font-semibold tabular-nums text-slate-900 dark:text-slate-100">
             {assessment.score}
           </span>
           <Badge

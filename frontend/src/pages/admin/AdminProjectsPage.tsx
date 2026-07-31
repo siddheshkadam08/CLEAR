@@ -22,9 +22,10 @@ import { ErrorBanner, SuccessBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { Field, inputClasses } from '@/components/common/Field';
+import { Field, inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Modal } from '@/components/common/Modal';
+import { Pagination } from '@/components/common/Pagination';
 import { formatDate, formatDateTimeFull, formatNumber } from '@/lib/format';
 
 /** Roles an administrator can hand out. `system_admin` is deliberately absent:
@@ -38,6 +39,8 @@ const ASSIGNABLE_ROLES: { value: RoleName; label: string; hint: string }[] = [
 export function AdminProjectsPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 10;
   const [createOpen, setCreateOpen] = useState(false);
   const [membersFor, setMembersFor] = useState<ProjectListItem | null>(null);
   const [notice, setNotice] = useState('');
@@ -57,6 +60,11 @@ export function AdminProjectsPage() {
         .some((value) => String(value).toLowerCase().includes(needle)),
     );
   }, [data, search]);
+
+  // Reset to first page when filter changes
+  useMemo(() => setPage(1), [search]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pagedItems = items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.ceil(items.length / PAGE_SIZE);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['admin', 'projects'] });
@@ -105,41 +113,41 @@ export function AdminProjectsPage() {
           <Card className="hidden overflow-hidden p-0 md:block">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-                  <tr>
-                    <th className="px-5 py-3 font-semibold">Project</th>
-                    <th className="px-5 py-3 font-semibold">Status</th>
-                    <th className="px-5 py-3 text-right font-semibold">Contracts</th>
-                    <th className="px-5 py-3 text-right font-semibold">Members</th>
-                    <th className="px-5 py-3 font-semibold">Created</th>
-                    <th className="px-5 py-3" />
+                <thead className="bg-slate-50/80 text-xs dark:bg-slate-800/80">
+                  <tr className="border-b border-slate-200 dark:border-slate-700">
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Project</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Status</th>
+                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Contracts</th>
+                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Members</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Created On</th>
+                    <th className="px-5 py-3.5" />
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {items.map((project) => (
-                    <tr key={project.id} className="transition hover:bg-slate-50">
-                      <td className="px-5 py-3">
-                        <p className="font-medium text-slate-900">{project.name}</p>
+                <tbody className="divide-y divide-slate-100/80 dark:divide-slate-700/50">
+                  {pagedItems.map((project) => (
+                    <tr key={project.id} className="transition hover:bg-blue-50/40 dark:hover:bg-blue-950/10">
+                      <td className="px-5 py-3.5">
+                        <p className="font-medium text-slate-900 dark:text-slate-100">{project.name}</p>
                         {project.client_name ? (
-                          <p className="text-xs text-slate-500">{project.client_name}</p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">{project.client_name}</p>
                         ) : null}
                       </td>
-                      <td className="px-5 py-3">
+                      <td className="px-5 py-3.5">
                         <Badge
                           text={formatStatusLabel(project.status)}
                           variant={getStatusVariant(project.status)}
                         />
                       </td>
-                      <td className="px-5 py-3 text-right tabular-nums text-slate-700">
+                      <td className="px-5 py-3.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
                         {formatNumber(project.contract_count)}
                       </td>
-                      <td className="px-5 py-3 text-right tabular-nums text-slate-700">
+                      <td className="px-5 py-3.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
                         {formatNumber(project.member_count)}
                       </td>
-                      <td className="px-5 py-3 text-slate-500">
+                      <td className="px-5 py-3.5 text-slate-500 dark:text-slate-400">
                         {formatDateTimeFull(project.created_at)}
                       </td>
-                      <td className="px-5 py-3 text-right">
+                      <td className="px-5 py-3.5 text-right">
                         <Button
                           variant="secondary"
                           size="sm"
@@ -154,6 +162,11 @@ export function AdminProjectsPage() {
                 </tbody>
               </table>
             </div>
+            {totalPages > 1 && (
+              <div className="border-t border-slate-200 bg-slate-50/80 px-5 py-3 dark:border-slate-700 dark:bg-slate-800/80">
+                <Pagination page={page} pages={totalPages} total={items.length} pageSize={PAGE_SIZE} onPage={setPage} />
+              </div>
+            )}
           </Card>
 
           <div className="space-y-3 md:hidden">
@@ -161,9 +174,9 @@ export function AdminProjectsPage() {
               <Card key={project.id} dense>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate font-semibold text-slate-900">{project.name}</p>
+                    <p className="truncate font-semibold text-slate-900 dark:text-slate-100">{project.name}</p>
                     {project.client_name ? (
-                      <p className="truncate text-xs text-slate-500">{project.client_name}</p>
+                      <p className="truncate text-xs text-slate-500 dark:text-slate-400">{project.client_name}</p>
                     ) : null}
                   </div>
                   <Badge
@@ -172,21 +185,21 @@ export function AdminProjectsPage() {
                   />
                 </div>
                 <dl className="mt-3 grid grid-cols-3 gap-2 text-center">
-                  <div className="rounded-xl bg-slate-50 py-2">
-                    <dt className="text-xs text-slate-500">Contracts</dt>
-                    <dd className="text-sm font-semibold text-slate-900">
+                  <div className="rounded-xl bg-slate-50 py-2 dark:bg-slate-700/50">
+                    <dt className="text-xs text-slate-500 dark:text-slate-400">Contracts</dt>
+                    <dd className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                       {formatNumber(project.contract_count)}
                     </dd>
                   </div>
-                  <div className="rounded-xl bg-slate-50 py-2">
-                    <dt className="text-xs text-slate-500">Members</dt>
-                    <dd className="text-sm font-semibold text-slate-900">
+                  <div className="rounded-xl bg-slate-50 py-2 dark:bg-slate-700/50">
+                    <dt className="text-xs text-slate-500 dark:text-slate-400">Members</dt>
+                    <dd className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                       {formatNumber(project.member_count)}
                     </dd>
                   </div>
-                  <div className="rounded-xl bg-slate-50 py-2">
-                    <dt className="text-xs text-slate-500">Created</dt>
-                    <dd className="text-sm font-semibold text-slate-900">
+                  <div className="rounded-xl bg-slate-50 py-2 dark:bg-slate-700/50">
+                    <dt className="text-xs text-slate-500 dark:text-slate-400">Created</dt>
+                    <dd className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                       {formatDateTimeFull(project.created_at)}
                     </dd>
                   </div>
@@ -419,12 +432,13 @@ function ManageMembersDialog({
           <ErrorBanner message={errorMessage(removeMember.error)} />
         ) : null}
 
-        <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
           <Field label="Add a person">
+            <div className="relative">
             <select
               value={userId}
               onChange={(event) => setUserId(event.target.value as UUID)}
-              className={inputClasses}
+              className={selectClasses}
               disabled={users.isLoading}
             >
               <option value="">{users.isLoading ? 'Loading users...' : 'Select a user'}</option>
@@ -434,13 +448,16 @@ function ManageMembersDialog({
                 </option>
               ))}
             </select>
+            <SelectChevron />
+            </div>
           </Field>
 
           <Field label="Role">
+            <div className="relative">
             <select
               value={role}
               onChange={(event) => setRole(event.target.value as RoleName)}
-              className={inputClasses}
+              className={selectClasses}
             >
               {ASSIGNABLE_ROLES.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -448,6 +465,8 @@ function ManageMembersDialog({
                 </option>
               ))}
             </select>
+            <SelectChevron />
+            </div>
           </Field>
 
           <Button
@@ -461,7 +480,7 @@ function ManageMembersDialog({
           </Button>
 
           {!users.isLoading && !candidates.length ? (
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-500 dark:text-slate-400">
               Everyone available is already a member. Create an account on the Users screen
               first.
             </p>
@@ -469,27 +488,27 @@ function ManageMembersDialog({
         </div>
 
         <div>
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-400">
             Current members
           </p>
           {members.isLoading ? (
             <LoadingSpinner size="sm" label="Loading members..." />
           ) : members.data?.length ? (
-            <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-200">
+            <ul className="divide-y divide-slate-100 rounded-2xl border border-slate-200 dark:divide-slate-700 dark:border-slate-700">
               {members.data.map((member) => (
                 <li
                   key={member.id}
                   className="flex items-center justify-between gap-3 px-4 py-3"
                 >
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-slate-900">
+                    <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
                       {member.user.full_name}
                     </p>
-                    <p className="truncate text-xs text-slate-500">{member.user.email}</p>
+                    <p className="truncate text-xs text-slate-500 dark:text-slate-400">{member.user.email}</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <Badge text={member.role_display_name} variant="info" />
-                    {member.role !== 'system_admin' && (
+                    {member.role !== 'system_admin' && member.user.full_name !== 'System Administrator' && (
                       <button
                         type="button"
                         aria-label={`Remove ${member.user.full_name}`}
@@ -497,7 +516,7 @@ function ManageMembersDialog({
                           setConfirmRemove({ id: member.user.id, name: member.user.full_name })
                         }
                         disabled={removeMember.isPending}
-                        className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
+                        className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50 dark:hover:bg-rose-950 dark:hover:text-rose-400"
                       >
                         <Trash2 className="h-4 w-4" />
                       </button>
@@ -507,7 +526,7 @@ function ManageMembersDialog({
               ))}
             </ul>
           ) : (
-            <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500">
+            <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-6 text-center text-sm text-slate-500 dark:border-slate-600 dark:text-slate-400">
               Nobody has been added yet. Until someone is, no contracts can be uploaded here.
             </p>
           )}

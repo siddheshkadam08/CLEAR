@@ -24,9 +24,10 @@ import { ErrorBanner, NoticeBanner, SuccessBanner } from '@/components/common/Ba
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { Field, inputClasses } from '@/components/common/Field';
+import { Field, inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Modal } from '@/components/common/Modal';
+import { Pagination } from '@/components/common/Pagination';
 import { formatDateTimeFull } from '@/lib/format';
 
 const ASSIGNABLE_ROLES: { value: RoleName; label: string; hint: string }[] = [
@@ -38,6 +39,8 @@ const ASSIGNABLE_ROLES: { value: RoleName; label: string; hint: string }[] = [
 export function AdminUsersPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 10;
   const [createOpen, setCreateOpen] = useState(false);
   const [notice, setNotice] = useState('');
 
@@ -56,6 +59,11 @@ export function AdminUsersPage() {
         .some((value) => String(value).toLowerCase().includes(needle)),
     );
   }, [data, search]);
+
+  // Reset to first page when filter changes
+  useMemo(() => setPage(1), [search]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pagedItems = items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.ceil(items.length / PAGE_SIZE);
 
   return (
     <div className="space-y-5">
@@ -96,38 +104,38 @@ export function AdminUsersPage() {
           <Card className="hidden overflow-hidden p-0 md:block">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-                  <tr>
-                    <th className="px-5 py-3 font-semibold">Name</th>
-                    <th className="px-5 py-3 font-semibold">Role</th>
-                    <th className="px-5 py-3 text-right font-semibold">Projects</th>
-                    <th className="px-5 py-3 font-semibold">Last sign-in</th>
-                    <th className="px-5 py-3 font-semibold">Status</th>
+                <thead className="bg-slate-50/80 text-xs dark:bg-slate-800/80">
+                  <tr className="border-b border-slate-200 dark:border-slate-700">
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Name</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Role</th>
+                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Projects</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Last sign-in</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {items.map((user) => (
-                    <tr key={user.id} className="transition hover:bg-slate-50">
-                      <td className="px-5 py-3">
-                        <p className="font-medium text-slate-900">{user.full_name}</p>
-                        <p className="text-xs text-slate-500">{user.email}</p>
+                <tbody className="divide-y divide-slate-100/80 dark:divide-slate-700/50">
+                  {pagedItems.map((user) => (
+                    <tr key={user.id} className="transition hover:bg-blue-50/40 dark:hover:bg-blue-950/10">
+                      <td className="px-5 py-3.5">
+                        <p className="font-medium text-slate-900 dark:text-slate-100">{user.full_name}</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">{user.email}</p>
                       </td>
-                      <td className="px-5 py-3">
+                      <td className="px-5 py-3.5">
                         {user.is_system_admin ? (
                           <Badge text="Administrator" variant="warning" />
                         ) : (
-                          <span className="text-slate-600">
+                          <span className="text-slate-600 dark:text-slate-300">
                             {roleLabel(user.primary_role) ?? '—'}
                           </span>
                         )}
                       </td>
-                      <td className="px-5 py-3 text-right tabular-nums text-slate-700">
+                      <td className="px-5 py-3.5 text-right tabular-nums text-slate-700 dark:text-slate-300">
                         {user.project_count}
                       </td>
-                      <td className="px-5 py-3 text-slate-500">
+                      <td className="px-5 py-3.5 text-slate-500 dark:text-slate-400">
                         {user.last_login_at ? formatDateTimeFull(user.last_login_at) : 'Never'}
                       </td>
-                      <td className="px-5 py-3">
+                      <td className="px-5 py-3.5">
                         <Badge
                           text={user.is_active ? 'Active' : 'Disabled'}
                           variant={user.is_active ? 'success' : 'neutral'}
@@ -138,6 +146,11 @@ export function AdminUsersPage() {
                 </tbody>
               </table>
             </div>
+            {totalPages > 1 && (
+              <div className="border-t border-slate-200 bg-slate-50/80 px-5 py-3 dark:border-slate-700 dark:bg-slate-800/80">
+                <Pagination page={page} pages={totalPages} total={items.length} pageSize={PAGE_SIZE} onPage={setPage} />
+              </div>
+            )}
           </Card>
 
           <div className="space-y-3 md:hidden">
@@ -145,7 +158,7 @@ export function AdminUsersPage() {
               <Card key={user.id} dense>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate font-semibold text-slate-900">{user.full_name}</p>
+                    <p className="truncate font-semibold text-slate-900 dark:text-slate-100">{user.full_name}</p>
                     <p className="truncate text-xs text-slate-500">{user.email}</p>
                   </div>
                   <Badge
@@ -327,8 +340,8 @@ function CreateUserDialog({
           />
         </Field>
 
-        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
             <ShieldCheck className="h-4 w-4 text-blue-600" />
             Project access
           </div>
@@ -338,10 +351,11 @@ function CreateUserDialog({
           ) : projectOptions.length ? (
             <div className="space-y-3">
               <Field label="Project">
+                <div className="relative">
                 <select
                   value={projectId}
                   onChange={(event) => setProjectId(event.target.value as UUID)}
-                  className={inputClasses}
+                  className={selectClasses}
                 >
                   <option value="">No project yet</option>
                   {projectOptions.map((project) => (
@@ -350,13 +364,16 @@ function CreateUserDialog({
                     </option>
                   ))}
                 </select>
+                <SelectChevron />
+                </div>
               </Field>
 
               <Field label="Role in that project">
+                <div className="relative">
                 <select
                   value={role}
                   onChange={(event) => setRole(event.target.value as RoleName)}
-                  className={inputClasses}
+                  className={selectClasses}
                   disabled={!projectId}
                 >
                   {ASSIGNABLE_ROLES.map((option) => (
@@ -365,6 +382,8 @@ function CreateUserDialog({
                     </option>
                   ))}
                 </select>
+                <SelectChevron />
+                </div>
               </Field>
 
               {!projectId ? (

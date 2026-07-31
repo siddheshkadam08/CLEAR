@@ -5,6 +5,7 @@ import { BrowserRouter } from 'react-router-dom';
 
 import App from './App';
 import { ApiError } from './api/errors';
+import './lib/theme';
 import './styles/index.css';
 
 const queryClient = new QueryClient({

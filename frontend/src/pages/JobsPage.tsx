@@ -25,7 +25,7 @@ import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses } from '@/components/common/Field';
+import { selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { formatDateTime, formatDuration, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
@@ -465,11 +465,12 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
               stage in the pipeline to redo one of the cheaper ones. */}
           <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
             <span className="text-sm text-slate-500">Reprocess from</span>
+            <div className="relative sm:w-48">
             <select
               value={fromStage}
               onChange={(event) => setFromStage(event.target.value)}
               aria-label="Reprocess from stage"
-              className={`${inputClasses} sm:w-48`}
+              className={selectClasses}
             >
               {STAGES.map((stage) => (
                 <option key={stage} value={stage}>
@@ -477,6 +478,8 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
                 </option>
               ))}
             </select>
+            <SelectChevron />
+            </div>
             <Button
               variant="secondary"
               size="sm"

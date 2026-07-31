@@ -12,8 +12,8 @@
 
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
-  ChevronLeft,
-  ChevronRight,
+  ChevronDown,
+  ChevronUp,
   FileText,
   SlidersHorizontal,
   Upload,
@@ -33,14 +33,15 @@ import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { Pagination } from '@/components/common/Pagination';
 import { ExportButton } from '@/components/ExportButton';
 import { useAuth } from '@/lib/auth';
-import { daysUntil, formatDate, formatMoney, humanise } from '@/lib/format';
+import { daysUntil, formatDate, formatMoney, formatNumber, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
 const STATUSES = ['uploaded', 'processing', 'ready', 'needs_review', 'failed', 'archived'];
 const RISK_BANDS = ['high', 'medium', 'low'];
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 10;
 
 export function ContractsPage() {
   const { projectId } = useProjectScope();
@@ -127,6 +128,19 @@ export function ContractsPage() {
     setParams(next);
   }
 
+  function toggleSort(field: string) {
+    update((next) => {
+      const currentBy = next.get('sort_by');
+      const currentDir = next.get('sort_dir') ?? 'desc';
+      if (currentBy === field) {
+        next.set('sort_dir', currentDir === 'asc' ? 'desc' : 'asc');
+      } else {
+        next.set('sort_by', field);
+        next.set('sort_dir', 'asc');
+      }
+    });
+  }
+
   const activeFilterCount =
     (filters.status?.length ?? 0) +
     (filters.risk_band?.length ?? 0) +
@@ -139,7 +153,7 @@ export function ContractsPage() {
     <div className="space-y-5">
       <PageHeader
         title="Contracts"
-        subtitle={data ? `${data.meta.total} in scope` : 'Your contract repository'}
+        subtitle={activeFilterCount ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : 'Your contract repository'}
         actions={
           <>
             <Button
@@ -151,17 +165,6 @@ export function ContractsPage() {
             >
               Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
             </Button>
-            {activeFilterCount > 0 ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                icon={X}
-                onClick={() => setParams({})}
-                className="hidden lg:inline-flex"
-              >
-                Clear ({activeFilterCount})
-              </Button>
-            ) : null}
             {/* The same filters the table is showing, so the workbook and the
                 screen cannot disagree. */}
             <ExportButton filters={exportFilters} projectId={projectId} />
@@ -176,26 +179,80 @@ export function ContractsPage() {
         }
       />
 
-      <Card dense className={filtersOpen ? '' : 'hidden lg:block'}>
-        <div className="space-y-4">
-          <input
-            type="search"
-            placeholder="Search title, party or file name"
-            aria-label="Search contracts"
-            defaultValue={filters.q ?? ''}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                const value = event.currentTarget.value.trim();
-                update((next) => {
-                  if (value) next.set('q', value);
-                  else next.delete('q');
-                });
-              }
-            }}
-            className={`${inputClasses} lg:max-w-sm`}
-          />
+      {/* Stats strip */}
+      {data && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E4E7EC] bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-800">
+          <div className="flex items-center gap-2">
+            <span className="font-display text-[22px] font-bold leading-none text-slate-800 dark:text-slate-100">{formatNumber(data.meta.total)}</span>
+            <span className="text-sm text-slate-500 dark:text-slate-400">contracts</span>
+          </div>
+          {activeFilterCount > 0 && (
+            <>
+              <div className="h-5 w-px bg-slate-200 dark:bg-slate-600" />
+              <span className="rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-600 dark:bg-blue-950 dark:text-blue-400">
+                {activeFilterCount} filter{activeFilterCount > 1 ? 's' : ''} active
+              </span>
+              <span className="text-xs text-slate-400 dark:text-slate-500">
+                {data.items.length < data.meta.total ? `showing ${data.items.length} of ${formatNumber(data.meta.total)}` : `all ${formatNumber(data.meta.total)} shown`}
+              </span>
+              <button
+                type="button"
+                onClick={() => setParams({})}
+                className="ml-auto text-xs font-medium text-rose-500 transition hover:text-rose-600 dark:text-rose-400 dark:hover:text-rose-300"
+              >
+                Clear all
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
-          <div className="flex flex-wrap gap-2">
+      <Card dense className={filtersOpen ? '' : 'hidden lg:block'}>
+        <div className="space-y-3">
+          {/* Search + sort on one row */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <input
+              type="search"
+              placeholder="Search title, party or file name"
+              aria-label="Search contracts"
+              defaultValue={filters.q ?? ''}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  const value = event.currentTarget.value.trim();
+                  update((next) => {
+                    if (value) next.set('q', value);
+                    else next.delete('q');
+                  });
+                }
+              }}
+              className={`${inputClasses} sm:flex-1`}
+            />
+            <div className="relative sm:w-52">
+              <select
+                aria-label="Sort order"
+                value={`${filters.sort_by ?? 'created_at'}:${filters.sort_dir ?? 'desc'}`}
+                onChange={(event) => {
+                  const [by = 'created_at', dir = 'desc'] = event.target.value.split(':');
+                  update((next) => {
+                    next.set('sort_by', by);
+                    next.set('sort_dir', dir);
+                  });
+                }}
+                className="h-9 w-full cursor-pointer appearance-none rounded-lg border border-[#E4E7EC] bg-white py-0 pl-3 pr-8 text-[13px] font-medium text-[#0F172A] outline-none transition hover:border-[#94A0B4] focus:border-[#2563EB] focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:hover:border-slate-500"
+              >
+                <option value="created_at:desc">Newest first</option>
+                <option value="created_at:asc">Oldest first</option>
+                <option value="risk_score:desc">Highest risk</option>
+                <option value="expiration_date:asc">Expiring soonest</option>
+                <option value="title:asc">Title A–Z</option>
+              </select>
+              <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5B6478]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+            </div>
+          </div>
+
+          {/* Status + risk chips combined */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Status</span>
             {STATUSES.map((status) => (
               <Chip
                 key={status}
@@ -204,9 +261,8 @@ export function ContractsPage() {
                 onClick={() => toggleMulti('status', status)}
               />
             ))}
-          </div>
-
-          <div className="flex flex-wrap gap-2">
+            <div className="mx-1 h-4 w-px bg-slate-200 dark:bg-slate-600" />
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Risk</span>
             {RISK_BANDS.map((band) => (
               <Chip
                 key={band}
@@ -217,7 +273,8 @@ export function ContractsPage() {
             ))}
           </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+          {/* Toggles */}
+          <div className="flex flex-wrap items-center gap-4">
             <Toggle
               label="Needs review"
               checked={Boolean(filters.needs_review)}
@@ -238,38 +295,18 @@ export function ContractsPage() {
                 })
               }
             />
-
-            <select
-              aria-label="Sort order"
-              value={`${filters.sort_by ?? 'created_at'}:${filters.sort_dir ?? 'desc'}`}
-              onChange={(event) => {
-                const [by = 'created_at', dir = 'desc'] = event.target.value.split(':');
-                update((next) => {
-                  next.set('sort_by', by);
-                  next.set('sort_dir', dir);
-                });
-              }}
-              className={`${inputClasses} sm:ml-auto sm:w-52`}
-            >
-              <option value="created_at:desc">Newest first</option>
-              <option value="created_at:asc">Oldest first</option>
-              <option value="risk_score:desc">Highest risk</option>
-              <option value="expiration_date:asc">Expiring soonest</option>
-              <option value="title:asc">Title A–Z</option>
-            </select>
+            {activeFilterCount > 0 ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={X}
+                onClick={() => setParams({})}
+                className="ml-auto lg:hidden"
+              >
+                Clear all ({activeFilterCount})
+              </Button>
+            ) : null}
           </div>
-
-          {activeFilterCount > 0 ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={X}
-              onClick={() => setParams({})}
-              className="lg:hidden"
-            >
-              Clear all filters ({activeFilterCount})
-            </Button>
-          ) : null}
         </div>
       </Card>
 
@@ -286,17 +323,43 @@ export function ContractsPage() {
           <Card className="hidden overflow-hidden p-0 lg:block">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-                  <tr>
-                    <th className="px-5 py-3 font-semibold">Contract</th>
-                    <th className="px-5 py-3 font-semibold">Type</th>
-                    <th className="px-5 py-3 font-semibold">Status</th>
-                    <th className="px-5 py-3 font-semibold">Risk</th>
-                    <th className="px-5 py-3 text-right font-semibold">Value</th>
-                    <th className="px-5 py-3 font-semibold">Expires</th>
+                <thead className="bg-slate-50/80 text-xs dark:bg-slate-800/80">
+                  <tr className="border-b border-slate-200 dark:border-slate-700">
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Contract</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Type</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Status</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Risk</th>
+                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => toggleSort('contract_value')}
+                        className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition"
+                      >
+                        Value
+                        {filters.sort_by === 'contract_value' ? (
+                          filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
+                        )}
+                      </button>
+                    </th>
+                    <th className="px-5 py-3 font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => toggleSort('expiration_date')}
+                        className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition"
+                      >
+                        Expires
+                        {filters.sort_by === 'expiration_date' ? (
+                          filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
+                        )}
+                      </button>
+                    </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-slate-100/80 dark:divide-slate-700/50">
                   {data.items.map((contract) => (
                     <ContractRow
                       key={contract.id}
@@ -307,6 +370,17 @@ export function ContractsPage() {
                 </tbody>
               </table>
             </div>
+            {data.meta.pages > 1 && (
+              <div className="border-t border-slate-200 bg-slate-50/80 px-5 py-3 dark:border-slate-700 dark:bg-slate-800/80">
+                <Pagination
+                  page={data.meta.page}
+                  pages={data.meta.pages}
+                  total={data.meta.total}
+                  pageSize={PAGE_SIZE}
+                  onPage={goToPage}
+                />
+              </div>
+            )}
           </Card>
 
           <div className="space-y-3 lg:hidden">
@@ -319,33 +393,17 @@ export function ContractsPage() {
             ))}
           </div>
 
-          {data.meta.pages > 1 ? (
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <span className="text-sm text-slate-500">
-                Page {data.meta.page} of {data.meta.pages}
-              </span>
-              <div className="flex gap-2">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon={ChevronLeft}
-                  disabled={!data.meta.has_prev}
-                  onClick={() => goToPage(data.meta.page - 1)}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={!data.meta.has_next}
-                  onClick={() => goToPage(data.meta.page + 1)}
-                >
-                  Next
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              </div>
+          {data.meta.pages > 1 && (
+            <div className="rounded-xl border border-slate-200 bg-white px-5 py-3 lg:hidden dark:border-slate-700 dark:bg-slate-800">
+              <Pagination
+                page={data.meta.page}
+                pages={data.meta.pages}
+                total={data.meta.total}
+                pageSize={PAGE_SIZE}
+                onPage={goToPage}
+              />
             </div>
-          ) : null}
+          )}
         </div>
       ) : (
         <EmptyState
@@ -397,7 +455,7 @@ const Chip = ({
       'rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition',
       active
         ? 'bg-blue-600 text-white ring-blue-600'
-        : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
+        : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-600 dark:hover:bg-slate-700',
     ].join(' ')}
   >
     {label}
@@ -413,7 +471,7 @@ const Toggle = ({
   checked: boolean;
   onChange: (checked: boolean) => void;
 }) => (
-  <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+  <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
     <input
       type="checkbox"
       checked={checked}
@@ -436,31 +494,39 @@ function useExpiry(contract: ContractListItem) {
   };
 }
 
+/** Returns the Tailwind bg-color class for a contract's risk band. */
+function riskBar(band: string | null | undefined): string {
+  if (band === 'critical' || band === 'high') return 'bg-rose-500';
+  if (band === 'medium') return 'bg-amber-400';
+  if (band === 'low') return 'bg-emerald-400';
+  return 'bg-slate-200 dark:bg-slate-600';
+}
+
 function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen: () => void }) {
   const { expiringSoon, expired } = useExpiry(contract);
 
   return (
-    <tr onClick={onOpen} className="cursor-pointer transition hover:bg-slate-50">
+    <tr onClick={onOpen} className="cursor-pointer transition hover:bg-blue-50/40 dark:hover:bg-blue-950/10">
       <td className="max-w-xs px-5 py-3">
-        <p className="truncate font-medium text-slate-900">
+        <p className="truncate font-medium text-slate-900 dark:text-slate-100">
           {contract.title ?? contract.original_file_name}
         </p>
-        <p className="truncate text-xs text-slate-500">{contract.original_file_name}</p>
+        <p className="truncate text-xs text-slate-500 dark:text-slate-400">{contract.original_file_name}</p>
         {contract.status === 'processing' && contract.processing ? (
           <div className="mt-2">
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
               <div
                 className="h-full rounded-full bg-blue-600 transition-all"
                 style={{ width: `${contract.processing.progress}%` }}
               />
             </div>
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
               {humanise(contract.processing.current_stage)}
             </p>
           </div>
         ) : null}
       </td>
-      <td className="px-5 py-3 text-slate-600 uppercase">{humanise(contract.agreement_type)}</td>
+      <td className="px-5 py-3 text-slate-600 uppercase dark:text-slate-400">{humanise(contract.agreement_type)}</td>
       <td className="px-5 py-3">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge
@@ -478,13 +544,13 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
           variant={getRiskVariant(contract.risk_band)}
         />
       </td>
-      <td className="px-5 py-3 text-right tabular-nums text-slate-700">
+      <td className="px-5 py-3 text-right tabular-nums text-slate-700 dark:text-slate-300">
         {formatMoney(contract.contract_value, contract.currency)}
       </td>
       <td className="px-5 py-3">
         <span
           className={
-            expired ? 'text-rose-600' : expiringSoon ? 'text-amber-600' : 'text-slate-600'
+            expired ? 'text-rose-600 dark:text-rose-400' : expiringSoon ? 'text-amber-600 dark:text-amber-400' : 'text-slate-600 dark:text-slate-300'
           }
         >
           {formatDate(contract.expiration_date)}
@@ -507,14 +573,16 @@ function ContractCard({
     <button
       type="button"
       onClick={onOpen}
-      className="w-full rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-blue-200 hover:shadow-md"
+      className="w-full overflow-hidden rounded-2xl border border-slate-200 bg-white text-left shadow-sm transition hover:border-blue-200 hover:shadow-md dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-800"
     >
+      <div className={`h-1 w-full ${riskBar(contract.risk_band)}`} />
+      <div className="p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-semibold text-slate-900">
+          <p className="truncate font-semibold text-slate-900 dark:text-slate-100">
             {contract.title ?? contract.original_file_name}
           </p>
-          <p className="truncate text-xs text-slate-500">{contract.original_file_name}</p>
+          <p className="truncate text-xs text-slate-500 dark:text-slate-400">{contract.original_file_name}</p>
         </div>
         <Badge
           text={formatStatusLabel(contract.status)}
@@ -524,13 +592,13 @@ function ContractCard({
 
       {contract.status === 'processing' && contract.processing ? (
         <div className="mt-3">
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
             <div
               className="h-full rounded-full bg-blue-600 transition-all"
               style={{ width: `${contract.processing.progress}%` }}
             />
           </div>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
             {humanise(contract.processing.current_stage)}
           </p>
         </div>
@@ -544,18 +612,18 @@ function ContractCard({
         {contract.needs_review && contract.status !== 'needs_review' ? (
           <Badge text="Review" variant="warning" />
         ) : null}
-        <span className="text-xs text-slate-500">{humanise(contract.agreement_type)}</span>
+        <span className="text-xs text-slate-500 dark:text-slate-400">{humanise(contract.agreement_type)}</span>
       </div>
 
-      <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3 text-xs">
+      <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3 text-xs dark:border-slate-700">
         <div>
-          <dt className="text-slate-500">Value</dt>
-          <dd className="mt-0.5 font-medium text-slate-900">
+          <dt className="text-slate-500 dark:text-slate-400">Value</dt>
+          <dd className="mt-0.5 font-medium text-slate-900 dark:text-slate-100">
             {formatMoney(contract.contract_value, contract.currency)}
           </dd>
         </div>
         <div>
-          <dt className="text-slate-500">Expires</dt>
+          <dt className="text-slate-500 dark:text-slate-400">Expires</dt>
           <dd
             className={[
               'mt-0.5 font-medium',
@@ -565,8 +633,7 @@ function ContractCard({
             {formatDate(contract.expiration_date)}
           </dd>
         </div>
-      </dl>
-    </button>
+      </dl>      </div>    </button>
   );
 }
 

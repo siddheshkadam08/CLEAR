@@ -19,7 +19,7 @@ export const Card = ({
 }) => (
   <div
     className={[
-      'rounded-xl border border-[#E4E7EC] bg-white shadow-sm',
+      'rounded-xl border border-[#E4E7EC] bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800',
       dense ? 'p-4' : 'p-[18px]',
       className,
     ].join(' ')}
@@ -43,9 +43,9 @@ export const SectionHeader = ({
     <div>
       <div className="flex items-center gap-2">
         {Icon ? <Icon className="h-4 w-4 shrink-0 text-[#94A0B4]" /> : null}
-        <h3 className="text-sm font-semibold text-[#0F172A]">{title}</h3>
+        <h3 className="text-sm font-semibold text-[#0F172A] dark:text-slate-100">{title}</h3>
       </div>
-      {subtitle ? <p className="mt-0.5 text-xs text-[#5B6478]">{subtitle}</p> : null}
+      {subtitle ? <p className="mt-0.5 text-xs text-[#5B6478] dark:text-slate-400">{subtitle}</p> : null}
     </div>
     {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
   </div>
@@ -62,8 +62,8 @@ export const PageHeader = ({
 }) => (
   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
     <div>
-      <h1 className="text-[21px] font-semibold text-[#0F172A]">{title}</h1>
-      <p className="mt-0.5 text-[13px] text-[#5B6478]">{subtitle}</p>
+      <h1 className="text-[21px] font-semibold text-[#0F172A] dark:text-slate-100">{title}</h1>
+      <p className="mt-0.5 text-[13px] text-[#5B6478] dark:text-slate-400">{subtitle}</p>
     </div>
     {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
   </div>
@@ -86,8 +86,8 @@ export const MetricCard = ({
   const body = (
     <div className="flex items-start justify-between gap-3">
       <div className="min-w-0">
-        <p className="text-[12.5px] text-[#5B6478]">{label}</p>
-        <p className="mt-2 text-[26px] font-semibold leading-tight text-[#0F172A]">{value}</p>
+        <p className="text-[12.5px] text-[#5B6478] dark:text-slate-400">{label}</p>
+        <p className="mt-2 text-[26px] font-semibold leading-tight text-[#0F172A] dark:text-slate-100">{value}</p>
       </div>
       <div className={['shrink-0 rounded-lg p-2', accent].join(' ')}>
         <Icon className="h-4 w-4" />
@@ -100,14 +100,14 @@ export const MetricCard = ({
       <button
         type="button"
         onClick={onClick}
-        className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] text-left shadow-sm transition hover:border-blue-200 hover:shadow-md"
+        className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] text-left shadow-sm transition hover:border-blue-200 hover:shadow-md dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-500"
       >
         {body}
       </button>
     );
   }
   return (
-    <div className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm">{body}</div>
+    <div className="rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm dark:border-slate-700 dark:bg-slate-800">{body}</div>
   );
 };
 
@@ -125,7 +125,7 @@ export const ACCENTS = [
 ] as const;
 
 export const KpiSkeleton = () => (
-  <div className="animate-pulse rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm">
+  <div className="animate-pulse rounded-xl border border-[#E4E7EC] bg-white p-[18px] shadow-sm dark:border-slate-700 dark:bg-slate-800">
     <div className="h-7 w-7 rounded-lg bg-slate-200" />
     <div className="mt-3 h-3 w-24 rounded bg-slate-200" />
     <div className="mt-2 h-7 w-16 rounded bg-slate-200" />

@@ -12,11 +12,11 @@ export type BadgeVariant = 'success' | 'warning' | 'danger' | 'info' | 'neutral'
 export type BadgeSize = 'sm' | 'md';
 
 const variantClasses: Record<BadgeVariant, string> = {
-  success: 'bg-[#ECFDF5] text-[#10B981]',
-  warning: 'bg-[#FFFBEB] text-[#D97706]',
-  danger: 'bg-[#FEF2F2] text-[#DC2626]',
-  info: 'bg-[#EFF4FF] text-[#2563EB]',
-  neutral: 'bg-[#F1F5F9] text-[#5B6478]',
+  success: 'bg-[#ECFDF5] text-[#10B981] dark:bg-emerald-950 dark:text-emerald-400',
+  warning: 'bg-[#FFFBEB] text-[#D97706] dark:bg-amber-950 dark:text-amber-400',
+  danger: 'bg-[#FEF2F2] text-[#DC2626] dark:bg-rose-950 dark:text-rose-400',
+  info: 'bg-[#EFF4FF] text-[#2563EB] dark:bg-blue-950 dark:text-blue-400',
+  neutral: 'bg-[#F1F5F9] text-[#5B6478] dark:bg-slate-700 dark:text-slate-300',
 };
 
 const sizeClasses: Record<BadgeSize, string> = {

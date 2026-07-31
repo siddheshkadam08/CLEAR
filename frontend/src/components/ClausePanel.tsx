@@ -29,7 +29,7 @@ import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses } from '@/components/common/Field';
+import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { formatPercent, humanise } from '@/lib/format';
 
 export interface ClausePanelProps {
@@ -182,6 +182,7 @@ function ClauseCard({
           <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
             {humanise(tab.dropdown.field)}
           </span>
+          <div className="relative">
           <select
             value={String(attributes[tab.dropdown.field] ?? '')}
             onChange={(event) =>
@@ -190,7 +191,7 @@ function ClauseCard({
                 [tab.dropdown!.field]: event.target.value || null,
               }))
             }
-            className={inputClasses}
+            className={selectClasses}
           >
             <option value="">Not specified</option>
             {tab.dropdown.options.map((option) => (
@@ -199,6 +200,8 @@ function ClauseCard({
               </option>
             ))}
           </select>
+          <SelectChevron />
+          </div>
         </label>
       ) : null}
 

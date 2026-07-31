@@ -26,7 +26,7 @@ import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses } from '@/components/common/Field';
+import { selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { formatDateTime, formatPercent, humanise } from '@/lib/format';
 
@@ -85,10 +85,11 @@ export function ClauseMasterPage() {
           >
             <label className="block lg:hidden">
               <span className="mb-1.5 block text-sm font-medium text-slate-700">Category</span>
+              <div className="relative">
               <select
                 value={selected?.key ?? ''}
                 onChange={(event) => setSelectedKey(event.target.value)}
-                className={inputClasses}
+                className={selectClasses}
               >
                 {categories
                   .slice()
@@ -101,6 +102,8 @@ export function ClauseMasterPage() {
                     </option>
                   ))}
               </select>
+              <SelectChevron />
+              </div>
             </label>
 
             <div className="hidden lg:block">

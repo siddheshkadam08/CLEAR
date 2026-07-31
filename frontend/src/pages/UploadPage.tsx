@@ -31,7 +31,7 @@ import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { Field, inputClasses } from '@/components/common/Field';
+import { Field, inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { formatBytes } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
@@ -314,11 +314,12 @@ export function UploadPage() {
             required
             hint="Only members of this project will be able to see these documents."
           >
+            <div className="relative">
             <select
               value={target}
               onChange={(event) => setTarget(event.target.value as UUID)}
               disabled={busy}
-              className={inputClasses}
+              className={selectClasses}
             >
               <option value="">Choose a project…</option>
               {projects.map((project) => (
@@ -327,6 +328,8 @@ export function UploadPage() {
                 </option>
               ))}
             </select>
+            <SelectChevron />
+            </div>
           </Field>
         </Card>
       </div>

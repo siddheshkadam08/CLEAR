@@ -31,7 +31,7 @@ import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses } from '@/components/common/Field';
+import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { formatDateTime, formatPercent, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
@@ -307,11 +307,12 @@ export function CopilotPage() {
               className={`${inputClasses} resize-none`}
             />
             <div className="mt-2 flex items-center gap-2">
+              {/* <div className="relative w-36 sm:w-44">
               <select
                 value={format}
                 onChange={(event) => setFormat(event.target.value)}
                 aria-label="Answer format"
-                className={`${inputClasses} w-36 sm:w-44`}
+                className={selectClasses}
               >
                 {FORMATS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -319,6 +320,8 @@ export function CopilotPage() {
                   </option>
                 ))}
               </select>
+              <SelectChevron />
+              </div> */}
               <span className="ml-auto" />
               {streaming ? (
                 <Button

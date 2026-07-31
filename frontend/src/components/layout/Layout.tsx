@@ -7,14 +7,15 @@
  * Z-index ladder: header 20 · mobile scrim 30 · sidebar 40 · modals 50.
  */
 
-import { Menu } from 'lucide-react';
-import { useState } from 'react';
+import { Menu, Moon, Sun } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 
 import { useAuth } from '@/lib/auth';
 import { APP_NAME, initialsOf } from '@/lib/identity';
 import { useProjectScope } from '@/lib/scope';
+import { useTheme } from '@/lib/theme';
 import { Sidebar } from './Sidebar';
 
 const TITLES: Record<string, string> = {
@@ -38,18 +39,114 @@ const titleFor = (pathname: string) => {
   return match ? TITLES[match] : APP_NAME;
 };
 
-export const Layout = ({ children }: { children: ReactNode }) => {
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const { user } = useAuth();
-  const { projects, projectId, setProjectId } = useProjectScope();
-  const { pathname } = useLocation();
+/** Custom dropdown that caps the list at 6 visible options with a scrollbar. */
+const ProjectDropdown = ({
+  value,
+  onChange,
+  projects,
+  placeholder = 'All Business Units',
+  className = '',
+}: {
+  value: string;
+  onChange: (val: string | null) => void;
+  projects: { id: string; name: string }[];
+  placeholder?: string;
+  className?: string;
+}) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const options = [{ id: '', name: placeholder }, ...projects];
+  const selected = options.find((o) => o.id === value) ?? options[0];
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
+    <div ref={ref} className={`relative ${className}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex h-9 w-full cursor-pointer items-center rounded-lg border border-[#E4E7EC] bg-white py-0 pl-3 pr-8 text-left text-[13px] font-medium text-[#0F172A] outline-none transition hover:border-[#94A0B4] dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:hover:border-slate-500"
+      >
+        <span className="block truncate">{selected.name}</span>
+      </button>
+      <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5B6478]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800">
+          {/* Limit to 6 visible rows (~35px each) */}
+          <div className="max-h-[210px] overflow-y-auto">
+            {options.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => { onChange(option.id || null); setOpen(false); }}
+                className={[
+                  'flex w-full items-center truncate px-3 py-2 text-[13px] transition hover:bg-slate-50 dark:hover:bg-slate-700',
+                  option.id === value
+                    ? 'font-semibold text-blue-600 dark:text-blue-400'
+                    : 'text-slate-700 dark:text-slate-200',
+                ].join(' ')}
+              >
+                {option.id === value && (
+                  <span className="mr-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-600 dark:bg-blue-400" />
+                )}
+                <span className="truncate">{option.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
-      <div className="lg:pl-64">
-        <header className="sticky top-0 z-20 border-b border-[#E4E7EC] bg-white">
+export const Layout = ({ children }: { children: ReactNode }) => {
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem('clear-sidebar-collapsed') === 'true'
+  );
+  const [isThemeOpen, setIsThemeOpen] = useState(false);
+  const themeRef = useRef<HTMLDivElement>(null);
+  const { user } = useAuth();
+  const { projects, projectId, setProjectId } = useProjectScope();
+  const { theme, set: setTheme } = useTheme();
+  const { pathname } = useLocation();
+
+  const toggleSidebarCollapse = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem('clear-sidebar-collapsed', String(next));
+      return next;
+    });
+  };
+
+  // Close the panel when clicking outside it
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (themeRef.current && !themeRef.current.contains(e.target as Node)) {
+        setIsThemeOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0f172a]">
+      <Sidebar
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+        isCollapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebarCollapse}
+      />
+
+      <div className={`transition-[padding] duration-300 ${sidebarCollapsed ? 'lg:pl-16' : 'lg:pl-64'}`}>
+        <header className="sticky top-0 z-20 border-b border-[#E4E7EC] bg-white dark:border-slate-700 dark:bg-slate-900">
           <div className="flex h-[60px] items-center justify-between gap-3 px-4 sm:gap-4 sm:px-6 lg:px-8">
             <div className="flex min-w-0 items-center gap-3">
               <button
@@ -65,7 +162,7 @@ export const Layout = ({ children }: { children: ReactNode }) => {
                 <p className="hidden font-mono text-[10px] font-semibold uppercase tracking-[1.2px] text-[#94A0B4] sm:block">
                   Workspace
                 </p>
-                <h2 className="truncate text-[18px] font-semibold text-[#0F172A] sm:text-[20px]">
+                <h2 className="truncate text-[18px] font-semibold text-[#0F172A] dark:text-slate-100 sm:text-[20px]">
                   {titleFor(pathname)}
                 </h2>
               </div>
@@ -80,48 +177,73 @@ export const Layout = ({ children }: { children: ReactNode }) => {
                 <span className="font-mono text-[10px] font-semibold uppercase tracking-[1.2px] text-[#94A0B4]">
                   Business Unit
                 </span>
-                <div className="relative">
-                  <select
-                    value={projectId ?? ''}
-                    onChange={(event) => setProjectId(event.target.value || null)}
-                    className="h-9 w-40 cursor-pointer appearance-none rounded-lg border border-[#E4E7EC] bg-white py-0 pl-3 pr-8 text-[13px] font-medium text-[#0F172A] outline-none transition hover:border-[#94A0B4] focus:border-[#2563EB] focus:ring-2 focus:ring-blue-100 lg:w-48"
-                  >
-                    <option value="">All Business Units</option>
-                    {projects.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {project.name}
-                      </option>
-                    ))}
-                  </select>
-                  <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5B6478]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
-                </div>
+                <ProjectDropdown
+                  value={projectId ?? ''}
+                  onChange={setProjectId}
+                  projects={projects}
+                  className="w-40 lg:w-48"
+                />
               </label>
 
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#2563EB] text-xs font-semibold text-white sm:h-9 sm:w-9">
-                {initialsOf(user?.full_name) || 'XX'}
+              <div ref={themeRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => setIsThemeOpen((o) => !o)}
+                  aria-label="Open appearance menu"
+                  className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#2563EB] text-xs font-semibold text-white transition hover:opacity-90 sm:h-9 sm:w-9"
+                >
+                  {initialsOf(user?.full_name) || 'XX'}
+                </button>
+
+                {isThemeOpen && (
+                  <div className="absolute right-0 top-full z-50 mt-2 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800">
+                    <div className="border-b border-slate-100 px-3 py-2.5 dark:border-slate-700">
+                      <p className="text-[12px] font-semibold text-slate-800 dark:text-slate-100">{user?.full_name}</p>
+                      <p className="truncate text-[11px] text-slate-400 dark:text-slate-500">{user?.email}</p>
+                    </div>
+                    <p className="border-b border-slate-100 px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:border-slate-700 dark:text-slate-500">
+                      Appearance
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => { setTheme('light'); }}
+                      className={[
+                        'flex w-full items-center gap-2.5 px-3 py-2.5 text-[13px] font-medium transition hover:bg-slate-50 dark:hover:bg-slate-700',
+                        theme === 'light' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-700 dark:text-slate-300',
+                      ].join(' ')}
+                    >
+                      <Sun className="h-4 w-4 shrink-0" />
+                      Light
+                      {theme === 'light' && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-blue-600 dark:bg-blue-400" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setTheme('dark'); }}
+                      className={[
+                        'flex w-full items-center gap-2.5 px-3 py-2.5 text-[13px] font-medium transition hover:bg-slate-50 dark:hover:bg-slate-700',
+                        theme === 'dark' ? 'text-blue-600 dark:text-blue-400' : 'text-slate-700 dark:text-slate-300',
+                      ].join(' ')}
+                    >
+                      <Moon className="h-4 w-4 shrink-0" />
+                      Dark
+                      {theme === 'dark' && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-blue-600 dark:bg-blue-400" />}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
 
           {/* Below `md` the project scope moves under the title so it is still
               reachable without a horizontally cramped header row. */}
-          <div className="border-t border-[#E4E7EC] px-4 py-2 md:hidden">
-            <div className="relative">
-              <select
-                value={projectId ?? ''}
-                onChange={(event) => setProjectId(event.target.value || null)}
-                aria-label="Project scope"
-                className="h-9 w-full cursor-pointer appearance-none rounded-lg border border-[#E4E7EC] bg-white py-0 pl-3 pr-8 text-[13px] font-medium text-[#0F172A] outline-none transition hover:border-[#94A0B4] focus:border-[#2563EB] focus:ring-2 focus:ring-blue-100"
-              >
-                <option value="">All my business units</option>
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-              <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5B6478]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
-            </div>
+          <div className="border-t border-[#E4E7EC] px-4 py-2 dark:border-slate-700 md:hidden">
+            <ProjectDropdown
+              value={projectId ?? ''}
+              onChange={setProjectId}
+              projects={projects}
+              placeholder="All my business units"
+              className="w-full"
+            />
           </div>
         </header>
 

@@ -12,7 +12,7 @@ export interface LoadingSpinnerProps {
 }
 
 export const LoadingSpinner = ({ size = 'md', label = 'Loading...' }: LoadingSpinnerProps) => (
-  <div className="flex flex-col items-center justify-center gap-3 py-8 text-slate-500">
+  <div className="flex flex-col items-center justify-center gap-3 py-8 text-slate-500 dark:text-slate-400">
     <div
       className={`${sizeClasses[size]} animate-spin rounded-full border-blue-600 border-t-transparent`}
     />

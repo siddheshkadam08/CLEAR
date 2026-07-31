@@ -22,7 +22,7 @@ import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses } from '@/components/common/Field';
+import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { formatDate, formatDuration, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
@@ -81,17 +81,20 @@ export function SearchPage() {
               className={`${inputClasses} pl-9`}
             />
           </div>
+          <div className="relative sm:w-40">
           <select
             value={mode}
             onChange={(event) => setMode(event.target.value)}
             aria-label="Search mode"
             title="Hybrid fuses meaning and exact wording. Keyword finds literal phrases; semantic finds paraphrases."
-            className={`${inputClasses} sm:w-40`}
+            className={selectClasses}
           >
             <option value="hybrid">Hybrid</option>
             <option value="semantic">Semantic</option>
             <option value="keyword">Keyword</option>
           </select>
+          <SelectChevron />
+          </div>
           <Button type="submit" busy={run.isPending} icon={SearchIcon} className="sm:w-auto">
             {run.isPending ? 'Searching…' : 'Search'}
           </Button>
