@@ -162,7 +162,11 @@ async function deadLetter(
         failed_at: new Date().toISOString(),
         original_job_id: job.id,
       },
-      { jobId: `dlq:${stage}:${job.data.job_id}:${job.attemptsMade}` },
+      // Hyphens, not colons. BullMQ reserves ':' as its Redis key separator and
+      // throws `Custom Id cannot contain :` when constructing the job - so the DLQ
+      // write itself failed, and the one record of an exhausted job was lost at the
+      // exact moment it mattered. Same reservation that governs queue names.
+      { jobId: `dlq-${stage}-${job.data.job_id}-${job.attemptsMade}` },
     );
     jobsDeadLettered.inc({ stage });
     logger.error(

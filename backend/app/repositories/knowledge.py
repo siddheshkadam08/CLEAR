@@ -212,15 +212,26 @@ class RiskRepository(_BulkRepository):
 
 
 def _severity_rank() -> Any:
-    """CASE expression ranking severity from critical to low."""
+    """CASE expression ranking severity from critical to low.
+
+    Written as explicit ``WHEN column = member`` pairs rather than the shorthand
+    ``case({...}, value=Risk.severity)``. The shorthand types its keys from the
+    Python literals, so the ``.value`` strings bound as ``character varying`` while
+    the column is the ``risk_severity`` enum, and Postgres has no
+    ``risk_severity = character varying`` operator - the statement failed outright::
+
+        UndefinedFunctionError: operator does not exist:
+        risk_severity = character varying
+
+    Comparing against the enum members lets the column's own type drive the bind,
+    which is both correct and avoids a cast that would silently reorder nothing but
+    would hide the type mismatch.
+    """
     return case(
-        {
-            RiskSeverity.CRITICAL.value: 0,
-            RiskSeverity.HIGH.value: 1,
-            RiskSeverity.MEDIUM.value: 2,
-            RiskSeverity.LOW.value: 3,
-        },
-        value=Risk.severity,
+        (Risk.severity == RiskSeverity.CRITICAL, 0),
+        (Risk.severity == RiskSeverity.HIGH, 1),
+        (Risk.severity == RiskSeverity.MEDIUM, 2),
+        (Risk.severity == RiskSeverity.LOW, 3),
         else_=4,
     )
 

@@ -51,3 +51,18 @@ def reset_embedding_provider() -> Iterator[None]:
     set_embedding_provider(None)
     yield
     set_embedding_provider(None)
+
+
+@pytest.fixture(autouse=True)
+def reset_alert_dispatcher_cache() -> Iterator[None]:
+    """Drop the cached alert dispatcher around every test.
+
+    The dispatcher is built once per process from settings, so without this a test
+    that overrides ``ALERT_*`` would either inherit an earlier test's providers or
+    leak its own into the next one.
+    """
+    from app.alerting import reset_alert_dispatcher
+
+    reset_alert_dispatcher()
+    yield
+    reset_alert_dispatcher()

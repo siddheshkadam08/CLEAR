@@ -402,6 +402,12 @@ services:
         VITE_ENABLE_MICROSOFT_SSO: ${VITE_ENABLE_MICROSOFT_SSO:-false}
         API_HOST: backend
         API_PORT: "8000"
+        # nginx also proxies object storage, so a presigned download URL can be
+        # same-origin rather than needing MinIO published on its own port. The
+        # bucket name is the proxied path, so the two must agree.
+        STORAGE_HOST: minio
+        STORAGE_PORT: "9000"
+        STORAGE_BUCKET: ${STORAGE_CONTAINER:-cip-documents}
     container_name: ${COMPOSE_PROJECT:-cip}-frontend
     ports:
       # The container serves on 8080 and runs as an unprivileged user.

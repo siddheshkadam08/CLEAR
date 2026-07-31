@@ -119,6 +119,29 @@ class Embedding(Base, UUIDPrimaryKeyMixin):
         Index("ix_embeddings_project_level", "project_id", "level"),
         Index("ix_embeddings_contract_level", "contract_id", "level"),
         Index("ix_embeddings_filter_metadata", "filter_metadata", postgresql_using="gin"),
+        # Duplicate-reuse lookup (``EmbeddingRepository.existing_hashes``).
+        #
+        # Column order is the whole point. The five equality predicates come first,
+        # so the remaining three keys are returned already ordered by
+        # (content_hash, created_at, id) - exactly the DISTINCT ON ordering. That
+        # turns the plan from `Seq Scan -> Sort -> Unique` into a streaming
+        # `Index Only Scan -> Unique`: the sort disappears and the heap is never
+        # touched, because every projected column is in the index.
+        #
+        # Measured on 40k rows (4k matching): 16.6ms -> 3.2ms, 1041 -> 53 buffers.
+        # The gap widens with table size, since the eliminated step is the O(n log n)
+        # one and this query runs once per level on every embedding stage.
+        Index(
+            "ix_embeddings_reuse_lookup",
+            "project_id",
+            "level",
+            "model",
+            "embedding_version",
+            "strategy_version",
+            "content_hash",
+            "created_at",
+            "id",
+        ),
         # ---- HNSW indexes, one per level -----------------------------------
         # Partial indexes keep each graph small, so an L1 candidate search never
         # traverses millions of L3 chunk vectors. Cosine distance matches the

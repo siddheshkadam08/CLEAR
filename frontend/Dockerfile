@@ -58,11 +58,42 @@ FROM nginx:1.27-alpine AS runtime
 
 ARG API_HOST=api
 ARG API_PORT=8000
+# Object storage, proxied same-origin so presigned download URLs need no second
+# public port. STORAGE_BUCKET becomes the nginx location, so it must not collide
+# with a route the SPA owns - see the note in nginx.conf.
+ARG STORAGE_HOST=minio
+ARG STORAGE_PORT=9000
+ARG STORAGE_BUCKET=cip-documents
 ENV API_HOST=$API_HOST \
-    API_PORT=$API_PORT
+    API_PORT=$API_PORT \
+    STORAGE_HOST=$STORAGE_HOST \
+    STORAGE_PORT=$STORAGE_PORT \
+    STORAGE_BUCKET=$STORAGE_BUCKET
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/templates/default.conf.template
+
+# Make the paths nginx writes to at startup owned by the user it will run as.
+#
+# The stock image expects to start as root and drop privileges per worker, so
+# these are root-owned. Running the master as `nginx` without this fails twice
+# over, and neither message names the cause clearly:
+#
+#   20-envsubst-on-templates.sh: ERROR: /etc/nginx/templates exists,
+#                                but /etc/nginx/conf.d is not writable
+#   [emerg] mkdir() "/var/cache/nginx/client_temp" failed (13: Permission denied)
+#
+# The first silently leaves the container with no server block at all; the second
+# stops nginx from starting. The temp directories are created explicitly rather
+# than left to nginx, because it creates them lazily on first use - so a container
+# can come up healthy and then fail on the first request large enough to buffer.
+RUN mkdir -p /var/cache/nginx/client_temp \
+             /var/cache/nginx/proxy_temp \
+             /var/cache/nginx/fastcgi_temp \
+             /var/cache/nginx/uwsgi_temp \
+             /var/cache/nginx/scgi_temp \
+ && touch /var/run/nginx.pid \
+ && chown -R nginx:nginx /var/cache/nginx /var/run/nginx.pid /etc/nginx/conf.d
 
 # nginx:alpine substitutes ${API_HOST}/${API_PORT} from the template on start, so
 # the upstream is configurable without rebuilding the image.

@@ -113,9 +113,22 @@ class EmbeddingRepository(ProjectScopedRepository[Embedding]):
         Scoped to the project deliberately. Identical clause text across two projects
         would produce an identical vector, but reusing one project's row for another
         would put a foreign ``contract_id`` in the second project's result set.
+
+        ``DISTINCT ON`` rather than ``GROUP BY``: the caller wants *one representative
+        row* per hash, not an aggregate of the group. Postgres has no ``min(uuid)``
+        aggregate, so expressing "pick one" as ``min(id)`` did not merely read oddly -
+        it failed outright with ``UndefinedFunctionError`` and took the whole embedding
+        stage down with it. ``DISTINCT ON`` is the operation that was meant all along.
+
+        The ordering picks the **oldest** row, and is total. That matters more than it
+        looks: the returned id is used to reuse a stored vector, so an unstable choice
+        would make reuse - and therefore the resulting index - non-deterministic
+        between runs. ``created_at`` alone is not enough, because rows written in one
+        transaction share ``now()``; ``id`` breaks that tie. Ordering UUIDs is fine -
+        it is only *aggregating* them that Postgres lacks an operator for.
         """
         stmt = (
-            select(Embedding.content_hash, func.min(Embedding.id))
+            select(Embedding.content_hash, Embedding.id)
             .where(
                 Embedding.project_id == project_id,
                 Embedding.level == level,
@@ -123,10 +136,12 @@ class EmbeddingRepository(ProjectScopedRepository[Embedding]):
                 Embedding.embedding_version == embedding_version,
                 Embedding.strategy_version == strategy_version,
             )
-            .group_by(Embedding.content_hash)
+            .distinct(Embedding.content_hash)
+            .order_by(Embedding.content_hash, Embedding.created_at, Embedding.id)
         )
         rows = (await self.db.execute(stmt)).all()
-        return {row[0]: row[1] for row in rows}
+        # One row per hash by construction, so the mapping cannot lose an entry.
+        return dict(rows)  # type: ignore[arg-type]
 
     async def get_vector(self, embedding_id: uuid.UUID, project_id: uuid.UUID) -> Any | None:
         """Fetch a stored vector for reuse, without loading the whole row."""

@@ -224,19 +224,23 @@ def _register_listeners(engine: AsyncEngine) -> None:
     """Per-connection setup: register the pgvector codec and HNSW search depth."""
     settings = get_settings()
 
-    @event.listens_for(engine.sync_engine, "connect")
-    def _on_connect(dbapi_connection: Any, _record: Any) -> None:  # pragma: no cover
-        # asyncpg exposes the raw connection through `_connection`; registering
-        # the vector codec here means Vector columns bind as lists everywhere.
-        raw = getattr(dbapi_connection, "_connection", None)
-        if raw is None:
-            return
-        try:
-            from pgvector.asyncpg import register_vector
-
-            dbapi_connection.await_(register_vector(raw))
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("pgvector_codec_registration_skipped", error=str(exc))
+    # NOTE: pgvector's asyncpg codec is deliberately NOT registered here.
+    #
+    # It used to be, on the reasoning that it would "bind vector columns as lists
+    # everywhere". It does the opposite. The vector columns are declared with
+    # `pgvector.sqlalchemy.HALFVEC`, whose bind processor already renders a list
+    # into pgvector's wire form - the string `'[0.1,0.2,...]'`. Registering the
+    # asyncpg *binary* codec on the same connection puts a second encoder behind
+    # that one, and it rejects what the first produced:
+    #
+    #     asyncpg.exceptions.DataError: invalid input for query argument $5:
+    #     '[-0.038002303708988494,0.0052160...' (expected list or ndarray)
+    #
+    # so every embedding INSERT failed. The two integrations are alternatives, not
+    # layers: use pgvector's SQLAlchemy types (which own both bind and result
+    # processing, as here), or use the raw asyncpg codec - never both. This was
+    # invisible until the duplicate-reuse lookup was fixed, because the stage died
+    # before it ever reached an INSERT.
 
     @event.listens_for(engine.sync_engine, "connect")
     def _set_hnsw_ef_search(dbapi_connection: Any, _record: Any) -> None:  # pragma: no cover

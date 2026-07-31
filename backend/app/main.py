@@ -132,10 +132,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("application_stopping")
+        from app.alerting import close_alert_dispatcher
         from app.core.cache import close_redis
         from app.db.session import shutdown_engine
         from app.storage import close_storage
 
+        # Before the rest: the webhook providers hold pooled HTTP clients, and a
+        # shutdown that leaks them shows up as "Unclosed client session" noise that
+        # buries whatever the real shutdown problem was.
+        await close_alert_dispatcher()
         await close_redis()
         await close_storage()
         await shutdown_engine()

@@ -36,6 +36,24 @@ class CdmBase(BaseModel):
         ser_json_bytes="base64",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_computed_fields(cls, data: Any) -> Any:
+        """Allow a dumped node to be loaded back.
+
+        ``model_dump()`` emits computed fields (``Page.block_count``,
+        ``QualityMetrics.is_degraded``), and ``extra="forbid"`` then rejected them
+        on the way back in - so every CDM artifact written to object storage was
+        unreadable, and the enrichment stage failed on the artifact the parser
+        stage had just written. Dropping exactly the computed names keeps
+        ``forbid`` meaningful for genuinely unknown keys, which is what it is for.
+        """
+        if isinstance(data, dict):
+            computed = cls.model_computed_fields
+            if computed and any(name in data for name in computed):
+                return {key: value for key, value in data.items() if key not in computed}
+        return data
+
 
 class Coordinates(CdmBase):
     """A rectangle on a page, in the page's own coordinate space.

@@ -668,7 +668,17 @@ class QueueSettings(BaseSettings):
 
 
 class AlertSettings(BaseSettings):
-    """Thresholds for the background alert evaluator (§19 alerts)."""
+    """Thresholds for the background alert evaluator, and outbound notification.
+
+    Two related concerns share this group. The ``*_days`` / ``*_cutoff`` fields tune
+    the §19 evaluator that derives contract alerts from metadata. The ``provider``
+    block below governs *delivery* - where an operational alert is sent once raised.
+
+    Delivery is off-by-default in the sense that matters: ``console`` needs no
+    credentials and no network, so the application starts and processes documents
+    with nothing configured. A deployment opts in to Slack/Teams/webhook/email by
+    naming the provider and supplying its endpoint.
+    """
 
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
@@ -681,6 +691,76 @@ class AlertSettings(BaseSettings):
     evaluator_interval_minutes: Annotated[
         int, Field(validation_alias="ALERT_EVALUATOR_INTERVAL_MINUTES", ge=1)
     ] = 60
+
+    # --- delivery ------------------------------------------------------------
+    #: Master switch. False disables outbound notification entirely; alerts are
+    #: still persisted and still logged, so nothing is lost.
+    enabled: Annotated[bool, Field(validation_alias="ALERT_ENABLED")] = True
+    #: CSV, so a deployment can fan out to several channels:
+    #: ``ALERT_PROVIDER=slack,webhook``. Unknown names fail validation at startup
+    #: rather than silently dropping every alert.
+    providers: Annotated[list[str], NoDecode, Field(validation_alias="ALERT_PROVIDER")] = [
+        "console"
+    ]
+    #: Alerts below this level are dropped before any provider is called.
+    min_level: Annotated[str, Field(validation_alias="ALERT_MIN_LEVEL")] = "ERROR"
+
+    #: Per-attempt network timeout. An alert that cannot be delivered quickly is
+    #: worth abandoning: the pipeline is already failing and must not be held up.
+    timeout_seconds: Annotated[
+        float, Field(validation_alias="ALERT_TIMEOUT_SECONDS", gt=0, le=120)
+    ] = 10.0
+    max_attempts: Annotated[int, Field(validation_alias="ALERT_RETRY_ATTEMPTS", ge=1, le=10)] = 3
+    #: First backoff delay; doubles per attempt up to ``retry_backoff_max_seconds``.
+    retry_backoff_seconds: Annotated[
+        float, Field(validation_alias="ALERT_RETRY_BACKOFF_SECONDS", ge=0.0, le=60)
+    ] = 0.5
+    retry_backoff_max_seconds: Annotated[
+        float, Field(validation_alias="ALERT_RETRY_BACKOFF_MAX_SECONDS", ge=0.0, le=300)
+    ] = 8.0
+
+    slack_webhook_url: Annotated[str, Field(validation_alias="SLACK_WEBHOOK_URL")] = ""
+    teams_webhook_url: Annotated[str, Field(validation_alias="TEAMS_WEBHOOK_URL")] = ""
+    webhook_url: Annotated[str, Field(validation_alias="ALERT_WEBHOOK_URL")] = ""
+    #: Optional bearer token for the generic webhook, sent as ``Authorization``.
+    webhook_token: Annotated[str, Field(validation_alias="ALERT_WEBHOOK_TOKEN")] = ""
+
+    smtp_host: Annotated[str, Field(validation_alias="SMTP_HOST")] = ""
+    smtp_port: Annotated[int, Field(validation_alias="SMTP_PORT", ge=1, le=65535)] = 587
+    smtp_username: Annotated[str, Field(validation_alias="SMTP_USERNAME")] = ""
+    smtp_password: Annotated[str, Field(validation_alias="SMTP_PASSWORD")] = ""
+    smtp_from: Annotated[str, Field(validation_alias="SMTP_FROM")] = ""
+    smtp_to: Annotated[list[str], NoDecode, Field(validation_alias="SMTP_TO")] = []
+    smtp_use_tls: Annotated[bool, Field(validation_alias="SMTP_USE_TLS")] = True
+
+    @field_validator("providers", "smtp_to", mode="before")
+    @classmethod
+    def _parse_csv(cls, value: str | list[str] | None) -> list[str]:
+        return _csv_list(value)
+
+    @field_validator("providers")
+    @classmethod
+    def _known_providers(cls, value: list[str]) -> list[str]:
+        # Validated here rather than at dispatch time so a typo is a startup
+        # failure, not an alert that silently never arrives.
+        known = {"console", "slack", "teams", "webhook", "email", "null"}
+        cleaned = [item.strip().lower() for item in value if item.strip()]
+        unknown = sorted(set(cleaned) - known)
+        if unknown:
+            raise ValueError(
+                f"ALERT_PROVIDER contains unknown provider(s) {unknown}; "
+                f"valid values are {sorted(known)}"
+            )
+        return cleaned or ["console"]
+
+    @field_validator("min_level")
+    @classmethod
+    def _upper_min_level(cls, value: str) -> str:
+        allowed = {"INFO", "WARNING", "ERROR", "CRITICAL"}
+        upper = value.strip().upper()
+        if upper not in allowed:
+            raise ValueError(f"ALERT_MIN_LEVEL must be one of {sorted(allowed)}")
+        return upper
 
 
 class ObservabilitySettings(BaseSettings):

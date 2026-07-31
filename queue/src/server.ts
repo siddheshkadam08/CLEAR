@@ -34,6 +34,17 @@ const enqueueSchema = z.object({
   delay_ms: z.number().int().min(0).max(86_400_000).optional(),
 });
 
+/**
+ * Batch enqueue payload.
+ *
+ * Capped so a malformed or hostile caller cannot ask the dispatcher to build an
+ * unbounded pipeline of Redis writes inside one request; the upload endpoint's own
+ * per-batch file limit is far below this.
+ */
+const bulkEnqueueSchema = z.object({
+  jobs: z.array(enqueueSchema).max(500),
+});
+
 /** BullMQ priority: lower runs sooner. */
 const PRIORITY_RANK: Record<string, number> = {
   urgent: 1,
@@ -123,6 +134,93 @@ export function createServer(): express.Express {
         },
       });
     }
+  });
+
+  // ----------------------------------------------------------- enqueue/bulk
+  /**
+   * Batch enqueue, used by the upload endpoint.
+   *
+   * One request per upload batch rather than one per file: a ten-file upload
+   * otherwise costs ten round trips inside the request the browser is waiting on.
+   *
+   * All-or-nothing on validation, matching `/enqueue`: a malformed message is
+   * rejected rather than queued, and a partial accept would leave the caller unable
+   * to say which files are actually being processed. Returned ids are in request
+   * order, because the caller maps them back positionally.
+   */
+  app.post('/enqueue/bulk', async (req, res) => {
+    const parsed = bulkEnqueueSchema.safeParse(req.body);
+    if (!parsed.success) {
+      logger.warn({ issues: parsed.error.issues }, 'bulk_enqueue_rejected');
+      res.status(400).json({
+        error: {
+          code: 'validation_error',
+          message: 'The batch contains a message that is not a valid stage message.',
+          details: parsed.error.format(),
+        },
+      });
+      return;
+    }
+
+    const messages = parsed.data.jobs;
+    if (messages.length === 0) {
+      res.status(202).json({ job_ids: [] });
+      return;
+    }
+
+    // Grouped by stage so each queue takes a single `addBulk` round trip, while
+    // the index carried alongside restores the caller's ordering afterwards.
+    const byStage = new Map<Stage, { index: number; message: (typeof messages)[number] }[]>();
+    messages.forEach((message, index) => {
+      const group = byStage.get(message.stage) ?? [];
+      group.push({ index, message });
+      byStage.set(message.stage, group);
+    });
+
+    const jobIds = new Array<string>(messages.length);
+
+    try {
+      await Promise.all(
+        [...byStage.entries()].map(async ([stage, entries]) => {
+          const added = await getQueue(stage).addBulk(
+            entries.map(({ message }) => {
+              const { delay_ms: delayMs, ...data } = message;
+              return {
+                name: `${stage}:${data.job_id}`,
+                data,
+                opts: {
+                  delay: delayMs ?? 0,
+                  priority: PRIORITY_RANK[data.priority ?? 'normal'] ?? 3,
+                  // Same deterministic id as `/enqueue`, so a retried batch
+                  // collapses onto the existing jobs instead of running twice.
+                  jobId: `${data.job_id}:${stage}:${data.attempt ?? 1}`,
+                },
+              };
+            }),
+          );
+          added.forEach((job, position) => {
+            const entry = entries[position];
+            if (entry) jobIds[entry.index] = String(job.id);
+          });
+        }),
+      );
+    } catch (error) {
+      for (const stage of byStage.keys()) enqueueFailures.inc({ stage });
+      logger.error({ err: error, count: messages.length }, 'bulk_enqueue_failed');
+      res.status(503).json({
+        error: {
+          code: 'queue_error',
+          message: 'The batch could not be queued.',
+        },
+      });
+      return;
+    }
+
+    logger.info(
+      { count: messages.length, stages: [...byStage.keys()] },
+      'stage_batch_enqueued',
+    );
+    res.status(202).json({ job_ids: jobIds });
   });
 
   // ----------------------------------------------------------------- queues

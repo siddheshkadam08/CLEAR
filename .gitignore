@@ -71,3 +71,16 @@ scratch/
 *.log
 *.tsbuildinfo
 frontend/stats.html
+# `make openapi` writes this at the repo root; it is generated from the running
+# API, so a committed copy is stale the moment a route changes.
+openapi.json
+
+# ---- Deployment ----
+# scripts/deploy-remote.sh packages the tree into a tarball and unpacks it on the
+# target as deploy.tar.gz. Neither belongs in the repository, and the archive is
+# large enough to be worth never committing by accident.
+deploy.tar.gz
+clear-deploy-*.tar.gz
+# scripts/deploy.sh moves the development-only compose override aside on a server.
+# Covered by `*.local` above, named here so the reason is discoverable.
+docker-compose.override.yml.local
