@@ -325,6 +325,10 @@ class RetrievalEngine:
 
         # ---- 4. re-rank ------------------------------------------------------
         result.evidence = self._deduplicate(result.evidence)
+        # After every path has contributed, so keyword-only hits and expansions
+        # are named too. Fills only what is missing, and is a no-op when the
+        # vector path already covered everything.
+        await self._attach_titles(result.evidence)
         if plan.rerank and result.evidence:
             result.evidence, result.rerank_ms = await self._rerank(plan, result.evidence)
 
@@ -660,8 +664,15 @@ class RetrievalEngine:
         return evidence
 
     async def _attach_titles(self, evidence: list[Evidence]) -> None:
-        """Attach contract titles, so a citation names the document."""
-        contract_ids = {item.contract_id for item in evidence}
+        """Attach contract titles, so a citation names the document.
+
+        Only fills the gaps. Hydration covers the vector path as it reads, but a
+        keyword-only hit is built straight from `Chunk` and arrives with no title,
+        as does anything expanded from one - so calling this again over the
+        assembled set is what stops a cited source rendering with a blank
+        document name next to siblings from the same contract that have one.
+        """
+        contract_ids = {item.contract_id for item in evidence if item.contract_title is None}
         if not contract_ids:
             return
         rows = (
@@ -671,7 +682,8 @@ class RetrievalEngine:
         ).all()
         titles = {row.id: row.title for row in rows}
         for item in evidence:
-            item.contract_title = titles.get(item.contract_id)
+            if item.contract_title is None:
+                item.contract_title = titles.get(item.contract_id)
 
     async def _expand_neighbours(
         self, plan: RetrievalPlan, result: RetrievalResult

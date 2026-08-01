@@ -9,6 +9,8 @@ detect, so each is pinned by a test that fails loudly if the behaviour returns.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -18,6 +20,7 @@ from app.ai.retrieval.context import Citation, ContextAssembler, ContextPackage
 from app.ai.retrieval.engine import (
     _MAX_CANDIDATE_CONTRACTS,
     Evidence,
+    RetrievalEngine,
     RetrievalResult,
     _suppress_near_duplicates,
 )
@@ -72,6 +75,64 @@ class TestPrefilterTruncation:
     def test_the_cap_is_a_real_bound(self) -> None:
         # Guards against the cap being raised to a number that only looks safe.
         assert _MAX_CANDIDATE_CONTRACTS <= 500
+
+
+class TestSourceNaming:
+    """A cited source with no document name is a citation you cannot follow.
+
+    Hydration runs on the vector path only. A keyword-only hit is built straight
+    from ``Chunk``, and a hit found by both paths keeps the vector copy - so the
+    same contract could appear twice in one answer, named once and blank once,
+    which reads as evidence from somewhere the reader cannot identify.
+    """
+
+    @staticmethod
+    def _engine(titles: dict[uuid.UUID, str]) -> tuple[RetrievalEngine, list[int]]:
+        calls: list[int] = []
+
+        class _Rows:
+            def all(self) -> list[Any]:
+                return [SimpleNamespace(id=cid, title=title) for cid, title in titles.items()]
+
+        class _Db:
+            async def execute(self, _statement: Any) -> Any:
+                calls.append(1)
+                return _Rows()
+
+        return RetrievalEngine(cast(Any, _Db())), calls
+
+    @pytest.mark.asyncio
+    async def test_a_keyword_only_hit_is_named(self) -> None:
+        engine, _ = self._engine({CONTRACT: "SERVICE AGREEMENT"})
+        keyword_hit = _evidence("thirty (30) days notice")
+
+        await engine._attach_titles([keyword_hit])
+
+        assert keyword_hit.contract_title == "SERVICE AGREEMENT"
+
+    @pytest.mark.asyncio
+    async def test_an_already_named_hit_is_not_re_queried(self) -> None:
+        engine, calls = self._engine({CONTRACT: "SERVICE AGREEMENT"})
+        hydrated = _evidence("...")
+        hydrated.contract_title = "SERVICE AGREEMENT"
+
+        await engine._attach_titles([hydrated])
+
+        assert calls == [], "nothing was missing, so the round trip should be skipped"
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_batch_fills_only_the_gaps(self) -> None:
+        engine, _ = self._engine({CONTRACT: "SERVICE AGREEMENT"})
+        named = _evidence("from the vector path")
+        named.contract_title = "SERVICE AGREEMENT"
+        bare = _evidence("from the keyword path")
+
+        await engine._attach_titles([named, bare])
+
+        assert [item.contract_title for item in (named, bare)] == [
+            "SERVICE AGREEMENT",
+            "SERVICE AGREEMENT",
+        ]
 
 
 class TestNearDuplicateSuppression:
