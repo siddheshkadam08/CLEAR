@@ -326,6 +326,44 @@ highlight overlays on the source PDF.
 
 ## Configuration
 
+### One database, every environment
+
+A laptop, the dev server and CI all read and write **Hackathon-DB-SRV**. It has
+two addresses and they are the same PostgreSQL instance, not a copy:
+
+| | |
+| --- | --- |
+| Public | `35.154.17.203:5432` — from a laptop |
+| Private | `172.15.151.102:5432` — from the dev server, `13.234.93.157` |
+| Database / schema | `team-1` / `clear` (`DB_SCHEMA`) |
+| `system_identifier` | `7667820444287067012` |
+
+This is not a convention to be tidied up later. The `cip_*` tables that hold the
+clause taxonomy are maintained by another system and exist only here, so a stack
+pointed anywhere else does not fail in a way that names the cause — it
+classifies a document, finds no clause list for the type, and reports *"No
+clauses are defined for document type"* as though the taxonomy were wrong.
+
+Confirm what a stack actually reached rather than what you believe you set:
+
+```bash
+make db-target                                # asserts Hackathon-DB-SRV, exits non-zero if not
+podman exec cipdemo-backend printenv DATABASE_URL
+```
+
+Two things that make a misconfiguration look like a working system:
+
+- `docker-compose.yml` falls back to a bundled `postgres` service when
+  `DATABASE_URL` is **unset**, so a missing value starts cleanly against an
+  empty database. That service stays running because two others declare
+  `depends_on` on it; it holds no application data. `make psql-local` reaches
+  it, `make psql` reaches the real one.
+- Comparing hostnames proves nothing — two environments can hold the same string
+  and reach different servers. `system_identifier` is the only value that
+  settles it, which is what `make db-target` compares.
+
+### Everything else
+
 All configuration is environment-based (`pydantic-settings`); no secrets in code.
 `.env.example` documents every variable. The ones that change behaviour most:
 

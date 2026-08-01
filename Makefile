@@ -82,8 +82,21 @@ migration: ## Autogenerate a migration: make migration m="add table x"
 downgrade: ## Roll back one migration
 	$(COMPOSE) run --rm migrate alembic downgrade -1
 
+.PHONY: db-target
+db-target: ## Assert this environment points at Hackathon-DB-SRV
+	@# Piped into the running backend rather than mounted: the backend image is
+	@# built from ./backend, so a repo-root script is not in it, and this checks
+	@# what a *running* container resolved rather than what .env claims.
+	$(COMPOSE) exec -T backend python - < scripts/check-db-target.py
+
 .PHONY: psql
-psql: ## Open a psql shell
+psql: ## psql shell on the database the app uses (Hackathon-DB-SRV)
+	@url=$$(grep -hE '^DATABASE_URL=' .env | cut -d= -f2- | tr -d '\r' | sed 's/+asyncpg//;s/+psycopg//'); \
+	 test -n "$$url" || { echo "DATABASE_URL is not set in .env - see the block above it in .env.example."; exit 1; }; \
+	 $(COMPOSE) exec postgres psql "$$url"
+
+.PHONY: psql-local
+psql-local: ## psql shell on the bundled compose Postgres (holds no application data)
 	$(COMPOSE) exec postgres psql -U $${POSTGRES_USER:-cip} -d $${POSTGRES_DB:-cip}
 
 .PHONY: redis-cli
