@@ -503,7 +503,9 @@ function OverviewTab({
       {summary ? (
         <Card>
           <SectionHeader title="Summary" subtitle="Generated from the extracted clauses." />
-          <p className="text-sm leading-7 text-slate-700 dark:text-slate-300">{summary}</p>
+          <div className="max-h-48 overflow-y-auto pr-1">
+            <p className="text-sm leading-7 text-slate-700 dark:text-slate-300">{summary}</p>
+          </div>
           {topics.length ? (
             <div className="mt-4 flex flex-wrap gap-2">
               {topics.map((topic) => (

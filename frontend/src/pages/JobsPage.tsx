@@ -75,10 +75,10 @@ export function JobsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
+      {/* <PageHeader
         title="Processing"
         subtitle="Eight stages per contract. Each stage checkpoints, so a retry resumes rather than restarts."
-      />
+      /> */}
 
       {health && health.unavailable_stages.length ? (
         <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">

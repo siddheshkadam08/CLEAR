@@ -74,14 +74,11 @@ export function LoginPage() {
         }}>
           {/* Brand */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', position: 'relative', zIndex: 2 }}>
-            <svg width="34" height="34" viewBox="0 0 40 40" fill="none" style={{ flexShrink: 0 }}>
-              <circle cx="20" cy="20" r="16.5" stroke="#2563EB" strokeWidth="3.4" strokeDasharray="72 32" strokeLinecap="round" transform="rotate(-90 20 20)" />
-              <rect x="15.5" y="11" width="11" height="18" rx="2.2" fill="#E7EAF0" />
-              <rect x="18" y="16" width="6" height="1.6" rx="0.8" fill="#0F172A" />
-              <rect x="18" y="20" width="6" height="1.6" rx="0.8" fill="#0F172A" />
-              <rect x="18" y="24" width="4" height="1.6" rx="0.8" fill="#0F172A" />
-            </svg>
-            <span style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: '19px', letterSpacing: '0.5px' }}>CLEAR</span>
+            <img src="/image/clear-logo.png" width="50" height="50" alt="C.L.E.A.R." style={{ flexShrink: 0, objectFit: 'contain' }} />
+            <div>
+              <div style={{ fontFamily: "'Manrope', sans-serif", fontWeight: 700, fontSize: '20px', letterSpacing: '0.5px' }}>C.L.E.A.R.</div>
+              <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: '10px', fontWeight: 500, letterSpacing: '0.4px', color: 'rgba(255,255,255,0.45)', marginTop: '1px' }}>Clause Locator &amp; Executive Agreement Review</div>
+            </div>
           </div>
 
           {/* Hero */}

@@ -10,12 +10,12 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FolderKanban, FolderPlus, Search, Trash2, UserPlus, Users } from 'lucide-react';
+import { FolderKanban, FolderPlus, Pencil, Search, Trash2, UserPlus, Users } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { admin as adminApi, projects as projectsApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
-import type { ProjectListItem, RoleName, UUID } from '@/api/types';
+import type { ProjectListItem, ProjectMember, RoleName, UUID } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner, SuccessBanner } from '@/components/common/Banner';
@@ -74,15 +74,15 @@ export function AdminProjectsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Projects"
-        subtitle="Create projects and decide who works in them."
+      {/* <PageHeader
+        title="Business Units"
+        subtitle="Create Business Units and decide who works in them."
         actions={
           <Button icon={FolderPlus} onClick={() => setCreateOpen(true)}>
-            New project
+            New Business Unit
           </Button>
         }
-      />
+      /> */}
 
       {notice ? <SuccessBanner message={notice} /> : null}
       {error ? (
@@ -115,7 +115,7 @@ export function AdminProjectsPage() {
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50/80 text-xs dark:bg-slate-800/80">
                   <tr className="border-b border-slate-200 dark:border-slate-700">
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Project</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Business Unit</th>
                     <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Status</th>
                     <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Contracts</th>
                     <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Members</th>
@@ -232,7 +232,7 @@ export function AdminProjectsPage() {
               </Button>
             ) : (
               <Button icon={FolderPlus} onClick={() => setCreateOpen(true)}>
-                Create a project
+                Create a Business Unit
               </Button>
             )
           }
@@ -299,7 +299,7 @@ function CreateProjectDialog({
     <Modal
       open={open}
       onClose={close}
-      title="New project"
+      title="New Business Unit"
       description="Contracts, extractions and search results stay inside it."
       footer={
         <>
@@ -311,7 +311,7 @@ function CreateProjectDialog({
             disabled={!name.trim()}
             onClick={() => mutation.mutate()}
           >
-            Create project
+            Create Business Unit
           </Button>
         </>
       }
@@ -325,7 +325,7 @@ function CreateProjectDialog({
       >
         {mutation.isError ? <ErrorBanner message={errorMessage(mutation.error)} /> : null}
 
-        <Field label="Project name" required>
+        <Field label="Business Unit Name" required>
           <input
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -335,7 +335,7 @@ function CreateProjectDialog({
           />
         </Field>
 
-        <Field label="Client" hint="Optional. Shown on the project card.">
+        <Field label="Client" hint="Optional. Shown on the Business Unit card.">
           <input
             value={clientName}
             onChange={(event) => setClientName(event.target.value)}
@@ -344,7 +344,7 @@ function CreateProjectDialog({
           />
         </Field>
 
-        <Field label="Description" hint="Optional. What this project is for.">
+        <Field label="Description" hint="Optional. What this Business Unit is for.">
           <textarea
             value={description}
             onChange={(event) => setDescription(event.target.value)}
@@ -371,8 +371,22 @@ function ManageMembersDialog({
 }) {
   const [userId, setUserId] = useState<UUID | ''>('');
   const [role, setRole] = useState<RoleName>('project_manager');
+  const [editingMember, setEditingMember] = useState<ProjectMember | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<{ id: UUID; name: string } | null>(null);
+  const [confirmEdit, setConfirmEdit] = useState(false);
   const projectId = project?.id;
+
+  const startEdit = (member: ProjectMember) => {
+    setEditingMember(member);
+    setUserId(member.user.id);
+    setRole(member.role as RoleName);
+  };
+
+  const cancelEdit = () => {
+    setEditingMember(null);
+    setUserId('');
+    setRole('project_manager');
+  };
 
   const members = useQuery({
     queryKey: ['admin', 'project-members', projectId],
@@ -391,6 +405,16 @@ function ManageMembersDialog({
       projectsApi.addMember(projectId as UUID, { user_id: userId as UUID, role }),
     onSuccess: () => {
       setUserId('');
+      void members.refetch();
+      onChanged();
+    },
+  });
+
+  const updateMember = useMutation({
+    mutationFn: () =>
+      projectsApi.updateMember(projectId as UUID, editingMember!.user.id, { role }),
+    onSuccess: () => {
+      cancelEdit();
       void members.refetch();
       onChanged();
     },
@@ -428,25 +452,34 @@ function ManageMembersDialog({
     >
       <div className="space-y-5">
         {addMember.isError ? <ErrorBanner message={errorMessage(addMember.error)} /> : null}
+        {updateMember.isError ? <ErrorBanner message={errorMessage(updateMember.error)} /> : null}
         {removeMember.isError ? (
           <ErrorBanner message={errorMessage(removeMember.error)} />
         ) : null}
 
         <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
-          <Field label="Add a person">
+          <Field label={editingMember ? `Editing: ${editingMember.user.full_name}` : 'Add a person'}>
             <div className="relative">
             <select
               value={userId}
-              onChange={(event) => setUserId(event.target.value as UUID)}
+              onChange={(event) => !editingMember && setUserId(event.target.value as UUID)}
               className={selectClasses}
-              disabled={users.isLoading}
+              disabled={users.isLoading || Boolean(editingMember)}
             >
-              <option value="">{users.isLoading ? 'Loading users...' : 'Select a user'}</option>
-              {candidates.map((user) => (
-                <option key={user.id} value={user.id}>
-                  {user.full_name} — {user.email}
+              {editingMember ? (
+                <option value={editingMember.user.id}>
+                  {editingMember.user.full_name} — {editingMember.user.email}
                 </option>
-              ))}
+              ) : (
+                <>
+                  <option value="">{users.isLoading ? 'Loading users...' : 'Select a user'}</option>
+                  {candidates.map((user) => (
+                    <option key={user.id} value={user.id}>
+                      {user.full_name} — {user.email}
+                    </option>
+                  ))}
+                </>
+              )}
             </select>
             <SelectChevron />
             </div>
@@ -469,17 +502,34 @@ function ManageMembersDialog({
             </div>
           </Field>
 
-          <Button
-            icon={UserPlus}
-            className="w-full"
-            disabled={!userId}
-            busy={addMember.isPending}
-            onClick={() => addMember.mutate()}
-          >
-            Add to project
-          </Button>
+          <div className="flex gap-2">
+            {editingMember ? (
+              <>
+                <Button
+                  className="flex-1"
+                  busy={updateMember.isPending}
+                  onClick={() => setConfirmEdit(true)}
+                >
+                  Save Role
+                </Button>
+                <Button variant="secondary" onClick={cancelEdit}>
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button
+                icon={UserPlus}
+                className="w-full"
+                disabled={!userId}
+                busy={addMember.isPending}
+                onClick={() => addMember.mutate()}
+              >
+                Add to Business Unit
+              </Button>
+            )}
+          </div>
 
-          {!users.isLoading && !candidates.length ? (
+          {!editingMember && !users.isLoading && !candidates.length ? (
             <p className="text-xs text-slate-500 dark:text-slate-400">
               Everyone available is already a member. Create an account on the Users screen
               first.
@@ -508,6 +558,18 @@ function ManageMembersDialog({
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <Badge text={member.role_display_name} variant="info" />
+                    {/* Edit: all non-system-admin members */}
+                    {member.role !== 'system_admin' && member.user.full_name !== 'System Administrator' && (
+                      <button
+                        type="button"
+                        aria-label={`Edit ${member.user.full_name}`}
+                        onClick={() => startEdit(member)}
+                        className="rounded-lg p-2 text-slate-400 transition hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950 dark:hover:text-blue-400"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                    )}
+                    {/* Delete: all non-system-admin members */}
                     {member.role !== 'system_admin' && member.user.full_name !== 'System Administrator' && (
                       <button
                         type="button"
@@ -555,6 +617,33 @@ function ManageMembersDialog({
               }}
             >
               Yes, remove
+            </Button>
+          </>
+        }
+      />
+
+      <Modal
+        open={confirmEdit}
+        onClose={() => setConfirmEdit(false)}
+        title="Update role"
+        description={
+          editingMember
+            ? `Are you sure you want to change ${editingMember.user.full_name}'s role?`
+            : ''
+        }
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setConfirmEdit(false)}>
+              No
+            </Button>
+            <Button
+              busy={updateMember.isPending}
+              onClick={() => {
+                setConfirmEdit(false);
+                updateMember.mutate();
+              }}
+            >
+              Yes, update
             </Button>
           </>
         }

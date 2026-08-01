@@ -1,6 +1,6 @@
 /** Product name and user-initial helpers, shared by the sidebar and the header. */
 
-export const APP_NAME = 'Contract Intelligence';
+export const APP_NAME = 'C.L.E.A.R.';
 
 export const initialsOf = (name?: string | null) =>
   (name ?? '')

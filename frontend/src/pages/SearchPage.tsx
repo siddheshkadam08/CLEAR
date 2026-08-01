@@ -57,10 +57,10 @@ export function SearchPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
+      {/* <PageHeader
         title="Search"
         subtitle="Ask in plain language, or search for exact wording. Results are scoped to the projects you belong to."
-      />
+      /> */}
 
       <Card>
         <form

@@ -54,8 +54,8 @@ export function ClauseMasterPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Clause Master"
-        subtitle="Configuration, not code. Adding a clause category or changing what makes one mandatory takes effect on the next extraction."
+        // title="Clause Master"
+        // subtitle="Configuration, not code. Adding a clause category or changing what makes one mandatory takes effect on the next extraction."
         actions={
           <label className="inline-flex items-center gap-2 text-sm text-slate-700">
             <input
