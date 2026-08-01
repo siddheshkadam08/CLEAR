@@ -22,8 +22,8 @@ from app.services.auth import INTERACTION_REQUIRED_ERRORS, AuthService
 #: The real values, so a test failure reads against what is actually deployed.
 #: Tenant is the *directory* id and becomes the authority path; client is the
 #: *application* id and becomes the `client_id` parameter.
-TENANT = "f72edf57-01e0-4138-aca3-de022cfc0ca2"
-CLIENT = "06e84b96-907a-4418-ae29-211bfd190e84"
+TENANT = "06e84b96-907a-4418-ae29-211bfd190e84"
+CLIENT = "f72edf57-01e0-4138-aca3-de022cfc0ca2"
 
 
 @pytest.fixture

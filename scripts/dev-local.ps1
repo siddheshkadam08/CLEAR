@@ -25,6 +25,10 @@ param(
     [switch]$Seed,
     [switch]$Serve,
     [switch]$EnableSso,
+    # Use the throwaway podman Postgres instead of the shared Hackathon DB.
+    # Off by default: the point of a local run is usually to see the same data
+    # the deployed app sees.
+    [switch]$LocalStack,
     # 8000 and 5173 are already taken on this machine - 8000 by a separate
     # "Contract Intelligence POC" and 5173 by the `cipdemo-frontend` container -
     # so the defaults here step around both rather than fighting them.
@@ -50,12 +54,63 @@ if (-not (Test-Path $python)) {
     throw "No virtualenv at $python. Run: cd backend; python -m venv .venv; .\.venv\Scripts\pip install -e '.[dev,ai]'"
 }
 
-# --- point at the local stack -------------------------------------------------
-# The async driver for the app; Alembic swaps in the sync one itself.
-$env:DATABASE_URL = "postgresql+asyncpg://cip:cip_dev_password@localhost:$PostgresPort/cip"
-$env:REDIS_URL = "redis://localhost:$RedisPort/0"
-$env:STORAGE_ENDPOINT_URL = "http://localhost:$MinioPort"
-$env:STORAGE_PUBLIC_ENDPOINT_URL = "http://localhost:$MinioPort"
+# --- load .env into the process environment -----------------------------------
+#
+# Required, not a convenience. The nested settings groups in app/core/config.py
+# (DatabaseSettings, LLMSettings, ...) are separate BaseSettings classes built by
+# default_factory, and none of them declares `env_file` - so the parent's does
+# not cascade and they read os.environ only.
+#
+# The failure is silent and expensive: a native run without this connects as
+# user `cip` to localhost and falls back to mock AI providers, reporting nothing
+# amiss. Compose injects the environment as real variables, which is why this
+# only bites outside a container.
+$envFile = Join-Path $repo '.env'
+if (Test-Path $envFile) {
+    $loaded = 0
+    foreach ($line in Get-Content $envFile) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        $split = $trimmed.IndexOf('=')
+        if ($split -lt 1) { continue }
+        $key = $trimmed.Substring(0, $split).Trim()
+        $value = $trimmed.Substring($split + 1).Trim()
+        # Strip surrounding quotes, then an unquoted trailing comment. Doing it
+        # in that order matters: a quoted value may legitimately contain a `#`.
+        if ($value -match '^"(.*)"$' -or $value -match "^'(.*)'$") {
+            $value = $Matches[1]
+        }
+        elseif ($value -match '\s+#') {
+            $value = ($value -split '\s+#')[0].Trim()
+        }
+        Set-Item -Path "env:$key" -Value $value
+        $loaded++
+    }
+    Write-Host "  loaded $loaded values from .env" -ForegroundColor DarkGray
+}
+else {
+    Write-Warning "No .env at $envFile - the app will fall back to its defaults."
+}
+
+# --- override only what differs for a native run ------------------------------
+if ($LocalStack) {
+    # The podman demo stack, for working offline or against throwaway data.
+    $env:DATABASE_URL = "postgresql+asyncpg://cip:cip_dev_password@localhost:$PostgresPort/cip"
+    $env:REDIS_URL = "redis://localhost:$RedisPort/0"
+    $env:STORAGE_ENDPOINT_URL = "http://localhost:$MinioPort"
+    $env:STORAGE_PUBLIC_ENDPOINT_URL = "http://localhost:$MinioPort"
+    Write-Host "  DB -> local podman stack (localhost:$PostgresPort)" -ForegroundColor Cyan
+}
+else {
+    # .env already points DATABASE_URL at Hackathon-DB-SRV; only the service
+    # hostnames need rewriting, because `redis` and `minio` resolve inside the
+    # compose network and nowhere else.
+    $env:REDIS_URL = "redis://localhost:$RedisPort/0"
+    $env:STORAGE_ENDPOINT_URL = "http://localhost:$MinioPort"
+    $env:STORAGE_PUBLIC_ENDPOINT_URL = "http://localhost:$MinioPort"
+    $target = ($env:DATABASE_URL -replace '(://[^:]+:)[^@]+@', '$1***@')
+    Write-Host "  DB -> $target" -ForegroundColor Cyan
+}
 
 # Tracing off by default: without a collector the exporter retries on every
 # request and makes the logs unreadable for no benefit.
@@ -66,17 +121,38 @@ $env:CORS_ORIGINS = "http://localhost:$WebPort,http://localhost:5173,http://loca
 
 if ($EnableSso) {
     $env:OIDC_ENABLED = 'true'
-    # Directory (tenant) ID, then Application (client) ID. The original snippet
-    # had these the other way round - `f72edf57` was in the URL path and
-    # `06e84b96` in `client_id`. Swapped is not a subtle failure: Entra answers
-    # AADSTS900023 ("Specified tenant identifier is neither a valid DNS name nor
-    # a valid external domain") because it cannot find a directory by that id.
-    $env:AZURE_AD_TENANT_ID = 'f72edf57-01e0-4138-aca3-de022cfc0ca2'
-    $env:AZURE_AD_CLIENT_ID = '06e84b96-907a-4418-ae29-211bfd190e84'
+    # Directory (tenant) ID, then Application (client) ID. Both are GUIDs and
+    # transposing them is easy - Entra then answers AADSTS90002, "Tenant '<guid>'
+    # not found", at the authorize step. The preflight below is the only way to
+    # tell them apart without a browser round trip: a directory answers the
+    # discovery endpoint and an application does not.
+    $env:AZURE_AD_TENANT_ID = '06e84b96-907a-4418-ae29-211bfd190e84'
+    $env:AZURE_AD_CLIENT_ID = 'f72edf57-01e0-4138-aca3-de022cfc0ca2'
     # No client secret: a SPA registration is a public client and PKCE
     # authenticates the code exchange instead.
     $env:OIDC_REDIRECT_URI = "http://localhost:$ApiPort/api/v1/auth/oidc/callback"
     $env:OIDC_POST_LOGIN_REDIRECT = "http://localhost:$WebPort/auth/callback"
+
+    # Preflight: only a real directory serves a discovery document, so this
+    # catches a tenant/client transposition before the first sign-in attempt
+    # instead of after it. A failure here is a warning, not a throw - the machine
+    # may simply be offline, and the rest of the app does not need Entra.
+    $discovery = "https://login.microsoftonline.com/$($env:AZURE_AD_TENANT_ID)/v2.0/.well-known/openid-configuration"
+    try {
+        $null = Invoke-RestMethod $discovery -TimeoutSec 10
+        Write-Host "  tenant $($env:AZURE_AD_TENANT_ID) resolves" -ForegroundColor DarkGray
+    }
+    catch {
+        $detail = $_.ErrorDetails.Message
+        if ($detail -match 'AADSTS\d+[^"]*') {
+            Write-Warning "AZURE_AD_TENANT_ID is not a directory: $($Matches[0])"
+            Write-Warning "Tenant and client are probably the wrong way round - sign-in will fail."
+        }
+        else {
+            Write-Host "  could not reach Entra to check the tenant (offline?)" -ForegroundColor DarkGray
+        }
+    }
+
     Write-Host "  SSO on. Register this redirect URI in Entra, exactly:" -ForegroundColor Cyan
     Write-Host "    $($env:OIDC_REDIRECT_URI)" -ForegroundColor Yellow
 }
