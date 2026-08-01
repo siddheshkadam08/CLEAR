@@ -250,10 +250,12 @@ export function DashboardPage() {
                       <YAxis type="category" dataKey="name" tick={chartTick} tickLine={false} axisLine={false} width={120} />
                       <Tooltip
                         contentStyle={tooltipStyle}
-                        formatter={(val: number, _: string, { payload }: { payload?: { fullName?: string; currency?: string } }) => [
-                          formatMoney(val, payload?.currency),
-                          payload?.fullName ?? '',
-                        ]}
+                        formatter={(val, _name, item) => {
+                          const row = item?.payload as
+                            | { fullName?: string; currency?: string }
+                            | undefined;
+                          return [formatMoney(Number(val ?? 0), row?.currency), row?.fullName ?? ''];
+                        }}
                         labelFormatter={() => ''}
                       />
                       <Bar dataKey="value" radius={[0, 6, 6, 0]} maxBarSize={28}>

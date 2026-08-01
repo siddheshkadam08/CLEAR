@@ -31,7 +31,7 @@ import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { Field, inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
+import { Field, selectClasses, SelectChevron } from '@/components/common/Field';
 import { formatBytes } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 

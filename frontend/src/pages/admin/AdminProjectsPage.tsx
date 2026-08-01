@@ -26,7 +26,7 @@ import { Field, inputClasses, selectClasses, SelectChevron } from '@/components/
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Modal } from '@/components/common/Modal';
 import { Pagination } from '@/components/common/Pagination';
-import { formatDate, formatDateTimeFull, formatNumber } from '@/lib/format';
+import { formatDateTimeFull, formatNumber } from '@/lib/format';
 
 /** Roles an administrator can hand out. `system_admin` is deliberately absent:
  *  platform administration is granted on the account, not per project. */

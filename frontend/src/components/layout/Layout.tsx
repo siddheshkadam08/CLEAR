@@ -56,8 +56,11 @@ const ProjectDropdown = ({
 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const options = [{ id: '', name: placeholder }, ...projects];
-  const selected = options.find((o) => o.id === value) ?? options[0];
+  // Held separately rather than read back as `options[0]`: the compiler cannot
+  // see that a spread-built array is non-empty, so indexing it is `T | undefined`.
+  const fallback = { id: '', name: placeholder };
+  const options = [fallback, ...projects];
+  const selected = options.find((o) => o.id === value) ?? fallback;
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {

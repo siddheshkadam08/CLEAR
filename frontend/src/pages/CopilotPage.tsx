@@ -31,7 +31,7 @@ import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
+import { inputClasses } from '@/components/common/Field';
 import { formatDateTime, formatPercent, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
@@ -50,17 +50,13 @@ interface Turn {
   error?: string;
 }
 
-const FORMATS = [
-  { value: '', label: 'Prose' },
-  { value: 'bullet_points', label: 'Bullet points' },
-  { value: 'table', label: 'Table' },
-];
-
 export function CopilotPage() {
   const { projectId } = useProjectScope();
   const queryClient = useQueryClient();
   const [question, setQuestion] = useState('');
-  const [format, setFormat] = useState('');
+  // No control sets this any more - the format picker was removed from the
+  // markup - but the value is still sent with the question.
+  const [format] = useState('');
   const [sessionId, setSessionId] = useState<UUID | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [streaming, setStreaming] = useState(false);
