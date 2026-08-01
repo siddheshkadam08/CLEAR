@@ -34,9 +34,8 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Pagination } from '@/components/common/Pagination';
-import { ExportButton } from '@/components/ExportButton';
 import { useAuth } from '@/lib/auth';
-import { daysUntil, formatDate, formatMoney, formatNumber, humanise } from '@/lib/format';
+import { daysUntil, formatDate, formatDateTimeFull, formatMoney, formatNumber, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
 const PAGE_SIZE = 10;
@@ -65,30 +64,6 @@ export function ContractsPage() {
   };
 
   const [searchInput, setSearchInput] = useState('');
-
-  /**
-   * The same filters, in the shape the export endpoint takes.
-   *
-   * The list endpoint accepts flat query parameters; the export takes a
-   * `ContractFilterParams` body, where free text is `search` and dates are
-   * ranges. Translating here — rather than hoping the two happen to line up —
-   * is what keeps the workbook equal to the view it was launched from.
-   */
-  const exportFilters: Record<string, unknown> = {};
-  if (filters.q) exportFilters.search = filters.q;
-  if (filters.status?.length) exportFilters.status = filters.status;
-  if (filters.risk_band?.length) exportFilters.risk_band = filters.risk_band;
-  if (filters.agreement_type?.length) exportFilters.agreement_type = filters.agreement_type;
-  if (filters.needs_review !== undefined) exportFilters.needs_review = filters.needs_review;
-  if (filters.has_unlimited_liability !== undefined) {
-    exportFilters.has_unlimited_liability = filters.has_unlimited_liability;
-  }
-  if (filters.expiring_before || filters.expiring_after) {
-    exportFilters.expiration_date = {
-      from: filters.expiring_after ?? null,
-      to: filters.expiring_before ?? null,
-    };
-  }
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['contracts', projectId, params.toString()],
@@ -170,9 +145,6 @@ export function ContractsPage() {
             >
               Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
             </Button>
-            {/* The same filters the table is showing, so the workbook and the
-                screen cannot disagree. */}
-            <ExportButton filters={exportFilters} projectId={projectId} />
             {/* Uploading is project-member work; an administrator has no upload
                 permission, so the call to action would only lead to a 403. */}
             {!isAdmin ? (
@@ -346,7 +318,7 @@ export function ContractsPage() {
                         {filters.sort_by === 'risk_score' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
                       </button>
                     </th>
-                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                    {/* <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
                       <button
                         type="button"
                         onClick={() => toggleSort('contract_value')}
@@ -359,8 +331,22 @@ export function ContractsPage() {
                           <ChevronDown className="h-3.5 w-3.5 opacity-30" />
                         )}
                       </button>
+                    </th> */}
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => toggleSort('created_at')}
+                        className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition"
+                      >
+                        Created On
+                        {filters.sort_by === 'created_at' ? (
+                          filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
+                        )}
+                      </button>
                     </th>
-                    <th className="px-5 py-3 font-semibold">
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
                       <button
                         type="button"
                         onClick={() => toggleSort('expiration_date')}
@@ -373,6 +359,9 @@ export function ContractsPage() {
                           <ChevronDown className="h-3.5 w-3.5 opacity-30" />
                         )}
                       </button>
+                    </th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      Uploaded By
                     </th>
                   </tr>
                 </thead>
@@ -514,8 +503,11 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
           variant={getRiskVariant(contract.risk_band)}
         />
       </td>
-      <td className="px-5 py-3 text-right tabular-nums text-slate-700 dark:text-slate-300">
+      {/* <td className="px-5 py-3 text-right tabular-nums text-slate-700 dark:text-slate-300">
         {formatMoney(contract.contract_value, contract.currency)}
+      </td> */}
+      <td className="px-5 py-3 text-slate-600 dark:text-slate-300">
+        {formatDateTimeFull(contract.created_at)}
       </td>
       <td className="px-5 py-3">
         <span
@@ -525,6 +517,11 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
         >
           {formatDate(contract.expiration_date)}
         </span>
+      </td>
+      <td className="px-5 py-3 text-slate-600 dark:text-slate-300">
+        {(contract.uploaded_by as { full_name?: string; email?: string } | null)?.full_name
+          ?? (contract.uploaded_by as { email?: string } | null)?.email
+          ?? '—'}
       </td>
     </tr>
   );

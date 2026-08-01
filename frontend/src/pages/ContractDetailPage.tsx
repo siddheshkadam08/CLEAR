@@ -16,7 +16,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, ArrowLeft, FileSearch, FileText, Layers } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Download, FileSearch, FileText, Layers, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -44,8 +44,10 @@ import { Button } from '@/components/common/Button';
 import { Card, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { CopilotDrawer } from '@/components/CopilotDrawer';
 import { PdfViewer } from '@/components/PdfViewer';
-import { daysUntil, formatDate, formatDateTime, formatDateTimeFull, formatMoney, humanise } from '@/lib/format';
+import { daysUntil, formatDate, formatDateTimeFull, formatMoney, humanise } from '@/lib/format';
+import { exportContractCsv } from '@/lib/export-csv';
 
 type FixedTab = 'overview' | 'risks' | 'obligations' | 'dates' | 'parties' | 'processing';
 
@@ -60,6 +62,7 @@ export function ContractDetailPage() {
   const [active, setActive] = useState<string>('overview');
   const [focus, setFocus] = useState<Focus | null>(null);
   const [pane, setPane] = useState<'knowledge' | 'document'>('knowledge');
+  const [copilotOpen, setCopilotOpen] = useState(false);
 
   const contractQuery = useQuery({
     queryKey: ['contract', contractId],
@@ -170,6 +173,7 @@ export function ContractDetailPage() {
           <h1 className="truncate text-xl font-semibold text-slate-900 sm:text-2xl">
             {contract.title ?? contract.original_file_name}
           </h1>
+          
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
             <span>{humanise(contract.agreement_type)}</span>
             <span aria-hidden>·</span>
@@ -188,24 +192,22 @@ export function ContractDetailPage() {
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Badge
-            text={formatStatusLabel(contract.status)}
-            variant={getStatusVariant(contract.status)}
-            size="md"
-          />
-          <Badge
-            text={
-              metadata?.risk_band
-                ? `${humanise(metadata.risk_band)}${
-                    metadata.risk_score !== null && metadata.risk_score !== undefined
-                      ? ` · ${Math.round(metadata.risk_score)}`
-                      : ''
-                  }`
-                : 'Unscored'
-            }
-            variant={getRiskVariant(metadata?.risk_band)}
-            size="md"
-          />
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={Download}
+            onClick={() => exportContractCsv(contract, knowledge)}
+          >
+            Export
+          </Button>
+          <Button
+            size="sm"
+            icon={Sparkles}
+            onClick={() => setCopilotOpen(true)}
+            className="bg-gradient-to-r from-blue-600 to-violet-600 text-white shadow-sm hover:from-blue-700 hover:to-violet-700"
+          >
+            Copilot
+          </Button>
         </div>
       </header>
 
@@ -364,6 +366,13 @@ export function ContractDetailPage() {
           {documentPane}
         </aside>
       </div>
+
+      <CopilotDrawer
+        open={copilotOpen}
+        onClose={() => setCopilotOpen(false)}
+        contractId={contractId}
+        contractTitle={contract.title ?? contract.original_file_name}
+      />
     </div>
   );
 }
@@ -508,14 +517,14 @@ function OverviewTab({
           </div>
           {topics.length ? (
             <div className="mt-4 flex flex-wrap gap-2">
-              {topics.map((topic) => (
+              {/* {topics.map((topic) => (
                 <span
                   key={topic}
                   className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300"
                 >
                   {humanise(topic)}
                 </span>
-              ))}
+              ))} */}
             </div>
           ) : null}
         </Card>
@@ -531,7 +540,7 @@ function OverviewTab({
             value={formatMoney(metadata?.contract_value, metadata?.currency)}
           />
           <DataField label="Effective" value={formatDate(metadata?.effective_date)} />
-          <DataField label="Executed" value={formatDate(metadata?.execution_date)} />
+          {/* <DataField label="Executed" value={formatDate(metadata?.execution_date)} /> */}
           <DataField
             label="Expires"
             value={
@@ -549,8 +558,8 @@ function OverviewTab({
             label="Term"
             value={metadata?.term_months ? `${metadata.term_months} months` : '—'}
           />
-          <DataField label="Governing law" value={metadata?.governing_law ?? '—'} />
-          <DataField label="Jurisdiction" value={metadata?.jurisdiction ?? '—'} />
+          {/* <DataField label="Governing law" value={metadata?.governing_law ?? '—'} />
+          <DataField label="Jurisdiction" value={metadata?.jurisdiction ?? '—'} /> */}
           <DataField
             label="Payment terms"
             value={metadata?.payment_terms_days ? `${metadata.payment_terms_days} days` : '—'}
@@ -562,10 +571,10 @@ function OverviewTab({
                 ? `Yes${metadata.auto_renewal_notice_days ? ` — ${metadata.auto_renewal_notice_days} days notice` : ''}`
                 : metadata?.auto_renewal === false
                   ? 'No'
-                  : '—'
+                  : 'No'
             }
           />
-          <DataField label="Language" value={contract.language?.toUpperCase() ?? '—'} />
+          {/* <DataField label="Language" value={contract.language?.toUpperCase() ?? '—'} /> */}
         </dl>
       </Card>
 
@@ -696,7 +705,7 @@ function RiskCard({
           <Badge text="Absent from contract" variant="warning" />
         ) : risk.bounding_boxes.length ? (
           <EvidenceButton
-            label="Show in document"
+            label="Evidence"
             onClick={() => onShowEvidence(risk.bounding_boxes, risk.page_start)}
           />
         ) : null}
@@ -857,7 +866,7 @@ function PartiesTab({
           {party.bounding_boxes.length ? (
             <div className="mt-3">
               <EvidenceButton
-                label="Show in document"
+                label="Evidence"
                 onClick={() => onShowEvidence(party.bounding_boxes, party.page_start)}
               />
             </div>

@@ -160,7 +160,7 @@ function ClauseCard({
               icon={FileSearch}
               onClick={() => onShowEvidence(clause.bounding_boxes, clause.page_start)}
             >
-              Show in document
+              Evidence
             </Button>
           ) : null}
         </div>
@@ -269,7 +269,7 @@ function ClauseCard({
             {clause.text}
           </blockquote>
 
-          <label className="block space-y-1.5">
+          {/* <label className="block space-y-1.5">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Review note (optional)
             </span>
@@ -282,9 +282,9 @@ function ClauseCard({
             />
           </label>
 
-          {saveError ? <ErrorBanner message={saveError} /> : null}
+          {saveError ? <ErrorBanner message={saveError} /> : null} */}
 
-          <div className="flex flex-wrap gap-2">
+          {/* <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               busy={review.isPending}
@@ -312,7 +312,7 @@ function ClauseCard({
                 Discard changes
               </Button>
             ) : null}
-          </div>
+          </div> */}
         </div>
       ) : null}
     </Card>

@@ -30,11 +30,11 @@ import type { LucideIcon } from 'lucide-react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { useAuth } from '@/lib/auth';
-import { APP_NAME, initialsOf } from '@/lib/identity';
+import { initialsOf } from '@/lib/identity';
 
 const ClearLogo = ({ size = 50, className }: { size?: number; className?: string }) => (
   <img
-    src="/image/clear-logo.png"
+    src="/image/irisclear.png"
     alt="C.L.E.A.R"
     width={size}
     height={size}
@@ -59,7 +59,7 @@ const NAV: NavItem[] = [
   { href: '/upload', label: 'Upload', icon: Upload, audience: 'member' },
   { href: '/contracts', label: 'Contracts', icon: FileText },
   // { href: '/search', label: 'Search', icon: Search },
-  { href: '/copilot', label: 'Copilot', icon: Bot },
+  // { href: '/copilot', label: 'Copilot', icon: Bot },
   { href: '/jobs', label: 'Processing', icon: ListChecks },
   { href: '/alerts', label: 'Alerts', icon: AlertTriangle },
   {
@@ -179,7 +179,7 @@ export const Sidebar = ({
           // Collapsed header: centered logo link above the expand button
           <div className="flex flex-col items-center gap-1 py-3">
             <Link to="/" onClick={onClose} className="rounded-lg p-1 transition hover:bg-white/10">
-              <ClearLogo size={40} />
+              <ClearLogo size={48} />
             </Link>
             <button
               type="button"
@@ -193,11 +193,7 @@ export const Sidebar = ({
           // Expanded header: logo + name on left, collapse/close button on right
           <div className="flex items-center justify-between px-4 py-4">
             <Link to="/" onClick={onClose} className="flex min-w-0 items-center gap-2.5">
-              <ClearLogo size={40} className="shrink-0" />
-              <div className="min-w-0">
-                <span className="block text-[17px] font-bold tracking-[0.4px] text-[#E7EAF0]">{APP_NAME}</span>
-                <span className="block truncate text-[6px] font-medium leading-tight tracking-wide text-[#94A0B4]">Clause Locator &amp; Executive Agreement Review</span>
-              </div>
+              <ClearLogo size={170} className="shrink-0" />
             </Link>
             <div className="flex shrink-0 items-center gap-1">
               <button

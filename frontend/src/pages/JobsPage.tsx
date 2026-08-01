@@ -27,7 +27,7 @@ import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { formatDateTime, formatDuration, humanise } from '@/lib/format';
+import { formatDateTime, formatDateTimeFull, formatDuration, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
 const STATES = ['queued', 'ready', 'failed', 'retrying', 'cancelled', 'paused'];
@@ -115,7 +115,7 @@ export function JobsPage() {
         </div>
       ) : null}
 
-      {health && health.queues.length ? (
+      {/* {health && health.queues.length ? (
         <Card className="overflow-hidden">
           <SectionHeader
             title="Queues"
@@ -157,7 +157,7 @@ export function JobsPage() {
             </table>
           </div>
         </Card>
-      ) : null}
+      ) : null} */}
 
       <Card dense>
         <div className="flex flex-wrap gap-2">
@@ -374,7 +374,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
             {job.current_stage ? humanise(job.current_stage) : humanise(job.state)} · started{' '}
             {formatDateTime(job.created_at)}
           </span>
-          {job.finished_at ? <span>finished {formatDateTime(job.finished_at)}</span> : null}
+          {job.finished_at ? <span>finished {formatDateTimeFull(job.finished_at)}</span> : null}
         </div>
       </div>
 

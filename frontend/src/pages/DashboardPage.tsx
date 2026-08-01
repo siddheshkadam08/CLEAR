@@ -51,19 +51,19 @@ import { useTheme } from '@/lib/theme';
 const PIE_COLORS = ['#2563EB', '#10B981', '#D97706', '#94A0B4', '#8B5CF6', '#F43F5E', '#06B6D4', '#F59E0B'];
 
 const STATUS_FILLS: Record<string, string> = {
-  ready: '#10b981',
-  processing: '#2563eb',
+  ready: '#22c55e',
+  processing: '#3b82f6',
   needs_review: '#f59e0b',
-  uploaded: '#94a3b8',
+  uploaded: '#8b5cf6',
   failed: '#ef4444',
-  archived: '#64748b',
+  archived: '#6b7280',
 };
 
 const RISK_FILLS: Record<string, string> = {
-  critical: '#be123c',
-  high: '#e11d48',
-  medium: '#f59e0b',
-  low: '#10b981',
+  critical: '#dc2626',
+  high: '#f97316',
+  medium: '#eab308',
+  low: '#22c55e',
 };
 
 function truncName(s: string, max = 22): string {
