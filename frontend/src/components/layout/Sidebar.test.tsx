@@ -56,10 +56,13 @@ describe('Sidebar navigation', () => {
     expect(screen.queryByRole('link', { name: /upload/i })).not.toBeInTheDocument();
   });
 
+  // "Business Unit", not "Projects": the label was renamed to match what the
+  // business calls the thing. Retrieval Quality is admin-only for the same
+  // reason as the rest - it names the questions users asked.
   it('offers the governance screens to an administrator', () => {
     signIn(ADMIN);
     renderSidebar();
-    for (const label of [/projects/i, /users/i, /clause master/i]) {
+    for (const label of [/business unit/i, /users/i, /clause master/i, /retrieval quality/i]) {
       expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
     }
   });
@@ -67,7 +70,7 @@ describe('Sidebar navigation', () => {
   it('hides the governance screens from a project member', () => {
     signIn(MEMBER);
     renderSidebar();
-    for (const label of [/^projects$/i, /^users$/i, /clause master/i]) {
+    for (const label of [/business unit/i, /^users$/i, /clause master/i, /retrieval quality/i]) {
       expect(screen.queryByRole('link', { name: label })).not.toBeInTheDocument();
     }
   });
@@ -76,10 +79,19 @@ describe('Sidebar navigation', () => {
     for (const user of [ADMIN, MEMBER]) {
       signIn(user);
       const view = renderSidebar();
-      for (const label of [/dashboard/i, /contracts/i, /search/i, /copilot/i, /alerts/i]) {
+      for (const label of [/dashboard/i, /contracts/i, /copilot/i, /alerts/i]) {
         expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
       }
       view.unmount();
     }
+  });
+
+  // Search is commented out of NAV rather than deleted. Asserting its absence
+  // keeps that deliberate: if someone uncomments it, this fails and they have to
+  // decide whether the screen is back rather than shipping a half-restored one.
+  it('does not offer Search while the screen is disabled', () => {
+    signIn(ADMIN);
+    renderSidebar();
+    expect(screen.queryByRole('link', { name: /^search$/i })).not.toBeInTheDocument();
   });
 });

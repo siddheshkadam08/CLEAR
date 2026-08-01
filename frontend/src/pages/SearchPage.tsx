@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Search.
  *
  * Two things distinguish this from a search box. First, the retrieval plan is
@@ -20,7 +20,7 @@ import { Badge } from '@/components/common/Badge';
 import { getRiskVariant } from '@/lib/badges';
 import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
+import { Card, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -57,10 +57,10 @@ export function SearchPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
+      {/* <PageHeader
         title="Search"
         subtitle="Ask in plain language, or search for exact wording. Results are scoped to the projects you belong to."
-      />
+      /> */}
 
       <Card>
         <form
@@ -96,7 +96,7 @@ export function SearchPage() {
           <SelectChevron />
           </div>
           <Button type="submit" busy={run.isPending} icon={SearchIcon} className="sm:w-auto">
-            {run.isPending ? 'Searching…' : 'Search'}
+            {run.isPending ? 'Searchingâ€¦' : 'Search'}
           </Button>
         </form>
 
@@ -134,7 +134,7 @@ export function SearchPage() {
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <span className="text-sm text-slate-500">
               {result.total_hits} passage{result.total_hits === 1 ? '' : 's'} in{' '}
-              {result.contracts.length} contract{result.contracts.length === 1 ? '' : 's'} ·{' '}
+              {result.contracts.length} contract{result.contracts.length === 1 ? '' : 's'} Â·{' '}
               {formatDuration(result.duration_ms)}
             </span>
             <button
@@ -147,7 +147,7 @@ export function SearchPage() {
           </div>
 
           {result.warnings.length ? (
-            <NoticeBanner message={result.warnings.join(' · ')} />
+            <NoticeBanner message={result.warnings.join(' Â· ')} />
           ) : null}
 
           {showPlan ? <PlanCard plan={result.plan} /> : null}
@@ -157,7 +157,7 @@ export function SearchPage() {
               <EmptyState
                 icon={SearchX}
                 title="Nothing matched"
-                description="The retrieval plan shows how the question was interpreted. If the intent or the filters look wrong, rephrasing usually fixes it — or switch to keyword mode to search for exact wording."
+                description="The retrieval plan shows how the question was interpreted. If the intent or the filters look wrong, rephrasing usually fixes it â€” or switch to keyword mode to search for exact wording."
               />
               <PlanCard plan={result.plan} />
             </div>
@@ -183,7 +183,7 @@ export function SearchPage() {
                               {match.title ?? 'Untitled'}
                             </p>
                             <p className="mt-0.5 text-xs text-slate-500">
-                              {formatAgreementType(match.agreement_type)} ·{' '}
+                              {formatAgreementType(match.agreement_type)} Â·{' '}
                               {formatDate(match.expiration_date)}
                             </p>
                           </div>
@@ -192,7 +192,7 @@ export function SearchPage() {
                               <Badge text="Unlimited liability" variant="danger" />
                             ) : null}
                             <Badge
-                              text={match.risk_band ? humanise(match.risk_band) : '—'}
+                              text={match.risk_band ? humanise(match.risk_band) : 'â€”'}
                               variant={getRiskVariant(match.risk_band)}
                             />
                           </div>
@@ -304,7 +304,7 @@ function PlanCard({ plan }: { plan: PlanExplanation }) {
             {plan.levels.map((level) => (
               <Badge
                 key={level.level}
-                text={`${humanise(level.level)} · top ${level.limit} · ≥${level.min_similarity.toFixed(2)}`}
+                text={`${humanise(level.level)} Â· top ${level.limit} Â· â‰¥${level.min_similarity.toFixed(2)}`}
                 variant="neutral"
               />
             ))}

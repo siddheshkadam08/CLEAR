@@ -20,11 +20,9 @@ import {
   FileSearch,
   FileText,
   FolderKanban,
+  Gauge,
   LayoutDashboard,
   ListChecks,
-  LogOut,
-  Gauge,
-  Search,
   Settings2,
   Upload,
   Users,
@@ -35,6 +33,17 @@ import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { useAuth } from '@/lib/auth';
 import { APP_NAME, initialsOf } from '@/lib/identity';
+
+const ClearLogo = ({ size = 50, className }: { size?: number; className?: string }) => (
+  <img
+    src="/image/clear-logo.png"
+    alt="C.L.E.A.R"
+    width={size}
+    height={size}
+    className={className}
+    style={{ objectFit: 'contain' }}
+  />
+);
 
 /** Who a nav item is for. `member` means "everyone except the administrator". */
 type Audience = 'all' | 'admin' | 'member';
@@ -51,14 +60,14 @@ const NAV: NavItem[] = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/upload', label: 'Upload', icon: Upload, audience: 'member' },
   { href: '/contracts', label: 'Contracts', icon: FileText },
-  { href: '/search', label: 'Search', icon: Search },
+  // { href: '/search', label: 'Search', icon: Search },
   { href: '/copilot', label: 'Copilot', icon: Bot },
   { href: '/jobs', label: 'Processing', icon: ListChecks },
   { href: '/doc-pipeline', label: 'Doc Pipeline', icon: FileSearch },
   { href: '/alerts', label: 'Alerts', icon: AlertTriangle },
   {
     href: '/admin/projects',
-    label: 'Projects',
+    label: 'Business Unit',
     icon: FolderKanban,
     audience: 'admin',
     section: 'Administration',
@@ -147,7 +156,7 @@ export const Sidebar = ({
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
 }) => {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const { pathname } = useLocation();
 
   // Role-gated items are filtered out, never rendered-then-disabled: a control you
@@ -180,13 +189,7 @@ export const Sidebar = ({
           // Collapsed header: centered logo link above the expand button
           <div className="flex flex-col items-center gap-1 py-3">
             <Link to="/" onClick={onClose} className="rounded-lg p-1 transition hover:bg-white/10">
-              <svg width="28" height="28" viewBox="0 0 40 40" fill="none">
-                <circle cx="20" cy="20" r="16.5" stroke="#2563EB" strokeWidth="3.4" strokeDasharray="72 32" strokeLinecap="round" transform="rotate(-90 20 20)" />
-                <rect x="15.5" y="11" width="11" height="18" rx="2.2" fill="#E7EAF0" />
-                <rect x="18" y="16" width="6" height="1.6" rx="0.8" fill="#0F172A" />
-                <rect x="18" y="20" width="6" height="1.6" rx="0.8" fill="#0F172A" />
-                <rect x="18" y="24" width="4" height="1.6" rx="0.8" fill="#0F172A" />
-              </svg>
+              <ClearLogo size={40} />
             </Link>
             <button
               type="button"
@@ -200,14 +203,11 @@ export const Sidebar = ({
           // Expanded header: logo + name on left, collapse/close button on right
           <div className="flex items-center justify-between px-4 py-4">
             <Link to="/" onClick={onClose} className="flex min-w-0 items-center gap-2.5">
-              <svg width="28" height="28" viewBox="0 0 40 40" fill="none" className="shrink-0">
-                <circle cx="20" cy="20" r="16.5" stroke="#2563EB" strokeWidth="3.4" strokeDasharray="72 32" strokeLinecap="round" transform="rotate(-90 20 20)" />
-                <rect x="15.5" y="11" width="11" height="18" rx="2.2" fill="#E7EAF0" />
-                <rect x="18" y="16" width="6" height="1.6" rx="0.8" fill="#0F172A" />
-                <rect x="18" y="20" width="6" height="1.6" rx="0.8" fill="#0F172A" />
-                <rect x="18" y="24" width="4" height="1.6" rx="0.8" fill="#0F172A" />
-              </svg>
-              <span className="text-[17px] font-bold tracking-[0.4px] text-[#E7EAF0]">{APP_NAME}</span>
+              <ClearLogo size={40} className="shrink-0" />
+              <div className="min-w-0">
+                <span className="block text-[17px] font-bold tracking-[0.4px] text-[#E7EAF0]">{APP_NAME}</span>
+                <span className="block truncate text-[6px] font-medium leading-tight tracking-wide text-[#94A0B4]">Clause Locator &amp; Executive Agreement Review</span>
+              </div>
             </Link>
             <div className="flex shrink-0 items-center gap-1">
               <button
@@ -278,20 +278,7 @@ export const Sidebar = ({
                 </div>
               </div>
               {/* Sign-out with styled tooltip */}
-              <div className="group/logout relative">
-                <button
-                  type="button"
-                  onClick={() => void logout()}
-                  className="rounded-lg p-2 text-[#8B96AC] transition hover:bg-white/5 hover:text-[#E7EAF0]"
-                >
-                  <LogOut className="h-4 w-4" />
-                </button>
-                <div className="pointer-events-none absolute left-full top-1/2 z-[60] ml-3 -translate-y-1/2 whitespace-nowrap rounded-lg bg-slate-700 px-2.5 py-1.5 text-[12px] font-medium text-white opacity-0 shadow-xl transition-opacity group-hover/logout:opacity-100">
-                  Sign out
-                  <div className="absolute -left-1 top-1/2 h-2 w-2 -translate-y-1/2 rotate-45 bg-slate-700" />
-                </div>
               </div>
-            </div>
           ) : (
             <>
               <div className="mb-2.5 flex items-center gap-2.5 rounded-lg bg-white/5 p-2.5">
@@ -307,13 +294,6 @@ export const Sidebar = ({
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => void logout()}
-                className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-medium text-[#8B96AC] transition hover:border-white/20 hover:bg-white/5 hover:text-[#E7EAF0]"
-              >
-                <LogOut className="h-3.5 w-3.5" /> Sign out
-              </button>
             </>
           )}
         </div>

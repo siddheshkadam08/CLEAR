@@ -39,7 +39,6 @@ import { Button } from '@/components/common/Button';
 import {
   Card,
   KpiSkeleton,
-  PageHeader,
   SectionHeader,
 } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
@@ -147,7 +146,7 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
+      {/* <PageHeader
         title="Overview"
         subtitle={
           projectId
@@ -156,7 +155,7 @@ export function DashboardPage() {
               ? `Across ${data.project_ids.length} project${data.project_ids.length === 1 ? '' : 's'} you can see`
               : 'Your contract repository at a glance'
         }
-      />
+      /> */}
 
       {error ? (
         <ErrorBanner message={errorMessage(error)} onRetry={() => void refetch()} />
@@ -231,7 +230,7 @@ export function DashboardPage() {
                   }
                   icon={Icon}
                   kpiKey={kpi.key}
-                  onClick={kpi.drilldown ? () => openDrilldown(kpi) : undefined}
+                  onClick={() => kpi.drilldown ? openDrilldown(kpi) : navigate('/contracts')}
                 />
               );
             })}
@@ -251,6 +250,10 @@ export function DashboardPage() {
                       <Tooltip
                         contentStyle={tooltipStyle}
                         formatter={(val, _name, item) => {
+                          // `item` is optional on Recharts' formatter signature and
+                          // is genuinely absent on some render paths, so the
+                          // shorter `item.payload` form throws rather than
+                          // rendering an empty tooltip.
                           const row = item?.payload as
                             | { fullName?: string; currency?: string }
                             | undefined;
@@ -319,20 +322,51 @@ export function DashboardPage() {
             <Card>
               <SectionHeader title="Risk distribution" subtitle="Contracts scored by risk band." icon={ShieldAlert} />
               {data.risk_distribution.length ? (
-                <div className="h-[180px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={data.risk_distribution} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} vertical={false} />
-                      <XAxis dataKey="label" tick={chartTick} tickLine={false} axisLine={{ stroke: chartGrid }} tickFormatter={humanise} />
-                      <YAxis allowDecimals={false} tick={chartTick} tickLine={false} axisLine={false} width={28} />
-                      <Tooltip contentStyle={tooltipStyle} labelFormatter={(l) => humanise(String(l))} />
-                      <Bar dataKey="value" radius={[6, 6, 0, 0]} maxBarSize={64}>
-                        {data.risk_distribution.map((bucket) => (
-                          <Cell key={bucket.label} fill={RISK_FILLS[bucket.label.toLowerCase()] ?? '#94a3b8'} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+                <div className="flex items-end gap-6">
+                  {/* Half-donut: cy at 100% so only the top semicircle is visible */}
+                  <div className="h-[110px] w-[220px] shrink-0">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={data.risk_distribution}
+                          dataKey="value"
+                          nameKey="label"
+                          cx="50%"
+                          cy="100%"
+                          startAngle={180}
+                          endAngle={0}
+                          innerRadius={55}
+                          outerRadius={100}
+                          strokeWidth={0}
+                          paddingAngle={2}
+                        >
+                          {data.risk_distribution.map((bucket) => (
+                            <Cell key={bucket.label} fill={RISK_FILLS[bucket.label.toLowerCase()] ?? '#94a3b8'} />
+                          ))}
+                        </Pie>
+                        <Tooltip contentStyle={tooltipStyle} formatter={(val, name) => [String(val), humanise(String(name))]} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-2.5 pb-1">
+                    {data.risk_distribution.map((bucket) => {
+                      const color = RISK_FILLS[bucket.label.toLowerCase()] ?? '#94a3b8';
+                      return (
+                        <div key={bucket.label}>
+                          <div className="flex items-center justify-between text-[12px]">
+                            <span className="flex items-center gap-2 truncate font-medium text-slate-700 dark:text-slate-200">
+                              <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
+                              <span className="truncate">{humanise(bucket.label)}</span>
+                            </span>
+                            <span className="ml-2 shrink-0 font-bold tabular-nums" style={{ color }}>{bucket.percentage}%</span>
+                          </div>
+                          <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
+                            <div className="h-full rounded-full" style={{ width: `${bucket.percentage}%`, background: color }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               ) : (
                 <p className="rounded-lg border border-dashed border-[#E4E7EC] px-4 py-10 text-center text-[13px] text-[#5B6478] dark:border-slate-700 dark:text-slate-400">
@@ -439,14 +473,14 @@ function MetricTile({
       <button
         type="button"
         onClick={onClick}
-        className="group overflow-hidden rounded-xl border border-[#E4E7EC] bg-white text-left shadow-sm transition hover:border-blue-300 hover:shadow-md dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-700"
+        className="group overflow-hidden rounded-xl border-x border-b border-[#E4E7EC] bg-white text-left shadow-sm transition hover:border-blue-300 hover:shadow-md dark:border-slate-700 dark:bg-slate-800 dark:hover:border-blue-700"
       >
         {inner}
       </button>
     );
   }
   return (
-    <div className="overflow-hidden rounded-xl border border-[#E4E7EC] bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
+    <div className="overflow-hidden rounded-xl border-x border-b border-[#E4E7EC] bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
       {inner}
     </div>
   );

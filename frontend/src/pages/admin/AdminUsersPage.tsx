@@ -68,7 +68,7 @@ export function AdminUsersPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Users"
+        // title="Users"
         subtitle="Create accounts and assign them to the projects they work on."
         actions={
           <Button icon={UserPlus} onClick={() => setCreateOpen(true)}>
@@ -108,7 +108,7 @@ export function AdminUsersPage() {
                   <tr className="border-b border-slate-200 dark:border-slate-700">
                     <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Name</th>
                     <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Role</th>
-                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Projects</th>
+                    <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Business Units</th>
                     <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Last sign-in</th>
                     <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Status</th>
                   </tr>

@@ -260,8 +260,8 @@ export function CopilotPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Copilot"
-        subtitle="Answers come only from your contracts, with a citation for every claim. When the contracts do not say, the answer says so."
+        // title="Copilot"
+        // subtitle="Answers come only from your contracts, with a citation for every claim. When the contracts do not say, the answer says so."
         actions={
           <>
             <Button

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Alerts.
  *
  * Deadline alerts are the one place this product acts on time rather than on a
@@ -20,7 +20,7 @@ import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getRiskVariant, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card, PageHeader } from '@/components/common/Card';
+import { Card } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -56,10 +56,10 @@ export function AlertsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
+      {/* <PageHeader
         title="Alerts"
         subtitle="Expiries, renewal notice windows and obligation deadlines across your projects."
-      />
+      /> */}
 
       <Card dense>
         <div className="flex flex-wrap gap-2">
@@ -188,8 +188,8 @@ function AlertRow({ alert }: { alert: Alert }) {
                 Due {formatDate(alert.due_date)}
                 {remaining !== null
                   ? overdue
-                    ? ` · ${Math.abs(remaining)} days overdue`
-                    : ` · in ${remaining} days`
+                    ? ` Â· ${Math.abs(remaining)} days overdue`
+                    : ` Â· in ${remaining} days`
                   : ''}
               </span>
             ) : null}

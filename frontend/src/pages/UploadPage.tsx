@@ -159,7 +159,7 @@ export function UploadPage() {
   if (projects.length === 0) {
     return (
       <div className="space-y-5">
-        <PageHeader title="Upload contracts" subtitle="Add documents to a project." />
+        {/* <PageHeader title="Upload contracts" subtitle="Add documents to a project." /> */}
         <EmptyState
           icon={FolderOpen}
           title="You are not a member of any project"
@@ -172,8 +172,8 @@ export function UploadPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Upload contracts"
-        subtitle="Processing starts automatically: validation, parsing, enrichment, classification, chunking, extraction, embedding and indexing."
+        // title="Upload contracts"
+        // subtitle="Processing starts automatically: validation, parsing, enrichment, classification, chunking, extraction, embedding and indexing."
         actions={
           uploaded.length && !busy ? (
             <Button variant="secondary" onClick={() => navigate('/jobs')}>

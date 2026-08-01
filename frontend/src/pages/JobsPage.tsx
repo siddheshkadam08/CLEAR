@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Processing.
  *
  * The pipeline is eight isolated stages, each emitting an artifact that doubles as
@@ -23,7 +23,7 @@ import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
+import { Card, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -75,10 +75,10 @@ export function JobsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
+      {/* <PageHeader
         title="Processing"
         subtitle="Eight stages per contract. Each stage checkpoints, so a retry resumes rather than restarts."
-      />
+      /> */}
 
       {health && health.unavailable_stages.length ? (
         <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -371,7 +371,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
         </div>
         <div className="mt-2 flex flex-col gap-1 text-xs text-slate-500 sm:flex-row sm:justify-between">
           <span>
-            {job.current_stage ? humanise(job.current_stage) : humanise(job.state)} · started{' '}
+            {job.current_stage ? humanise(job.current_stage) : humanise(job.state)} Â· started{' '}
             {formatDateTime(job.created_at)}
           </span>
           {job.finished_at ? <span>finished {formatDateTime(job.finished_at)}</span> : null}
@@ -451,7 +451,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
                         {formatDuration(stage.duration_ms)}
                       </td>
                       <td className="py-2 text-xs text-slate-500">
-                        {stage.warnings.length ? stage.warnings.join('; ') : '—'}
+                        {stage.warnings.length ? stage.warnings.join('; ') : 'â€”'}
                       </td>
                     </tr>
                   ))}
@@ -486,7 +486,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
               busy={reprocess.isPending}
               onClick={() => reprocess.mutate()}
             >
-              {reprocess.isPending ? 'Queueing…' : 'Reprocess'}
+              {reprocess.isPending ? 'Queueingâ€¦' : 'Reprocess'}
             </Button>
             <span className="text-xs text-slate-500">
               Earlier stages reuse their checkpoints.

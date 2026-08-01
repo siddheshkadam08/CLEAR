@@ -51,20 +51,43 @@ export const SectionHeader = ({
   </div>
 );
 
+/**
+ * Page title row.
+ *
+ * `title` and `subtitle` are optional because the page title moved into the
+ * layout chrome: most screens now pass only `actions` and let the shell name
+ * them. Both are still accepted, so a screen that wants its own heading - or a
+ * heading the layout cannot know, like a contract's name - keeps one.
+ *
+ * When neither is given the heading block is not rendered at all rather than
+ * rendered empty, so the actions sit flush right instead of being pushed down
+ * by a blank `h1`.
+ */
 export const PageHeader = ({
   title,
   subtitle,
   actions,
 }: {
-  title: string;
-  subtitle: string;
+  title?: string;
+  subtitle?: string;
   actions?: ReactNode;
 }) => (
-  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-    <div>
-      <h1 className="text-[21px] font-semibold text-[#0F172A] dark:text-slate-100">{title}</h1>
-      <p className="mt-0.5 text-[13px] text-[#5B6478] dark:text-slate-400">{subtitle}</p>
-    </div>
+  <div
+    className={[
+      'flex flex-col gap-2 sm:flex-row sm:items-center',
+      title || subtitle ? 'sm:justify-between' : 'sm:justify-end',
+    ].join(' ')}
+  >
+    {title || subtitle ? (
+      <div>
+        {title ? (
+          <h1 className="text-[21px] font-semibold text-[#0F172A] dark:text-slate-100">{title}</h1>
+        ) : null}
+        {subtitle ? (
+          <p className="mt-0.5 text-[13px] text-[#5B6478] dark:text-slate-400">{subtitle}</p>
+        ) : null}
+      </div>
+    ) : null}
     {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
   </div>
 );

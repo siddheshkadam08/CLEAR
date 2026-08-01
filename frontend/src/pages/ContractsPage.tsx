@@ -46,8 +46,6 @@ import {
 } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
-const STATUSES = ['uploaded', 'processing', 'ready', 'needs_review', 'failed', 'archived'];
-const RISK_BANDS = ['high', 'medium', 'low'];
 const PAGE_SIZE = 10;
 
 export function ContractsPage() {
@@ -72,6 +70,8 @@ export function ContractsPage() {
     sort_by: params.get('sort_by') ?? undefined,
     sort_dir: params.get('sort_dir') ?? undefined,
   };
+
+  const [searchInput, setSearchInput] = useState('');
 
   /**
    * The same filters, in the shape the export endpoint takes.
@@ -118,17 +118,6 @@ export function ContractsPage() {
     setParams(next, { replace: true });
   }
 
-  function toggleMulti(key: string, value: string) {
-    update((next) => {
-      const current = next.getAll(key);
-      next.delete(key);
-      for (const existing of current) {
-        if (existing !== value) next.append(key, existing);
-      }
-      if (!current.includes(value)) next.append(key, value);
-    });
-  }
-
   function goToPage(page: number) {
     const next = new URLSearchParams(params);
     next.set('page', String(page));
@@ -156,11 +145,27 @@ export function ContractsPage() {
     (filters.has_unlimited_liability ? 1 : 0) +
     (filters.expiring_before ? 1 : 0);
 
+  const needle = searchInput.trim().toLowerCase();
+  const filteredItems = needle && data?.items
+    ? data.items.filter((c) =>
+        [
+          c.title, c.original_file_name, c.party_a, c.party_b, c.vendor,
+          c.agreement_type, c.status, formatStatusLabel(c.status),
+          c.risk_band, c.currency,
+          c.contract_value?.toString(),
+          c.expiration_date,
+          formatDate(c.expiration_date),
+        ].some((v) => typeof v === 'string' && v.toLowerCase().includes(needle))
+      )
+    : (data?.items ?? []);
+
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Contracts"
+        // title="Contracts"
         subtitle={activeFilterCount ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : 'Your contract repository'}
+        title=""
+        // subtitle=""
         actions={
           <>
             <Button
@@ -222,19 +227,11 @@ export function ContractsPage() {
               type="search"
               placeholder="Search title, party or file name"
               aria-label="Search contracts"
-              defaultValue={filters.q ?? ''}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  const value = event.currentTarget.value.trim();
-                  update((next) => {
-                    if (value) next.set('q', value);
-                    else next.delete('q');
-                  });
-                }
-              }}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
               className={`${inputClasses} sm:flex-1`}
             />
-            <div className="relative sm:w-52">
+            {/* <div className="relative sm:w-52">
               <select
                 aria-label="Sort order"
                 value={`${filters.sort_by ?? 'created_at'}:${filters.sort_dir ?? 'desc'}`}
@@ -254,11 +251,11 @@ export function ContractsPage() {
                 <option value="title:asc">Title A–Z</option>
               </select>
               <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5B6478]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
-            </div>
+            </div> */}
           </div>
 
           {/* Status + risk chips combined */}
-          <div className="flex flex-wrap items-center gap-2">
+          {/* <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Status</span>
             {STATUSES.map((status) => (
               <Chip
@@ -278,11 +275,11 @@ export function ContractsPage() {
                 onClick={() => toggleMulti('risk_band', band)}
               />
             ))}
-          </div>
+          </div> */}
 
           {/* Toggles */}
           <div className="flex flex-wrap items-center gap-4">
-            <Toggle
+            {/* <Toggle
               label="Needs review"
               checked={Boolean(filters.needs_review)}
               onChange={(checked) =>
@@ -301,7 +298,7 @@ export function ContractsPage() {
                   else next.delete('has_unlimited_liability');
                 })
               }
-            />
+            /> */}
             {activeFilterCount > 0 ? (
               <Button
                 variant="ghost"
@@ -332,10 +329,30 @@ export function ContractsPage() {
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50/80 text-xs dark:bg-slate-800/80">
                   <tr className="border-b border-slate-200 dark:border-slate-700">
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Contract</th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Type</th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Status</th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">Risk</th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
+                        Contract
+                        {filters.sort_by === 'title' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
+                      </button>
+                    </th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      <button type="button" onClick={() => toggleSort('agreement_type')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
+                        Type
+                        {filters.sort_by === 'agreement_type' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
+                      </button>
+                    </th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      <button type="button" onClick={() => toggleSort('status')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
+                        Status
+                        {filters.sort_by === 'status' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
+                      </button>
+                    </th>
+                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                      <button type="button" onClick={() => toggleSort('risk_score')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
+                        Risk
+                        {filters.sort_by === 'risk_score' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
+                      </button>
+                    </th>
                     <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
                       <button
                         type="button"
@@ -367,7 +384,7 @@ export function ContractsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100/80 dark:divide-slate-700/50">
-                  {data.items.map((contract) => (
+                  {filteredItems.map((contract) => (
                     <ContractRow
                       key={contract.id}
                       contract={contract}
@@ -391,7 +408,7 @@ export function ContractsPage() {
           </Card>
 
           <div className="space-y-3 lg:hidden">
-            {data.items.map((contract) => (
+            {filteredItems.map((contract) => (
               <ContractCard
                 key={contract.id}
                 contract={contract}
@@ -441,53 +458,6 @@ export function ContractsPage() {
     </div>
   );
 }
-
-// =============================================================================
-// Filter controls
-// =============================================================================
-const Chip = ({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) => (
-  <button
-    type="button"
-    onClick={onClick}
-    aria-pressed={active}
-    className={[
-      'rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition',
-      active
-        ? 'bg-blue-600 text-white ring-blue-600'
-        : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-600 dark:hover:bg-slate-700',
-    ].join(' ')}
-  >
-    {label}
-  </button>
-);
-
-const Toggle = ({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) => (
-  <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
-    <input
-      type="checkbox"
-      checked={checked}
-      onChange={(event) => onChange(event.target.checked)}
-      className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-    />
-    {label}
-  </label>
-);
 
 // =============================================================================
 // Rows
