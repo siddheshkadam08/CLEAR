@@ -142,6 +142,12 @@ class OIDCAuthorizeResponse(ResponseSchema):
 
     authorization_url: str
     state: str
+    #: The PKCE verifier for this attempt. The caller stores it in an HttpOnly
+    #: cookie and presents it at the code exchange; it must never reach the page.
+    code_verifier: str = Field(default="", exclude=True)
+    #: ``none`` on the silent attempt, ``select_account`` on the retry, or
+    #: ``None`` when the deployment has silent-first turned off.
+    prompt: str | None = None
 
 
 class SessionInfo(ResponseSchema):

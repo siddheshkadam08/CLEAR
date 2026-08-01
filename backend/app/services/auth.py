@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -38,11 +39,14 @@ from app.core.errors import (
 from app.core.logging import get_logger
 from app.core.security import (
     create_access_token,
+    create_nonce,
+    create_pkce_verifier,
     create_refresh_token,
     create_signed_state,
     hash_password,
     hash_token,
     needs_rehash,
+    pkce_challenge,
     validate_password_strength,
     verify_password,
     verify_signed_state,
@@ -61,6 +65,31 @@ from app.schemas.auth import (
 from app.services.audit import AuditService
 
 logger = get_logger(__name__)
+
+#: Entra error codes that mean "the silent attempt could not complete, ask the
+#: user". Anything else is a real failure and must not be retried - retrying a
+#: consent or configuration error just shows the user the same wall twice.
+INTERACTION_REQUIRED_ERRORS = frozenset(
+    {
+        "login_required",
+        "interaction_required",
+        "consent_required",
+        "account_selection_required",
+    }
+)
+
+
+@lru_cache(maxsize=4)
+def _jwks_client(jwks_url: str) -> Any:
+    """One cached JWKS client per authority.
+
+    ``PyJWKClient`` caches signing keys internally, but only for its own
+    lifetime - constructing a new one per sign-in would fetch the key set on
+    every login and make Microsoft's JWKS endpoint a dependency of each one.
+    """
+    import jwt
+
+    return jwt.PyJWKClient(jwks_url, cache_keys=True)
 
 
 class AuthService:
@@ -155,14 +184,50 @@ class AuthService:
     # =========================================================================
     # Microsoft / Azure AD SSO
     # =========================================================================
-    def authorize_url(self, *, redirect_after: str | None = None) -> OIDCAuthorizeResponse:
-        """Build the Microsoft authorization URL with a signed CSRF state."""
+    def authorize_url(
+        self,
+        *,
+        redirect_after: str | None = None,
+        prompt: str | None = None,
+    ) -> OIDCAuthorizeResponse:
+        """Build the Microsoft authorization URL.
+
+        ``prompt`` drives the silent-first behaviour:
+
+        * ``None`` and ``silent_first`` on → ``prompt=none``. Entra completes
+          invisibly when the browser already holds exactly one usable session,
+          and otherwise returns an error the callback turns into a retry.
+        * ``select_account`` → the account picker, which is where that retry
+          lands and where a user switching identity starts.
+
+        The PKCE verifier is returned rather than embedded in the state. The
+        state is a *signed* blob, not an encrypted one, so anything inside it is
+        readable by whoever holds it - and a verifier the client can read is a
+        verifier that has stopped protecting the exchange. The caller puts it in
+        an HttpOnly cookie.
+        """
         if not self.settings.oidc.is_configured:
             raise NotImplementedFeatureError("Microsoft sign-in is not configured.")
 
         from urllib.parse import urlencode
 
-        state = create_signed_state({"redirect_after": redirect_after or ""})
+        resolved_prompt = prompt
+        if resolved_prompt is None and self.settings.oidc.silent_first:
+            resolved_prompt = "none"
+
+        verifier = create_pkce_verifier()
+        nonce = create_nonce()
+        # The nonce goes in the state so the callback can compare it against the
+        # id token's claim. It needs integrity, not secrecy - knowing it lets an
+        # attacker do nothing, whereas *changing* it is what the signature stops.
+        state = create_signed_state(
+            {
+                "redirect_after": redirect_after or "",
+                "nonce": nonce,
+                "prompt": resolved_prompt or "",
+            }
+        )
+
         params = {
             "client_id": self.settings.oidc.client_id,
             "response_type": "code",
@@ -170,15 +235,25 @@ class AuthService:
             "response_mode": "query",
             "scope": self.settings.oidc.scopes,
             "state": state,
+            "nonce": nonce,
+            "code_challenge": pkce_challenge(verifier),
+            "code_challenge_method": "S256",
         }
+        if resolved_prompt:
+            params["prompt"] = resolved_prompt
+
         url = f"{self.settings.oidc.authority}/oauth2/v2.0/authorize?{urlencode(params)}"
-        return OIDCAuthorizeResponse(authorization_url=url, state=state)
+        logger.info("oidc_authorize_url_built", prompt=resolved_prompt or "default")
+        return OIDCAuthorizeResponse(
+            authorization_url=url, state=state, code_verifier=verifier, prompt=resolved_prompt
+        )
 
     async def complete_oidc_login(
         self,
         *,
         code: str,
         state: str,
+        code_verifier: str | None = None,
         ip: str | None = None,
         user_agent: str | None = None,
     ) -> TokenResponse:
@@ -188,12 +263,19 @@ class AuthService:
 
         # Verify state before spending a network call on the code exchange.
         try:
-            verify_signed_state(state)
+            state_claims = verify_signed_state(state)
         except Exception as exc:
             logger.warning("oidc_state_invalid")
             raise TokenInvalidError("Sign-in request expired or was tampered with.") from exc
 
-        claims = await self._exchange_code(code)
+        claims = await self._exchange_code(code, code_verifier=code_verifier)
+
+        # The nonce binds this token to *this* sign-in attempt. Without the check
+        # a token captured from one flow could be replayed into another.
+        expected_nonce = str(state_claims.get("nonce") or "")
+        if expected_nonce and str(claims.get("nonce") or "") != expected_nonce:
+            logger.warning("oidc_nonce_mismatch")
+            raise TokenInvalidError("Sign-in response did not match the request.")
 
         subject = str(claims.get("oid") or claims.get("sub") or "")
         email = str(claims.get("email") or claims.get("preferred_username") or "").lower()
@@ -201,6 +283,8 @@ class AuthService:
 
         if not subject or not email:
             raise TokenInvalidError("The identity provider did not return an email address.")
+
+        self._require_allowed_domain(email)
 
         user = await self._resolve_sso_user(subject=subject, email=email, full_name=full_name)
 
@@ -228,17 +312,47 @@ class AuthService:
         )
         return await self._issue_session(user, ip=ip, user_agent=user_agent)
 
-    async def _exchange_code(self, code: str) -> dict[str, Any]:
+    def _require_allowed_domain(self, email: str) -> None:
+        """Refuse an address outside the configured domains.
+
+        Only bites on a multi-tenant authority, where Entra itself will happily
+        authenticate any Microsoft account. With a pinned tenant the list is
+        normally empty and this does nothing, which is correct - the tenant is
+        already the boundary.
+        """
+        allowed = self.settings.oidc.allowed_email_domains
+        if not allowed:
+            return
+        domain = email.rsplit("@", 1)[-1].lower()
+        if domain in allowed:
+            return
+
+        logger.warning("oidc_domain_rejected", domain=domain)
+        metrics.auth_attempts_total.labels(method="microsoft", outcome="domain_rejected").inc()
+        raise ForbiddenError(
+            "That Microsoft account is not permitted to sign in to this workspace."
+        )
+
+    async def _exchange_code(
+        self, code: str, *, code_verifier: str | None = None
+    ) -> dict[str, Any]:
         """Swap the authorization code for tokens and return the id-token claims."""
         token_url = f"{self.settings.oidc.authority}/oauth2/v2.0/token"
         data = {
             "client_id": self.settings.oidc.client_id,
-            "client_secret": self.settings.oidc.client_secret,
             "code": code,
             "grant_type": "authorization_code",
             "redirect_uri": self.settings.oidc.redirect_uri,
             "scope": self.settings.oidc.scopes,
         }
+        # A public client sends only the PKCE verifier; a confidential one sends
+        # the secret as well. Sending an empty secret is not the same as omitting
+        # it - Entra rejects the request outright - which is why this is a
+        # conditional rather than a default.
+        if self.settings.oidc.is_confidential_client:
+            data["client_secret"] = self.settings.oidc.client_secret
+        if code_verifier:
+            data["code_verifier"] = code_verifier
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(token_url, data=data)
@@ -260,35 +374,45 @@ class AuthService:
         return self._decode_id_token(id_token)
 
     def _decode_id_token(self, id_token: str) -> dict[str, Any]:
-        """Read claims from the id token.
+        """Verify the id token against Microsoft's JWKS and return its claims.
 
-        The token arrives over TLS directly from the provider's token endpoint in
-        response to a client-authenticated request, so the transport plus the
-        client secret establish authenticity. Signature verification against the
-        provider JWKS is the belt-and-braces step and is applied when the tenant
-        is pinned; otherwise the claims are read without it.
+        **The signature is always checked.** This used to fall through to
+        ``verify_signature: False`` when no tenant was pinned, on the reasoning
+        that TLS plus the client secret already established authenticity. That
+        reasoning does not survive a public client - there is no secret - and it
+        never justified the fallback anyway: an unverified token is a set of
+        attacker-controlled claims, and the identity built from them is whoever
+        the attacker named.
+
+        Four things are verified, and each rejects a different attack:
+
+        * **signature** against the tenant's published keys - the token was minted
+          by Entra and not by whoever sent it;
+        * **audience** equals our client id - a token issued for a different
+          application cannot be replayed into this one;
+        * **issuer** is our tenant - a token from another tenant is not our user;
+        * **expiry**, which ``PyJWT`` enforces by default.
         """
         import jwt
 
+        jwks_url = f"{self.settings.oidc.authority}/discovery/v2.0/keys"
         try:
-            if self.settings.oidc.tenant_id:
-                jwks_url = f"{self.settings.oidc.authority}/discovery/v2.0/keys"
-                jwks_client = jwt.PyJWKClient(jwks_url)
-                signing_key = jwks_client.get_signing_key_from_jwt(id_token)
-                return dict(
-                    jwt.decode(
-                        id_token,
-                        signing_key.key,
-                        algorithms=["RS256"],
-                        audience=self.settings.oidc.client_id,
-                        issuer=f"{self.settings.oidc.authority}/v2.0",
-                    )
+            # PyJWKClient caches the key set in-process, so this is one network
+            # call on the first sign-in after a restart rather than one per login.
+            jwks_client = _jwks_client(jwks_url)
+            signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+            return dict(
+                jwt.decode(
+                    id_token,
+                    signing_key.key,
+                    algorithms=["RS256"],
+                    audience=self.settings.oidc.client_id,
+                    issuer=f"{self.settings.oidc.authority}/v2.0",
                 )
+            )
         except Exception as exc:
             logger.warning("oidc_id_token_verification_failed", error=str(exc))
             raise TokenInvalidError("Could not verify the Microsoft sign-in response.") from exc
-
-        return dict(jwt.decode(id_token, options={"verify_signature": False}))
 
     async def _resolve_sso_user(self, *, subject: str, email: str, full_name: str) -> User:
         """Find or provision the local account behind an SSO identity."""

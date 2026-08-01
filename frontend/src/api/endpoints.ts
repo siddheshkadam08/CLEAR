@@ -13,13 +13,17 @@ import type {
   Alert,
   AlertStatus,
   AnswerResponse,
+  AuthMethods,
   ChatSession,
   ClauseCategory,
   Clause,
   ContractDetail,
   ContractKnowledge,
   ContractListItem,
+  CopilotQueryResponse,
   CurrentUser,
+  EvaluationLatest,
+  EvaluationRun,
   Dashboard,
   EvidenceResolution,
   ExportCapabilities,
@@ -51,6 +55,15 @@ import type {
 // Auth
 // =============================================================================
 export const auth = {
+  /**
+   * Which sign-in methods this deployment offers.
+   *
+   * Unauthenticated by design — the login screen calls it before anyone has a
+   * session, which is what lets enabling SSO be purely a server-side config
+   * change rather than a frontend rebuild.
+   */
+  methods: () => api.get<AuthMethods>('/auth/methods', { skipRefresh: true }),
+
   login: (email: string, password: string) =>
     api.post<TokenResponse>('/auth/login', { email, password }, { skipRefresh: true }),
 
@@ -238,6 +251,17 @@ export const copilot = {
   }) => api.post<AnswerResponse>('/copilot/ask', body),
 
   /**
+   * Document-type-aware answer, returned in one piece.
+   *
+   * camelCase body and response - this endpoint has its own agreed field naming.
+   * Use it where a whole answer is wanted at once (an export, a test, a retry
+   * after a stream broke); the page itself streams, so the answer starts
+   * appearing before retrieval and generation have finished.
+   */
+  query: (body: { query: string; projectId?: UUID | null; contractId?: UUID | null; sessionId?: UUID | null }) =>
+    api.post<CopilotQueryResponse>('/copilot/query', body),
+
+  /**
    * Streamed answer.
    *
    * Events, in order: `plan` (before any token, so the UI can say what is being
@@ -273,6 +297,25 @@ export const copilot = {
     title?: string;
   }) => api.post<ChatSession>('/copilot/sessions', body),
   deleteSession: (id: UUID) => api.delete<MessageResponse>(`/copilot/sessions/${id}`),
+};
+
+// =============================================================================
+// Retrieval evaluation (administrator only)
+// =============================================================================
+export const evaluation = {
+  /** Every recorded run's summary, for the trend and the regression history. */
+  runs: (dataset?: string) =>
+    api.get<{ results_dir: string; runs: EvaluationRun[] }>('/admin/evaluation/runs', {
+      query: dataset ? { dataset } : undefined,
+    }),
+
+  /** The newest run, with the failing-case lists worth triaging. */
+  latest: (dataset?: string) =>
+    api.get<EvaluationLatest>('/admin/evaluation/runs/latest', {
+      query: dataset ? { dataset } : undefined,
+    }),
+
+  datasets: () => api.get<{ datasets: Array<Record<string, unknown>> }>('/admin/evaluation/datasets'),
 };
 
 // =============================================================================

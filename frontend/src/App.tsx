@@ -19,10 +19,14 @@ import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Layout } from '@/components/layout/Layout';
 import { useAuth } from '@/lib/auth';
+import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
 import { LoginPage } from '@/pages/LoginPage';
 
 const AdminProjectsPage = lazy(() =>
   import('@/pages/admin/AdminProjectsPage').then((m) => ({ default: m.AdminProjectsPage })),
+);
+const EvaluationPage = lazy(() =>
+  import('@/pages/admin/EvaluationPage').then((m) => ({ default: m.EvaluationPage })),
 );
 const AdminUsersPage = lazy(() =>
   import('@/pages/admin/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage })),
@@ -148,6 +152,10 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Outside ProtectedRoute: this is where a user arrives *before* they have
+          a session, and guarding it would bounce them back to the login screen
+          in a loop. */}
+      <Route path="/auth/callback" element={<AuthCallbackPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route index element={<DashboardPage />} />
@@ -165,6 +173,7 @@ export default function App() {
             <Route path="clause-master" element={<ClauseMasterPage />} />
             <Route path="admin/projects" element={<AdminProjectsPage />} />
             <Route path="admin/users" element={<AdminUsersPage />} />
+            <Route path="admin/evaluation" element={<EvaluationPage />} />
           </Route>
         </Route>
       </Route>

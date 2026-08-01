@@ -1,6 +1,8 @@
+import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 
+import { auth as authApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
 import { ErrorBanner } from '@/components/common/Banner';
 import { useAuth } from '@/lib/auth';
@@ -20,8 +22,23 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const ssoEnabled = import.meta.env.VITE_ENABLE_MICROSOFT_SSO === 'true';
+  // Asked of the server rather than read from a build-time env var. The server
+  // is the only thing that knows whether SSO is actually configured, and a
+  // button rendered from `VITE_ENABLE_MICROSOFT_SSO` shows up on a deployment
+  // where sign-in returns 501 — which reads to a user as "the product is
+  // broken" rather than "this was never switched on".
+  const methodsQuery = useQuery({
+    queryKey: ['auth-methods'],
+    queryFn: () => authApi.methods(),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+
+  const ssoEnabled = methodsQuery.data?.microsoft_sso_enabled ?? false;
   const from = (location.state as { from?: string } | null)?.from ?? '/';
+  // Round-trips the path the user was trying to reach, so a deep link survives
+  // the trip out to Microsoft and back.
+  const ssoHref = `/api/v1/auth/oidc/login?redirect_after=${encodeURIComponent(from)}`;
 
   if (!initialising && user) return <Navigate to={from} replace />;
 
@@ -247,7 +264,7 @@ export function LoginPage() {
                   <span style={{ flex: 1, height: '1px', background: '#E4E7EC' }} />
                 </div>
                 <a
-                  href="/api/v1/auth/oidc/login"
+                  href={ssoHref}
                   className="clear-btn-secondary"
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px',
@@ -264,7 +281,7 @@ export function LoginPage() {
                     <rect x="1" y="11" width="9" height="9" fill="#00A4EF" rx="1" />
                     <rect x="11" y="11" width="9" height="9" fill="#FFB900" rx="1" />
                   </svg>
-                  Sign in with Microsoft
+                  {methodsQuery.data?.microsoft_button_label ?? 'Sign in with Microsoft'}
                 </a>
               </>
             ) : null}

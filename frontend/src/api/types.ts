@@ -69,6 +69,22 @@ export interface TokenResponse {
   user: CurrentUser;
 }
 
+/**
+ * Which sign-in methods a deployment offers.
+ *
+ * Served unauthenticated so the login screen can render itself correctly before
+ * anyone has a session. It deliberately carries no secrets — the client id and
+ * tenant never reach the browser, because the whole authorization URL is built
+ * server-side.
+ */
+export interface AuthMethods {
+  password_enabled: boolean;
+  microsoft_sso_enabled: boolean;
+  microsoft_button_label: string;
+  self_signup_enabled: boolean;
+  contact_admin_message: string;
+}
+
 export interface ProjectMembership {
   project_id: UUID;
   project_name: string;
@@ -612,6 +628,145 @@ export interface AnswerResponse {
   duration_ms: number;
   tokens: number;
   cost_usd: number;
+}
+
+/**
+ * Copilot query API.
+ *
+ * camelCase, unlike everything else in this file: `/copilot/query` has an agreed
+ * external field naming that the backend serialises by alias. It is not an
+ * inconsistency to tidy up - renaming it here would just stop it matching the
+ * wire.
+ */
+export interface CopilotSource {
+  contractId: UUID;
+  contractName?: string | null;
+  clauseHeading?: string | null;
+  sectionNumber?: string | null;
+  pageNumber?: number | null;
+  /**
+   * Cosine similarity in [0, 1] - not the hybrid fusion score.
+   *
+   * Null for a keyword-only match, which has no similarity to report. Do not
+   * render it as 0: that reads as "irrelevant" beside what may be the best
+   * exact-phrase match in the corpus.
+   */
+  similarityScore?: number | null;
+  /** The re-ranker's relevance judgement, when one ran. */
+  rerankScore?: number | null;
+  /** semantic | keyword | hybrid | context */
+  matchType: string;
+  text: string;
+  /** The `[n]` marker this passage carries in the answer text. */
+  label: number;
+}
+
+export interface CopilotQueryMetadata {
+  /** True when a known document type actually narrowed the search. */
+  documentTypeDetected: boolean;
+  documentType?: string | null;
+  documentTypeConfidence: number;
+  /** DocumentTypeFiltered | ContractScoped | Unfiltered */
+  retrievalMode: string;
+  retrievedChunks: number;
+  topSimilarity: number;
+  /** True when nothing retrieved cleared the threshold, so no model was asked. */
+  insufficientContext: boolean;
+  /** True when retrieval worked but the model could not be reached. */
+  generationFailed: boolean;
+  /** True when a document-type filter matched nothing and the search was widened. */
+  relaxedFilters: boolean;
+  /** True when more contracts matched than the pre-filter carries. */
+  scopeTruncated: boolean;
+  confidence: number;
+  confidenceBand: ConfidenceBand;
+  needsReview: boolean;
+  refused: boolean;
+  warnings: string[];
+  model?: string | null;
+  tokens: number;
+  costUsd: number;
+  timings: Record<string, number>;
+}
+
+export interface CopilotQueryResponse {
+  answer: string;
+  sources: CopilotSource[];
+  metadata: CopilotQueryMetadata;
+  session_id?: UUID | null;
+  message_id?: UUID | null;
+}
+
+/** The single `done` event that closes a `/copilot/stream` response. */
+export interface CopilotStreamDone {
+  citations?: Citation[];
+  confidence?: number;
+  confidence_band?: ConfidenceBand;
+  needs_review?: boolean;
+  warnings?: string[];
+  /** Sent only when a fabricated citation had to be stripped - re-render, do not append. */
+  text?: string | null;
+  sources?: CopilotSource[];
+  metadata?: CopilotQueryMetadata;
+}
+
+/**
+ * Retrieval evaluation.
+ *
+ * Shapes read straight off the benchmark's `summary.json` and `evaluation.json`,
+ * so the metric names match the ones in the scorecard rather than being renamed
+ * for the UI — a dashboard that renamed them would make a CI failure and a
+ * dashboard reading disagree about what regressed.
+ */
+export interface EvaluationRun {
+  label: string;
+  recorded_at: string;
+  dataset: string;
+  passed: boolean;
+  cases: number;
+  metrics: Record<string, number>;
+}
+
+export interface EvaluationCaseRef {
+  id: string;
+  question: string;
+}
+
+export interface EvaluationLatest {
+  summary: {
+    dataset: string;
+    label: string;
+    cases: number;
+    failures: number;
+    passed: boolean;
+    summary: string;
+    composite: number;
+    metrics: Record<string, number>;
+    blocking_failures: string[];
+  };
+  guardrail?: {
+    true_accept: number;
+    true_reject: number;
+    false_accept: number;
+    false_reject: number;
+    accuracy: number;
+    document_summary_would_have_passed: number;
+    hallucinations_prevented: number;
+  } | null;
+  calibration?: {
+    raw: { samples: number; ece: number; mce: number; brier: number; mean_bias: number };
+    recommendation: string;
+  } | null;
+  by_tag?: Record<string, Record<string, number>> | null;
+  failing: {
+    zero_recall: EvaluationCaseRef[];
+    false_accept: EvaluationCaseRef[];
+    false_reject: EvaluationCaseRef[];
+    worst_cited: EvaluationCaseRef[];
+    false_filtering: EvaluationCaseRef[];
+    most_expensive: EvaluationCaseRef[];
+    slowest: EvaluationCaseRef[];
+  };
 }
 
 export interface ChatSession {
