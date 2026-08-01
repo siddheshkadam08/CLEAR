@@ -1,0 +1,21 @@
+# Line endings.
+#
+# Git is left to its own devices for most files, but anything executed by a
+# Linux kernel must be LF regardless of the platform it was checked out on.
+# `core.autocrlf=true` is the Windows default, and a shell script checked out
+# with CRLF ships a shebang the kernel reads as the literal command `bash\r`:
+#
+#     env: 'bash\r': No such file or directory
+#
+# which is what a deployment from a Windows machine failed with. The error
+# names neither the file nor the line ending, so it is worth preventing rather
+# than diagnosing twice.
+*.sh text eol=lf
+
+# Copied into images and run by the shell there, same reasoning.
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+.dockerignore text eol=lf
+
+# Applied with psql inside a container.
+*.sql text eol=lf
