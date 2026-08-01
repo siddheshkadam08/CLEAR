@@ -1,0 +1,192 @@
+name: Retrieval evaluation
+
+# The quality gate. Two triggers, two different jobs, because they answer
+# different questions and cost different amounts:
+#
+#   * On a pull request that touches the retrieval or answering path, the
+#     retrieval-only gate runs. It is deterministic, needs no model credentials,
+#     and takes minutes - so it can block a merge without anyone learning to
+#     ignore it.
+#   * Nightly, the full benchmark runs with generation, which is what scores
+#     citation quality, hallucination rate and cost. That one needs real
+#     credentials and real money, which is why it is not on every push.
+#
+# Neither job updates the baseline. A build that re-baselined on every green run
+# would ratchet a slow decline into the reference and stop failing - the baseline
+# is moved deliberately, by a human, in a reviewable commit.
+
+on:
+  pull_request:
+    paths:
+      - "backend/app/ai/**"
+      - "backend/app/services/copilot.py"
+      - "backend/app/repositories/embedding.py"
+      - "backend/app/repositories/chunk.py"
+      - "backend/app/evaluation/**"
+      - "backend/app/core/config.py"
+      - ".github/workflows/evaluation.yml"
+  schedule:
+    # 02:00 UTC. After the nightly ingest, before anyone reads the dashboard.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: "Dataset to run"
+        default: "smoke"
+      with_generation:
+        description: "Run generation as well as retrieval"
+        type: boolean
+        default: false
+
+concurrency:
+  # One evaluation per branch. Two concurrent runs would contend for the same
+  # database and produce latency figures that measure each other.
+  group: evaluation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  metrics-self-test:
+    name: Metric correctness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Test the metrics themselves
+        working-directory: backend
+        # Runs first and on every trigger. A gate whose arithmetic is wrong is
+        # worse than no gate, so the metrics are verified before they are used to
+        # judge anything.
+        run: pytest tests/unit/test_evaluation_metrics.py tests/unit/test_evaluation_framework.py -q
+
+  benchmark:
+    name: Benchmark
+    needs: metrics-self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: cip
+          POSTGRES_PASSWORD: cip
+          POSTGRES_DB: cip_eval
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://cip:cip@localhost:5432/cip_eval
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ${{ secrets.EVAL_JWT_SECRET || 'e0000000000000000000000000000000000000000000000000' }}
+      INTERNAL_API_TOKEN: ${{ secrets.EVAL_INTERNAL_TOKEN || 'i0000000000000000000000000000000000000000000000000' }}
+      OTEL_ENABLED: "false"
+      # Absent on a fork PR, in which case the run is retrieval-only against the
+      # mock provider - which still catches a retrieval regression, and is the
+      # reason the gate is useful on an external contribution at all.
+      ANTHROPIC_API_KEY: ${{ secrets.EVAL_ANTHROPIC_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.EVAL_NVIDIA_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        working-directory: backend
+        run: pip install -e ".[dev,ai]"
+
+      - name: Migrate
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Seed the evaluation corpus
+        working-directory: backend
+        # The benchmark scores retrieval against real rows: a golden case names
+        # contracts and clauses by id, and those have to exist with current
+        # embeddings. Without this step every metric is a well-formatted zero.
+        run: python -m app.cli seed --evaluation-corpus
+        continue-on-error: true
+
+      - name: Decide the mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.with_generation }}" = "true" ]; then
+            if [ -n "${{ secrets.EVAL_ANTHROPIC_API_KEY }}" ]; then
+              echo "flags=" >> "$GITHUB_OUTPUT"
+              echo "mode=full" >> "$GITHUB_OUTPUT"
+            else
+              echo "flags=--retrieval-only" >> "$GITHUB_OUTPUT"
+              echo "mode=retrieval-only (no credentials)" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "flags=--retrieval-only" >> "$GITHUB_OUTPUT"
+            echo "mode=retrieval-only" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run the benchmark
+        id: benchmark
+        working-directory: backend
+        run: |
+          python -m app.evaluation.cli benchmark \
+            --dataset "${{ inputs.dataset || 'smoke' }}" \
+            --label "${{ github.sha }}" \
+            --output "../evaluation-results/${{ github.run_id }}" \
+            ${{ steps.mode.outputs.flags }}
+
+      - name: Publish the report
+        # `always()`: a failing gate is exactly when the report matters most.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-${{ github.run_id }}
+          path: evaluation-results/
+          retention-days: 30
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `evaluation-results/${{ github.run_id }}/REPORT.md`;
+            if (!fs.existsSync(path)) return;
+            const body = fs.readFileSync(path, 'utf8').slice(0, 60000);
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: context.issue.number,
+            });
+            // Update in place rather than adding a comment per push: a thread with
+            // fifteen benchmark comments is one nobody reads.
+            const mine = comments.find(c =>
+              c.user.type === 'Bot' && c.body.startsWith('# Retrieval evaluation'));
+            if (mine) {
+              await github.rest.issues.updateComment({
+                ...context.repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: context.issue.number, body });
+            }
+
+      - name: Summary
+        if: always()
+        run: cat "evaluation-results/${{ github.run_id }}/REPORT.md" >> "$GITHUB_STEP_SUMMARY" || true

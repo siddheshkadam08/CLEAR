@@ -12,6 +12,7 @@ from app.api.v1 import (
     auth,
     contracts,
     docpipeline,
+    evaluation,
     exports,
     jobs,
     knowledge,
@@ -56,5 +57,8 @@ api_router.include_router(admin.dashboard_router)
 # overview dashboard because the two count different things.
 api_router.include_router(docpipeline.router)
 api_router.include_router(admin.alert_router)
+# Retrieval-quality artefacts, read from disk. Administrator-only: the failing
+# case lists name the questions users asked.
+api_router.include_router(evaluation.router)
 
 __all__ = ["api_router"]

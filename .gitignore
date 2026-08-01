@@ -84,3 +84,6 @@ clear-deploy-*.tar.gz
 # scripts/deploy.sh moves the development-only compose override aside on a server.
 # Covered by `*.local` above, named here so the reason is discoverable.
 docker-compose.override.yml.local
+
+# Benchmark artefacts. Reports are build outputs; baselines are committed.
+evaluation-results/
