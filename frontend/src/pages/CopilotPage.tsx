@@ -303,7 +303,12 @@ export function CopilotPage() {
               className={`${inputClasses} resize-none`}
             />
             <div className="mt-2 flex items-center gap-2">
-              {/* <div className="relative w-36 sm:w-44">
+              {/* Disabled, not deleted. Restoring it also needs `FORMATS`,
+              `setFormat`, `selectClasses` and `SelectChevron`, which were
+              removed because nothing referenced them once this was commented
+              out and the production typecheck rejects unused declarations.
+              They are in the commit that disabled this block.
+              <div className="relative w-36 sm:w-44">
               <select
                 value={format}
                 onChange={(event) => setFormat(event.target.value)}
