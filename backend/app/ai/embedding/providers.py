@@ -345,16 +345,28 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
             if self.azure:
                 from openai import AsyncAzureOpenAI
 
-                if not settings.llm.azure_openai_endpoint:
+                # Embeddings may live on a different Azure resource from the chat
+                # model. Each of these falls back to the LLM's value, so one
+                # resource serving both still needs nothing set.
+                endpoint = (
+                    settings.embedding.azure_endpoint or settings.llm.azure_openai_endpoint
+                )
+                if not endpoint:
                     raise ProviderError(
-                        "AZURE_OPENAI_ENDPOINT is required for azure_openai embeddings.",
+                        "AZURE_OPENAI_EMBEDDING_ENDPOINT (or AZURE_OPENAI_ENDPOINT) is "
+                        "required for azure_openai embeddings.",
                         provider=self.name,
                         retryable=False,
                     )
                 self._client = AsyncAzureOpenAI(
-                    azure_endpoint=settings.llm.azure_openai_endpoint,
-                    api_key=settings.llm.azure_openai_api_key,
-                    api_version=settings.llm.azure_openai_api_version,
+                    azure_endpoint=endpoint,
+                    api_key=(
+                        settings.embedding.azure_api_key or settings.llm.azure_openai_api_key
+                    ),
+                    api_version=(
+                        settings.embedding.azure_api_version
+                        or settings.llm.azure_openai_api_version
+                    ),
                     timeout=float(settings.embedding.timeout_seconds),
                     max_retries=settings.embedding.max_retries,
                 )
@@ -378,6 +390,24 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
             ) from exc
         return self._client
 
+    def _request_model(self) -> str:
+        """What goes in the request's ``model`` field.
+
+        On Azure that is the deployment name, which is chosen per resource and
+        need not match the model it serves. ``self.model`` stays the *model*
+        identity - it is what gets written to `embeddings.model` and what the
+        reuse lookup keys on, so it must describe the vector space rather than
+        the URL that produced it.
+        """
+        if self.azure:
+            settings = get_settings()
+            deployment = (
+                settings.embedding.azure_deployment or settings.llm.azure_openai_deployment
+            )
+            if deployment:
+                return deployment
+        return self.model
+
     async def embed_many(
         self, texts: Sequence[str], *, input_type: InputType = "passage"
     ) -> EmbeddingResult:
@@ -389,7 +419,10 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
         started = time.perf_counter()
 
         request: dict[str, Any] = {
-            "model": self.model,
+            # Azure addresses a *deployment*, not a model name. Sending
+            # `text-embedding-3-small` where the deployment is called something
+            # else is a 404 on a URL that looks correct.
+            "model": self._request_model(),
             "input": list(texts),
             # Explicit, because the OpenAI SDK otherwise sends
             # `encoding_format: base64` on its own as a bandwidth optimisation.

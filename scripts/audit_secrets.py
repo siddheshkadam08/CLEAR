@@ -44,6 +44,9 @@ SHAPE_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("AWS access key id", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("GitHub token", re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}")),
     ("Google API key", re.compile(r"AIza[0-9A-Za-z_-]{35}")),
+    # Google's newer key format. `AIza...` is not the only shape any more, and a
+    # key in this one passed this scanner cleanly while being a live credential.
+    ("Google API key (AQ format)", re.compile(r"\bAQ\.[A-Za-z0-9_-]{30,}")),
     ("Slack token", re.compile(r"xox[baprs]-[0-9A-Za-z-]{10,}")),
     ("Private key block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----")),
     ("JWT", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),

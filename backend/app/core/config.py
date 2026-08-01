@@ -630,6 +630,25 @@ class EmbeddingSettings(BaseSettings):
     max_retries: Annotated[int, Field(validation_alias="EMBEDDING_MAX_RETRIES", ge=0)] = 3
     timeout_seconds: Annotated[int, Field(validation_alias="EMBEDDING_TIMEOUT_SECONDS", ge=5)] = 60
 
+    # --- Azure OpenAI --------------------------------------------------------
+    #: Embeddings may live on a different Azure resource from the chat model, and
+    #: routinely do: the chat deployment is often a dev resource in one region
+    #: while embeddings run on a shared production one. The provider previously
+    #: read `LLMSettings.azure_openai_*` for both, so pointing them at separate
+    #: resources was not expressible - the embedding calls went to the chat
+    #: endpoint and 404ed on a deployment that is not there.
+    #:
+    #: Each falls back to the corresponding LLM value when empty, so a deployment
+    #: using one resource for both keeps working with nothing set here.
+    azure_endpoint: Annotated[str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_ENDPOINT")] = ""
+    azure_api_key: Annotated[str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_API_KEY")] = ""
+    azure_api_version: Annotated[
+        str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_API_VERSION")
+    ] = ""
+    azure_deployment: Annotated[
+        str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
+    ] = ""
+
     # --- NVIDIA NIM ----------------------------------------------------------
     nvidia_api_key: Annotated[str, Field(validation_alias="NVIDIA_API_KEY")] = ""
     #: Hosted NIM by default; point at a self-hosted NIM container to keep contract

@@ -120,6 +120,13 @@ LEGACY_PURPOSE_TASKS: dict[str, LLMTask] = {
     "rag": LLMTask.COPILOT_CHAT,
     "comparison": LLMTask.CLAUSE_COMPARISON,
     "report": LLMTask.CONTRACT_ANALYSIS,
+    # The Gemini adapter routed these two to its complex model from a set of its
+    # own, so they never reached this table and `coerce` treated them as unknown
+    # - which sends them to the *cheap* tier. Listing them here makes the tier a
+    # property of the task rather than of whichever provider happens to be
+    # configured, which is the whole point of this module.
+    "risk_assessment": LLMTask.RISK_ANALYSIS,
+    "compliance": LLMTask.CONTRACT_ANALYSIS,
 }
 
 

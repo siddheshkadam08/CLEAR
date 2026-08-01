@@ -50,18 +50,19 @@ async def _call(provider: Any) -> StructuredResult:
 
 
 @pytest.mark.asyncio
-async def test_no_cap_is_applied_by_default() -> None:
-    """Capping was measured and abandoned - see DEFAULT_MAX_TOKENS.
+async def test_calls_are_capped_by_default() -> None:
+    """The answers are a few hundred tokens; the cap stops a runaway generation.
 
-    glm-4.7 spends the budget on thinking, so a 4000-token cap truncated three
-    of fourteen calls and tripled the wall clock.
+    Capping failed once against a reasoning model, whose thinking counted
+    against the same budget and truncated - see DEFAULT_MAX_TOKENS for the
+    measurement. It is safe on a model that does not think before answering.
     """
     provider = RecordingProvider()
 
     await _call(provider)
 
-    assert provider.budgets == [None]
-    assert DEFAULT_MAX_TOKENS is None
+    assert provider.budgets == [DEFAULT_MAX_TOKENS]
+    assert DEFAULT_MAX_TOKENS == 2000
 
 
 @pytest.mark.asyncio
@@ -121,7 +122,14 @@ async def test_an_uncapped_truncation_does_not_retry() -> None:
     )
 
     with pytest.raises(SchemaValidationError, match="truncated"):
-        await _call(provider)
+        await call_structured(
+            provider,
+            system="s",
+            prompt="p",
+            schema=SCHEMA,
+            task=LLMTask.CLAUSE_EXTRACTION,
+            max_tokens=None,
+        )
 
     assert len(provider.budgets) == 1
 

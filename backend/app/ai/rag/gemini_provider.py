@@ -135,11 +135,24 @@ class GeminiProvider(IInferenceProvider):
         return self._llm.gemini_model
 
     def model_for(self, purpose: Purpose) -> str:
-        """Route by purpose. Cheap tier by default; complex only where it earns it."""
-        if purpose in {"comparison", "risk_assessment", "compliance"}:
-            return self._llm.gemini_model_complex
-        if purpose in {"classification", "summary"}:
+        """Route by task or legacy purpose. Cheap tier by default.
+
+        Delegating the tier decision to :mod:`app.ai.routing` rather than
+        matching purpose strings here: this method predates ``LLMTask`` and knew
+        only the legacy names, so ``document_classification`` and
+        ``clause_extraction`` - the two highest-volume calls in the document
+        pipeline - matched neither set and fell through to ``gemini_model``.
+        The configured ``GEMINI_MODEL_SIMPLE`` was unreachable, which is the same
+        shape of fault as pointing the simple tier at a reasoning model: the
+        routing table says one thing and the provider quietly does another.
+        """
+        from app.ai.routing import ModelTier, get_router
+
+        tier = get_router().resolve(purpose).tier
+        if tier is ModelTier.SIMPLE:
             return self._llm.gemini_model_simple
+        if tier is ModelTier.COMPLEX:
+            return self._llm.gemini_model_complex
         return self._llm.gemini_model
 
     async def generate(

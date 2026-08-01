@@ -75,10 +75,13 @@ x-backend-env: &backend-env
   # layout roles and coordinates. `pymupdf` is the local fallback. Docling is not
   # used by this deployment and is not an accepted value.
   ACTIVE_PARSER: ${ACTIVE_PARSER:-idoc}
-  # `fixture` replays recorded parser responses and never touches the network.
-  # Set `live` to call the real layout service; responses are recorded on the
-  # way through so the next run can replay them.
-  PARSER_MODE: ${PARSER_MODE:-fixture}
+  # `live` calls the PDF service; `fixture` replays a recorded response and is
+  # for offline development and tests. Defaulting to fixture meant a running
+  # deployment could not process any document it had not already seen - the
+  # upload parsed nothing and failed with "no recorded response for this
+  # document". The response is cached in object storage by file hash, so live
+  # sends a given PDF to the vendor once, ever.
+  PARSER_MODE: ${PARSER_MODE:-live}
   PARSER_FIXTURE_DIR: ${PARSER_FIXTURE_DIR:-/app/storage/fixtures/parser}
   IDOC_ENDPOINT: ${IDOC_ENDPOINT:-https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json}
 
@@ -127,14 +130,25 @@ x-backend-env: &backend-env
   # `halfvec` is required rather than preferred: pgvector's HNSW index stops at
   # 2000 dimensions for the `vector` type, so a vector(2048) column cannot be
   # indexed and every similarity search becomes a sequential scan.
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}
-  EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
   EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
   EMBEDDING_VERIFY_ON_STARTUP: ${EMBEDDING_VERIFY_ON_STARTUP:-true}
   NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
   NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
   # All optional. Left empty the platform stays on the mock providers.
   GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  # Azure OpenAI. The embedding block is separate because embeddings routinely
+  # live on a different resource from the chat model; each falls back to the
+  # AZURE_OPENAI_* value when unset, so one resource for both needs nothing here.
+  AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+  AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+  AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}
+  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+  AZURE_OPENAI_EMBEDDING_ENDPOINT: ${AZURE_OPENAI_EMBEDDING_ENDPOINT:-}
+  AZURE_OPENAI_EMBEDDING_API_KEY: ${AZURE_OPENAI_EMBEDDING_API_KEY:-}
+  AZURE_OPENAI_EMBEDDING_API_VERSION: ${AZURE_OPENAI_EMBEDDING_API_VERSION:-2024-02-01}
+  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
   GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
   GEMINI_MODEL_SIMPLE: ${GEMINI_MODEL_SIMPLE:-gemini-2.5-flash-lite}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -147,8 +161,6 @@ x-backend-env: &backend-env
   # every request then goes to api.openai.com and fails with "Incorrect API key
   # provided", which reads like a bad key rather than a missing base URL.
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-  AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-  AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
   INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-internal-token}
   OTEL_ENABLED: ${OTEL_ENABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
@@ -438,8 +450,8 @@ services:
     environment:
       <<: *backend-env
       EMBEDDING_PROVIDER: nvidia
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
       # Plain substitution, NOT `${NVIDIA_API_KEY:?...}`. podman-compose evaluates
       # the required-variable form for every service at parse time, including ones

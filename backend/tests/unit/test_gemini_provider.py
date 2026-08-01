@@ -115,15 +115,35 @@ def test_the_real_liability_schema_survives_intact() -> None:
 # =============================================================================
 # Routing
 # =============================================================================
-async def test_cheap_tier_is_the_default(gemini_env: Any) -> None:
+async def test_simple_tier_tasks_use_the_cheap_model(gemini_env: Any) -> None:
+    """Extraction and classification are simple-tier work, so both get the
+    cheap model.
+
+    `extraction` previously landed on the mid model: this adapter matched its own
+    set of purpose strings, and `extraction` was not in it. The tier now comes
+    from app.ai.routing, which has always classed clause extraction as simple.
+    """
     provider = _provider(lambda request: _reply("ok"))
-    assert provider.model_for("extraction") == "gemini-2.5-flash"
+
+    assert provider.model_for("extraction") == "gemini-2.5-flash-lite"
     assert provider.model_for("classification") == "gemini-2.5-flash-lite"
+    # The current task names, not only the legacy purposes. These are what the
+    # document pipeline passes, and they matched nothing before.
+    assert provider.model_for("clause_extraction") == "gemini-2.5-flash-lite"
+    assert provider.model_for("document_classification") == "gemini-2.5-flash-lite"
 
 
 async def test_complex_intents_route_to_the_complex_model(gemini_env: Any) -> None:
+    """`risk_assessment` and `compliance` must not fall through to the cheap tier.
+
+    They were known only to this adapter, so delegating the decision to the
+    router silently demoted them until they were added to LEGACY_PURPOSE_TASKS.
+    """
     provider = _provider(lambda request: _reply("ok"))
+
     assert provider.model_for("risk_assessment") == provider._llm.gemini_model_complex
+    assert provider.model_for("compliance") == provider._llm.gemini_model_complex
+    assert provider.model_for("comparison") == provider._llm.gemini_model_complex
 
 
 async def test_the_model_appears_in_the_request_path(gemini_env: Any) -> None:

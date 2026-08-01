@@ -29,16 +29,21 @@ logger = get_logger(__name__)
 
 #: Output budget for this pipeline's calls. ``None`` means the provider default.
 #:
-#: Capping this was tried and abandoned, and the measurement is worth keeping
-#: because the idea is an obvious one to have again. The answers really are a few
-#: hundred tokens, so 4000 looked generous. It was not: glm-4.7's *thinking*
-#: counts against the same budget, three of fourteen calls hit the ceiling and
-#: had to be re-issued at the full budget, and the run went from 251s to 759s -
-#: three times slower for the change that was supposed to make it faster.
+#: The history matters, because the obvious reading of this constant is wrong.
+#: Capping at 4000 was tried against ``z-ai/glm-4.7`` and made things three times
+#: *slower*: that model's thinking counts against the same budget, three of
+#: fourteen calls hit the ceiling, and each had to be re-issued at the full
+#: budget - 251s became 759s.
 #:
-#: The retry below is kept, and so is the parameter. A model that answers within
-#: a cap would benefit, and the machinery to find out is one constant away.
-DEFAULT_MAX_TOKENS: int | None = None
+#: That was a property of the model, not of the idea. On a non-reasoning model
+#: the answers are what they always were - a document type, a list of clause
+#: names and paragraph refs, a few hundred tokens - and 2000 is generous for
+#: that while stopping a runaway generation early.
+#:
+#: The truncation retry below still backs it. If ``docpipeline_truncation_retry``
+#: appears in the logs more than rarely, this number is wrong for the model in
+#: use and should go back to ``None``.
+DEFAULT_MAX_TOKENS: int | None = 2000
 
 
 async def call_structured(
