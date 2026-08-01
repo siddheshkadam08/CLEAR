@@ -81,7 +81,9 @@ async def _totals(db: AsyncSession) -> dict[str, Any]:
         .where(cip_doc_content_master.c.embeddings.is_not(None))
     )
     pages = await db.scalar(
-        select(func.coalesce(func.sum(func.array_length(cip_doc_content_master.c["pageNumber"], 1)), 0))
+        select(
+            func.coalesce(func.sum(func.array_length(cip_doc_content_master.c["pageNumber"], 1)), 0)
+        )
     )
     return {
         "documents": int(documents or 0),
@@ -116,7 +118,11 @@ async def _documents(
         )
         # docid is bigint on the master and text on the content table, so the
         # join casts rather than relying on Postgres to guess.
-        .outerjoin(counts, counts.c.docid == func.cast(cip_doc_master.c.docid, cip_doc_content_master.c.docid.type))
+        .outerjoin(
+            counts,
+            counts.c.docid
+            == func.cast(cip_doc_master.c.docid, cip_doc_content_master.c.docid.type),
+        )
         .order_by(cip_doc_master.c.docid.desc())
         .limit(limit)
     )

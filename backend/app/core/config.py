@@ -262,6 +262,50 @@ class OIDCSettings(BaseSettings):
     )
     scopes: Annotated[str, Field(validation_alias="OIDC_SCOPES")] = "openid profile email"
 
+    #: Try to sign in without showing any Microsoft UI first.
+    #:
+    #: When the browser already has exactly one signed-in Entra session that
+    #: satisfies the request, `prompt=none` completes invisibly and the user lands
+    #: straight in the app. When it does not, Entra returns an *error* rather than
+    #: a page - `login_required`, `interaction_required` or
+    #: `account_selection_required` - and the callback retries with
+    #: `prompt=select_account`.
+    #:
+    #: This is the correct shape of "try silently, fall back to the account
+    #: picker". Simply omitting `prompt`, which is the obvious-looking version, is
+    #: not silent: Entra still renders a picker whenever more than one session
+    #: exists, so the fallback never triggers and the user sees a page flash.
+    silent_first: Annotated[bool, Field(validation_alias="OIDC_SILENT_FIRST")] = True
+
+    #: Restrict sign-in to these email domains, lower-cased and comma-separated.
+    #:
+    #: Only meaningful with a multi-tenant authority (`tenant_id` unset or
+    #: `common`/`organizations`), where *any* Microsoft account can complete the
+    #: flow. Empty with a pinned tenant is correct - Entra already refuses
+    #: everyone outside it.
+    allowed_email_domains: Annotated[
+        list[str], NoDecode, Field(validation_alias="OIDC_ALLOWED_EMAIL_DOMAINS")
+    ] = []
+
+    @field_validator("allowed_email_domains", mode="before")
+    @classmethod
+    def _split_domains(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip().lower().lstrip("@") for item in value.split(",") if item.strip()]
+        return value
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_confidential_client(self) -> bool:
+        """True when a client secret is configured.
+
+        A registration without one is a *public* client, which is the normal
+        shape for a browser app: there is nowhere in a SPA to keep a secret that
+        the user cannot read. Public clients authenticate the code exchange with
+        PKCE instead, which is why ``is_configured`` does not require a secret.
+        """
+        return bool(self.client_secret)
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def authority(self) -> str:
@@ -276,7 +320,19 @@ class OIDCSettings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def is_configured(self) -> bool:
-        return bool(self.enabled and self.client_id and self.client_secret)
+        """Enough configuration to attempt a sign-in.
+
+        A client secret is deliberately **not** required. The exchange is
+        protected by PKCE, which works for public and confidential clients alike,
+        and demanding a secret would make the common SPA registration - client id
+        and redirect URI, no secret - look unconfigured.
+
+        The tenant *is* required. Without it the authority falls back to
+        ``common``, which accepts any Microsoft account on earth, including
+        personal ones; that is a deployment nobody intends and it should fail
+        loudly at configuration rather than quietly at the first outside login.
+        """
+        return bool(self.enabled and self.client_id and self.tenant_id)
 
 
 class StorageSettings(BaseSettings):
@@ -685,6 +741,23 @@ class EmbeddingSettings(BaseSettings):
         int, Field(validation_alias="HNSW_EF_CONSTRUCTION", ge=16, le=1000)
     ] = 64
     hnsw_ef_search: Annotated[int, Field(validation_alias="HNSW_EF_SEARCH", ge=16, le=1000)] = 80
+    #: ``off`` | ``relaxed_order`` | ``strict_order`` (pgvector 0.8+).
+    #:
+    #: Defaults to ``relaxed_order`` because every similarity query here carries
+    #: filters the HNSW index cannot use - project, contract, model, metadata. With
+    #: a single-pass scan those filters are applied *after* the index returns its
+    #: ``ef_search`` globally-nearest rows, so a large multi-project table returns
+    #: nothing for questions that have a perfect answer in it. ``relaxed_order``
+    #: keeps scanning until enough rows survive the filter.
+    hnsw_iterative_scan: Annotated[
+        Literal["off", "relaxed_order", "strict_order"],
+        Field(validation_alias="HNSW_ITERATIVE_SCAN"),
+    ] = "relaxed_order"
+    #: Ceiling on an iterative scan, so a query no row can satisfy stops rather
+    #: than walking the whole graph.
+    hnsw_max_scan_tuples: Annotated[
+        int, Field(validation_alias="HNSW_MAX_SCAN_TUPLES", ge=1000, le=1_000_000)
+    ] = 20_000
 
 
 class RetrievalSettings(BaseSettings):
@@ -756,6 +829,46 @@ class RetrievalSettings(BaseSettings):
     ] = 24_000
     # Reciprocal-rank-fusion constant used when blending keyword + vector hits.
     rrf_k: Annotated[int, Field(validation_alias="RETRIEVAL_RRF_K", ge=1)] = 60
+
+    # --- Copilot query pipeline ----------------------------------------------
+    #: Below this, a detected document type is discarded and retrieval runs
+    #: unfiltered. The asymmetry is the reason it is set high: filtering to the
+    #: wrong type removes the answer outright, whereas not filtering only makes
+    #: the search wider. A guess is worse than no opinion.
+    document_type_confidence_threshold: Annotated[
+        float, Field(validation_alias="COPILOT_DOCTYPE_CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)
+    ] = 0.75
+    #: Answer-level guardrail. Distinct from the per-level ``min_similarity``
+    #: floors, which decide what retrieval *returns*: this decides whether the
+    #: best of what came back is good enough to answer from at all. Below it the
+    #: Copilot says so and no inference call is made.
+    answer_similarity_threshold: Annotated[
+        float, Field(validation_alias="COPILOT_SIMILARITY_THRESHOLD", ge=0.0, le=1.0)
+    ] = 0.45
+    #: Candidates pulled per level before re-ranking.
+    copilot_top_k: Annotated[int, Field(validation_alias="COPILOT_TOP_K", ge=1, le=200)] = 25
+    #: Passages that survive into the prompt. Fewer, better passages beat more:
+    #: every marginal one dilutes the evidence the answer is graded against.
+    top_context_chunks: Annotated[
+        int, Field(validation_alias="COPILOT_CONTEXT_CHUNKS", ge=1, le=50)
+    ] = 8
+
+    # --- retrieval audit ------------------------------------------------------
+    #: Whether the question's text is stored on the retrieval audit row.
+    #:
+    #: A question about a contract can carry counterparty names and deal terms, and
+    #: some deployments cannot retain that. Off is a supported configuration: every
+    #: other field - strategy, similarity, latency, cost, versions - is what the
+    #: retrieval-quality metrics are built from, and none of them need the text.
+    audit_store_query_text: Annotated[
+        bool, Field(validation_alias="RETRIEVAL_AUDIT_STORE_QUERY_TEXT")
+    ] = True
+    #: Days to keep retrieval audit rows. Unbounded growth in a table holding user
+    #: queries is a compliance finding on its own, not merely a disk-space one -
+    #: there has to be a defined answer to "how long do you keep this".
+    audit_retention_days: Annotated[
+        int, Field(validation_alias="RETRIEVAL_AUDIT_RETENTION_DAYS", ge=1, le=3650)
+    ] = 180
 
 
 class QueueSettings(BaseSettings):
@@ -974,6 +1087,16 @@ class Settings(BaseSettings):
 
     # Which stage endpoints this process serves; "all" for a monolithic run.
     worker_role: Annotated[str, Field(validation_alias="WORKER_ROLE")] = "all"
+
+    #: Where benchmark artefacts are written and read from.
+    #:
+    #: The scheduled evaluation run and the API that serves its results are
+    #: different processes and usually different pods, so this needs to point at a
+    #: shared volume in any deployment where the dashboard is expected to show
+    #: anything.
+    evaluation_results_dir: Annotated[
+        str, Field(validation_alias="EVALUATION_RESULTS_DIR")
+    ] = "evaluation-results"
 
     review_confidence_threshold: Annotated[
         float, Field(validation_alias="REVIEW_CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)

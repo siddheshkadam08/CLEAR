@@ -157,7 +157,6 @@ class PageContent:
         return sum(len(paragraph.content) for paragraph in self.paragraphs)
 
 
-
 def load_pages(directory: Path) -> list[PageContent]:
     """Load every ``page_*.json`` in ``directory``, ordered by page number.
 

@@ -104,7 +104,9 @@ async def _delete_previous(db: AsyncSession, json_path: str) -> bool:
     if not docids:
         return False
 
-    await db.execute(delete(cip_doc_content_master).where(cip_doc_content_master.c.docid.in_(docids)))
+    await db.execute(
+        delete(cip_doc_content_master).where(cip_doc_content_master.c.docid.in_(docids))
+    )
     await db.execute(delete(cip_doc_master).where(cip_doc_master.c["jsonPath"] == json_path))
     return True
 

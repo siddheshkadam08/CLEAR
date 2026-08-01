@@ -87,9 +87,9 @@ def test_progress_reaches_100_at_the_end_of_the_pipeline() -> None:
     # Each stage starts where the previous one finished, so the bar never jumps
     # backwards at a boundary.
     for earlier, later in pairwise(STAGE_ORDER):
-        assert WorkflowEngine.progress_for(
-            earlier, completed=True
-        ) == WorkflowEngine.progress_for(later), f"gap between {earlier} and {later}"
+        assert WorkflowEngine.progress_for(earlier, completed=True) == WorkflowEngine.progress_for(
+            later
+        ), f"gap between {earlier} and {later}"
 
 
 def test_versions_cover_what_changes_the_output() -> None:
@@ -185,7 +185,7 @@ def test_next_after_skips_retired_stages_in_an_old_plan() -> None:
             PlannedStage(stage=PipelineStage.ENRICHMENT),
             PlannedStage(stage=PipelineStage.AI_EXTRACTION),
             PlannedStage(stage=PipelineStage.DOCPIPELINE),
-        ]
+        ],
     )
 
     # `next_after` reads the plan and nothing else, so the session is unused.

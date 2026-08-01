@@ -25,7 +25,9 @@ def _para(content: str, *, role: str | None = None, polygon: list[float] | None 
     entry: dict = {"content": content}
     if role:
         entry["role"] = role
-    entry["boundingRegions"] = [{"pageNumber": 1, "polygon": polygon or [1.0, 1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 2.0]}]
+    entry["boundingRegions"] = [
+        {"pageNumber": 1, "polygon": polygon or [1.0, 1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 2.0]}
+    ]
     return entry
 
 

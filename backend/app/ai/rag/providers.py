@@ -561,19 +561,56 @@ class AnthropicProvider(IInferenceProvider):
 
     # -------------------------------------------------------------------- invoke
     async def _invoke(self, request: dict[str, Any], *, purpose: Purpose) -> InferenceResult:
+        """One completion, retried on the failures a retry can fix.
+
+        This used to be a bare single call. A 429 or a 5xx - which on a shared
+        organisation rate limit is a routine morning, not an incident - propagated
+        straight out as a ``ProviderError`` and became a 500 for whoever asked the
+        question. The OpenAI adapter has gone through ``call_with_retries`` since it
+        was written; the asymmetry was an oversight, not a decision.
+        """
+        from app.ai.resilience import call_with_retries, record_payload_sizes
+        from app.ai.routing import get_router
+
         client = self._get_client()
+        choice_spec = get_router().resolve(purpose)
         started = time.perf_counter()
 
-        try:
+        async def _attempt() -> Any:
             # The beta endpoint is required for the fallback parameter; the request
             # body is otherwise identical.
-            response = await client.beta.messages.create(**request, **self._fallback_kwargs())
+            return await client.beta.messages.create(**request, **self._fallback_kwargs())
+
+        try:
+            # Per-tier deadline, so a hung simple-tier call does not hold a worker
+            # slot for the reasoning-tier timeout.
+            response, _outcome = await call_with_retries(
+                _attempt,
+                provider=self.name,
+                tier=choice_spec.tier.value,
+                model=request["model"],
+                task=choice_spec.task.value,
+                attempt_timeout=choice_spec.timeout_seconds,
+            )
         except Exception as exc:
             metrics.llm_requests_total.labels(
                 provider=self.name, model=request["model"], outcome="error"
             ).inc()
             raise _translate_anthropic_error(exc, self.name) from exc
 
+        record_payload_sizes(
+            tier=choice_spec.tier.value,
+            prompt_chars=sum(
+                len(str(block.get("text", "")))
+                for message in request.get("messages", [])
+                for block in (
+                    message.get("content", [])
+                    if isinstance(message.get("content"), list)
+                    else [{"text": message.get("content", "")}]
+                )
+            ),
+            completion_chars=0,
+        )
         return self._record(response, purpose=purpose, started=started)
 
     def _record(

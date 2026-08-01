@@ -359,6 +359,48 @@ rerank_duration_seconds = Histogram(
     registry=REGISTRY,
 )
 
+# =============================================================================
+# Copilot and evaluation
+# =============================================================================
+copilot_queries_total = Counter(
+    "cip_copilot_queries_total",
+    "Copilot questions, by how they were resolved.",
+    # outcome: answered | insufficient_context | generation_failed | refused
+    ["outcome", "retrieval_mode"],
+    registry=REGISTRY,
+)
+
+copilot_similarity = Histogram(
+    "cip_copilot_answerable_similarity",
+    "Best clause/chunk similarity per question - what the guardrail compares.",
+    buckets=(0.0, 0.1, 0.2, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+    registry=REGISTRY,
+)
+
+copilot_context_chunks = Histogram(
+    "cip_copilot_context_chunks",
+    "Passages that reached the prompt, after re-ranking and the context budget.",
+    buckets=(0, 1, 2, 4, 6, 8, 12, 16, 20),
+    registry=REGISTRY,
+)
+
+#: Written by a benchmark run rather than by serving traffic, so a dashboard can
+#: chart quality beside latency. Gauges, not counters: each run replaces the last
+#: rather than accumulating.
+evaluation_metric = Gauge(
+    "cip_evaluation_metric",
+    "Latest benchmark value, by dataset and metric.",
+    ["dataset", "metric"],
+    registry=REGISTRY,
+)
+
+evaluation_runs_total = Counter(
+    "cip_evaluation_runs_total",
+    "Benchmark runs, by whether the regression gate passed.",
+    ["dataset", "result"],
+    registry=REGISTRY,
+)
+
 graph_traversal_depth = Histogram(
     "cip_graph_traversal_depth",
     "Depth reached during graph traversal.",
@@ -645,11 +687,16 @@ __all__ = [
     "contracts_expiring",
     "contracts_high_risk",
     "contracts_total",
+    "copilot_context_chunks",
+    "copilot_queries_total",
+    "copilot_similarity",
     "embedding_duration_seconds",
     "embedding_failures_total",
     "embedding_generated_total",
     "embedding_requested_total",
     "embedding_reused_total",
+    "evaluation_metric",
+    "evaluation_runs_total",
     "exports_total",
     "extracted_items_total",
     "extractions_total",

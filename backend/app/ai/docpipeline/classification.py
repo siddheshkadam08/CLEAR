@@ -175,8 +175,7 @@ def _system_prompt(doc_types: Sequence[str]) -> str:
         "between two types that both fit poorly.",
         "- Judge the document by what it does, not by words that appear in it. "
         "An MSA contains a confidentiality clause; that does not make it an NDA.",
-        "- Give the confidence you actually have. A cover page and a stamp are "
-        "weak evidence.",
+        "- Give the confidence you actually have. A cover page and a stamp are weak evidence.",
     ]
     return "\n".join(lines)
 

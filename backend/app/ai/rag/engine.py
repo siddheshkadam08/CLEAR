@@ -374,10 +374,7 @@ class RAGEngine:
 
         offered = max(len(package.citations), 1)
         coverage = min(len(answer.citations) / min(offered, 5), 1.0)
-        mean_score = sum(c.score for c in answer.citations) / len(answer.citations)
-        # Retrieval scores are cosine similarities in [-1, 1]; rescale to [0, 1] so a
-        # weak-but-positive match does not read as high confidence.
-        evidence_strength = max(0.0, min((mean_score + 1.0) / 2.0, 1.0))
+        evidence_strength = self._evidence_strength(answer.citations)
 
         score = 0.55 * coverage + 0.45 * evidence_strength
         if answer.invalid_citations:
@@ -387,6 +384,36 @@ class RAGEngine:
         if package.dropped:
             score *= 0.9
         return round(max(0.0, min(score, 1.0)), 4)
+
+    @staticmethod
+    def _evidence_strength(citations: list[Citation]) -> float:
+        """How strong the cited evidence was, in [0, 1].
+
+        Read from ``similarity`` - the cosine distance the vector search actually
+        measured - and never from ``score``. The two are not interchangeable: under
+        hybrid retrieval ``score`` is a reciprocal-rank fusion value of roughly
+        ``1/(60+rank)``, so every citation carries ~0.016 and rescaling it produced
+        a constant ~0.508 for every answer ever generated. Confidence then varied
+        only with how many labels the model happened to emit, while being displayed
+        to reviewers as an evidence-quality figure.
+
+        A re-ranker score, where one exists, outranks similarity: it is a direct
+        judgement of whether the passage answers *this* question, which is what
+        confidence is trying to express. Cosine similarity only says the passage is
+        about the same subject.
+        """
+        strengths = [
+            citation.rerank_score if citation.rerank_score is not None else citation.similarity
+            for citation in citations
+        ]
+        measured = [value for value in strengths if value is not None]
+        if not measured:
+            # Keyword-only evidence carries no similarity. That is unmeasured, not
+            # weak, so it scores neutral - rewarding it would inflate confidence on
+            # exactly the answers with the least evidence behind them, and zeroing
+            # it would punish a correct exact-phrase match.
+            return 0.5
+        return max(0.0, min(sum(measured) / len(measured), 1.0))
 
     # =========================================================================
     # Helpers

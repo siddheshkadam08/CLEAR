@@ -27,7 +27,9 @@ class RecordingProvider:
         self.budgets: list[int | None] = []
         self._fail_first_with = fail_first_with
 
-    async def generate_structured(self, *, max_tokens: int | None = None, **_: Any) -> StructuredResult:
+    async def generate_structured(
+        self, *, max_tokens: int | None = None, **_: Any
+    ) -> StructuredResult:
         self.budgets.append(max_tokens)
         if self._fail_first_with is not None and len(self.budgets) == 1:
             raise self._fail_first_with

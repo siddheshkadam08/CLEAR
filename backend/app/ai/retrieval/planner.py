@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.ai.docpipeline.mapping import ResolvedDocumentType
+from app.ai.retrieval.analysis import QueryAnalysis
 from app.core.config import get_settings
 from app.core.enums import (
     EmbeddingLevel,
@@ -428,14 +430,24 @@ class RetrievalPlanner:
         contract_ids: list[uuid.UUID] | None = None,
         mode: SearchMode = SearchMode.HYBRID,
         agreement_types: list[str] | None = None,
+        analysis: QueryAnalysis | None = None,
+        document_type: ResolvedDocumentType | None = None,
+        level_limit: int | None = None,
+        prefer_content: bool = False,
     ) -> RetrievalPlan:
         text = (query or "").strip()
         reasoning: list[str] = []
 
-        intent = self._detect_intent(text, reasoning)
-        strategy = self._select_strategy(intent, text, scope, contract_ids, reasoning)
+        agreement_types = self._with_document_type(
+            agreement_types, analysis=analysis, document_type=document_type, reasoning=reasoning
+        )
+
+        intent = self._detect_intent(text, reasoning, analysis)
+        strategy = self._select_strategy(
+            intent, text, scope, contract_ids, reasoning, prefer_content
+        )
         filters = self._extract_filters(text, agreement_types, contract_ids, reasoning)
-        levels = self._level_budgets(strategy, scope, reasoning)
+        levels = self._level_budgets(strategy, scope, reasoning, level_limit)
 
         plan = RetrievalPlan(
             query=text,
@@ -456,6 +468,7 @@ class RetrievalPlanner:
             rerank=self._settings.reranker_enabled
             and strategy is not RetrievalStrategy.METADATA_ONLY,
             reasoning=reasoning,
+            method="llm+rules" if analysis and analysis.method == "llm" else "rules",
         )
 
         if not plan.is_scoped:
@@ -479,15 +492,84 @@ class RetrievalPlanner:
     # =========================================================================
     # Intent
     # =========================================================================
-    def _detect_intent(self, query: str, reasoning: list[str]) -> QueryIntent:
+    def _detect_intent(
+        self, query: str, reasoning: list[str], analysis: QueryAnalysis | None = None
+    ) -> QueryIntent:
         lowered = query.lower()
         for intent, patterns in _INTENT_PATTERNS:
             for pattern in patterns:
                 if re.search(pattern, lowered):
                     reasoning.append(f"Intent '{intent.value}' - the question matches /{pattern}/.")
                     return intent
+
+        # Only now does the classifier get a say. The rules keep priority because
+        # they are reproducible and free, and because a matched pattern is direct
+        # evidence from the question's own wording; the model is consulted for the
+        # questions that wording did not settle.
+        if analysis is not None and analysis.intent is not QueryIntent.GENERAL_QA:
+            reasoning.append(
+                f"Intent '{analysis.intent.value}' - no pattern matched, so the query "
+                "classifier decided it."
+            )
+            return analysis.intent
+
         reasoning.append("No specific intent matched; treating as general question answering.")
         return QueryIntent.GENERAL_QA
+
+    # =========================================================================
+    # Document type
+    # =========================================================================
+    def _with_document_type(
+        self,
+        agreement_types: list[str] | None,
+        *,
+        analysis: QueryAnalysis | None,
+        document_type: ResolvedDocumentType | None,
+        reasoning: list[str],
+    ) -> list[str]:
+        """Fold a detected document type into the agreement-type filter.
+
+        The threshold is a one-way gate and the asymmetry is why it exists:
+        filtering to the wrong type removes the answer from the search entirely,
+        while declining to filter only leaves it wider. So a low score adds
+        nothing - it never widens, never substitutes, and never guesses.
+
+        An explicit ``agreement_types`` from the caller always wins: a filter the
+        user chose is not something a classifier gets to overrule.
+        """
+        explicit = list(agreement_types or [])
+        if explicit:
+            if document_type is not None:
+                reasoning.append(
+                    "A document type was detected but the request already named an "
+                    "agreement type, so the request's filter is used."
+                )
+            return explicit
+
+        if document_type is None:
+            if analysis is not None and analysis.has_document_type:
+                reasoning.append(
+                    f"'{analysis.document_type}' is not a document type this taxonomy "
+                    "knows, so no type filter was applied."
+                )
+            return explicit
+
+        threshold = self._settings.document_type_confidence_threshold
+        confidence = analysis.confidence if analysis else 0.0
+        if confidence < threshold:
+            reasoning.append(
+                f"Document type '{document_type.label}' was detected but only at "
+                f"{confidence:.2f} confidence (threshold {threshold:.2f}), so every "
+                "document type is searched rather than risking the right one being "
+                "excluded."
+            )
+            return explicit
+
+        reasoning.append(
+            f"Document type '{document_type.label}' detected at {confidence:.2f} "
+            f"confidence, so retrieval is filtered to '{document_type.agreement_type}'."
+        )
+        return [document_type.agreement_type]
 
     def _select_strategy(
         self,
@@ -496,6 +578,7 @@ class RetrievalPlanner:
         scope: SearchScope,
         contract_ids: list[uuid.UUID] | None,
         reasoning: list[str],
+        prefer_content: bool = False,
     ) -> RetrievalStrategy:
         strategy = _INTENT_STRATEGY.get(intent, RetrievalStrategy.HYBRID)
 
@@ -506,6 +589,19 @@ class RetrievalPlanner:
                 "The question names a specific clause number, so clause retrieval is used."
             )
             return RetrievalStrategy.CLAUSE_RETRIEVAL
+
+        # The Copilot answers from document text, so a metadata-only plan is never
+        # right for it. "What is the notice period?" classifies as a timeline
+        # question on the word "notice period" and would otherwise be answered from
+        # the projection - which holds expiry dates and knows nothing about notice
+        # periods. The question is answerable; it just needs the clauses.
+        if prefer_content and strategy is RetrievalStrategy.METADATA_ONLY:
+            reasoning.append(
+                "The question is being answered from document text, so clauses and "
+                "chunks are retrieved rather than answering from the metadata "
+                "projection alone."
+            )
+            return RetrievalStrategy.HYBRID
 
         # Within a single contract, a metadata-only plan would answer from the
         # projection and never open the document - which is not what someone asking
@@ -600,7 +696,11 @@ class RetrievalPlanner:
     # Budgets
     # =========================================================================
     def _level_budgets(
-        self, strategy: RetrievalStrategy, scope: SearchScope, reasoning: list[str]
+        self,
+        strategy: RetrievalStrategy,
+        scope: SearchScope,
+        reasoning: list[str],
+        level_limit: int | None = None,
     ) -> list[LevelBudget]:
         """How many candidates each level yields.
 
@@ -608,10 +708,17 @@ class RetrievalPlanner:
         candidate documents, L2 to candidate clauses within them, and only then does
         L3 pull evidence. Application-wide scope widens L1 because the candidate pool
         is larger, not L3 - the answer still only needs a handful of passages.
+
+        ``level_limit`` overrides the per-level ceilings with a single top-K. The
+        Copilot passes it so the candidate pool that reaches re-ranking is the
+        configured one rather than three different numbers.
         """
         settings = self._settings
         wide = scope is SearchScope.APPLICATION
         budgets: list[LevelBudget] = []
+
+        def limit(default: int) -> int:
+            return default if level_limit is None else level_limit
 
         if strategy is RetrievalStrategy.METADATA_ONLY:
             reasoning.append("Metadata only: no vector search is performed.")
@@ -625,7 +732,7 @@ class RetrievalPlanner:
             budgets.append(
                 LevelBudget(
                     level=EmbeddingLevel.DOCUMENT_SUMMARY,
-                    limit=settings.max_documents * (2 if wide else 1),
+                    limit=limit(settings.max_documents * (2 if wide else 1)),
                     # Per-level floor: a document summary is long and topical, so
                     # its neighbours cluster differently from a short, formulaic
                     # clause. One global threshold suits neither.
@@ -642,7 +749,7 @@ class RetrievalPlanner:
             budgets.append(
                 LevelBudget(
                     level=EmbeddingLevel.CLAUSE,
-                    limit=settings.max_clauses,
+                    limit=limit(settings.max_clauses),
                     min_similarity=settings.similarity_floor(EmbeddingLevel.CLAUSE.value),
                 )
             )
@@ -651,7 +758,7 @@ class RetrievalPlanner:
             budgets.append(
                 LevelBudget(
                     level=EmbeddingLevel.CHUNK,
-                    limit=settings.max_chunks,
+                    limit=limit(settings.max_chunks),
                     min_similarity=settings.similarity_floor(EmbeddingLevel.CHUNK.value),
                 )
             )
@@ -679,6 +786,8 @@ class RetrievalPlanner:
 __all__ = [
     "LevelBudget",
     "MetadataFilter",
+    "QueryAnalysis",
+    "ResolvedDocumentType",
     "RetrievalPlan",
     "RetrievalPlanner",
 ]

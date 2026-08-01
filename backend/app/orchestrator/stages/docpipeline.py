@@ -73,9 +73,7 @@ class DocPipelineStage(StageHandler):
     async def run(self, ctx: StageContext) -> StageResult:
         settings = get_settings()
 
-        payloads = await ObjectCache(settings.parser.active_parser).load(
-            ctx.contract.sha256_hash
-        )
+        payloads = await ObjectCache(settings.parser.active_parser).load(ctx.contract.sha256_hash)
         if not payloads:
             # The parser stage is a hard dependency, so its cache should be warm.
             # An empty cache means the parse came from a fixture replay or a
@@ -101,9 +99,7 @@ class DocPipelineStage(StageHandler):
             # from it. Flag it here rather than letting "0 clauses found" be the
             # only symptom of a classification miss.
             ctx.contract.needs_review = True
-        await ctx.report_progress(
-            55, f"classified as {classification.doc_type}"
-        )
+        await ctx.report_progress(55, f"classified as {classification.doc_type}")
 
         clause_specs = await load_clauses(ctx.db, classification.doc_type)
         if not clause_specs:

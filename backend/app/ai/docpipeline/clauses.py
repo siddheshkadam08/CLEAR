@@ -312,11 +312,7 @@ class ClauseDetector:
             shared.setdefault(heading.ref, []).append(clause)
 
         splits: dict[str, dict[str, list[Paragraph]]] = {}
-        contested = [
-            (ref, clauses)
-            for ref, clauses in shared.items()
-            if len(clauses) > 1
-        ]
+        contested = [(ref, clauses) for ref, clauses in shared.items() if len(clauses) > 1]
         if contested:
             heading_by_ref = {heading.ref: heading for _c, (heading, _m) in ordered}
             results = await asyncio.gather(
@@ -336,9 +332,7 @@ class ClauseDetector:
             if portion:
                 extent = tuple(portion)
                 method = f"{method}:split"
-            detected.append(
-                DetectedClause(clause=clause, paragraphs=extent, method=method)
-            )
+            detected.append(DetectedClause(clause=clause, paragraphs=extent, method=method))
         return detected
 
     async def _split_section(

@@ -136,6 +136,11 @@ class EmbeddingResult:
 #: interface rather than a detail inside one provider.
 InputType = Literal["query", "passage"]
 
+#: How long a query vector stays cached. Bounded rather than indefinite: the model
+#: is configuration, and a re-pointed provider must not keep serving vectors from
+#: the space it left. The model name is in the key too, so this is belt and braces.
+_QUERY_CACHE_TTL_SECONDS = 3600
+
 
 class IEmbeddingProvider(ABC):
     """Embedding contract. Implementations must be safe to call concurrently."""
@@ -168,8 +173,39 @@ class IEmbeddingProvider(ABC):
         return result.vectors[0]
 
     async def embed_query(self, text: str) -> list[float]:
-        """Embed a search string. Always use this on the retrieval path."""
-        return await self.embed(text, input_type="query")
+        """Embed a search string. Always use this on the retrieval path.
+
+        Cached, unlike the passage path. Two different reasons make it worth it:
+
+        * Contract review asks the same questions repeatedly - the same clause
+          across a portfolio, the same diligence checklist against every target -
+          so the hit rate is high in a way it never is for document text, which is
+          embedded once at ingest.
+        * The Copilot pre-warms this concurrently with query classification and the
+          retrieval engine then calls it again. Without a cache that is two billed
+          round trips for one question.
+
+        Keyed on the model as well as the text: vectors from two models do not
+        share a space, and serving one for the other would produce a search whose
+        distances mean nothing. Fails open - a Redis outage costs the round trip,
+        never the answer.
+        """
+        import hashlib
+
+        from app.core.cache import cache_get, cache_set, make_key
+
+        key = make_key(
+            "query_embedding",
+            self.model,
+            hashlib.sha256(text.strip().encode()).hexdigest()[:32],
+        )
+        hit = await cache_get(key, cache_name="query_embedding")
+        if isinstance(hit, list) and len(hit) == self.dim:
+            return [float(value) for value in hit]
+
+        vector = await self.embed(text, input_type="query")
+        await cache_set(key, vector, ttl=_QUERY_CACHE_TTL_SECONDS, cache_name="query_embedding")
+        return vector
 
     @abstractmethod
     async def health(self) -> bool: ...
@@ -348,9 +384,7 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
                 # Embeddings may live on a different Azure resource from the chat
                 # model. Each of these falls back to the LLM's value, so one
                 # resource serving both still needs nothing set.
-                endpoint = (
-                    settings.embedding.azure_endpoint or settings.llm.azure_openai_endpoint
-                )
+                endpoint = settings.embedding.azure_endpoint or settings.llm.azure_openai_endpoint
                 if not endpoint:
                     raise ProviderError(
                         "AZURE_OPENAI_EMBEDDING_ENDPOINT (or AZURE_OPENAI_ENDPOINT) is "
@@ -360,9 +394,7 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
                     )
                 self._client = AsyncAzureOpenAI(
                     azure_endpoint=endpoint,
-                    api_key=(
-                        settings.embedding.azure_api_key or settings.llm.azure_openai_api_key
-                    ),
+                    api_key=(settings.embedding.azure_api_key or settings.llm.azure_openai_api_key),
                     api_version=(
                         settings.embedding.azure_api_version
                         or settings.llm.azure_openai_api_version
@@ -401,9 +433,7 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
         """
         if self.azure:
             settings = get_settings()
-            deployment = (
-                settings.embedding.azure_deployment or settings.llm.azure_openai_deployment
-            )
+            deployment = settings.embedding.azure_deployment or settings.llm.azure_openai_deployment
             if deployment:
                 return deployment
         return self.model

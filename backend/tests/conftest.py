@@ -43,6 +43,22 @@ def settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     get_settings.cache_clear()
 
 
+@pytest.fixture
+def cache_breaker_reset() -> Iterator[None]:
+    """Clear the cache breaker for a test that exercises the cache path.
+
+    Deliberately **not** autouse. There is no Redis in the unit suite, so the first
+    cache call trips the breaker and every later one is skipped - which is both the
+    correct production behaviour and what keeps the suite from paying a connect
+    timeout per test. A test that wants the cache attempted asks for this fixture.
+    """
+    from app.core.cache import reset_cache_breaker
+
+    reset_cache_breaker()
+    yield
+    reset_cache_breaker()
+
+
 @pytest.fixture(autouse=True)
 def reset_embedding_provider() -> Iterator[None]:
     """Drop the cached provider singleton around every test."""

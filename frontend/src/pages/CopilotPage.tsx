@@ -18,13 +18,30 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bot, MessageSquarePlus, PanelLeft, SendHorizonal, Square } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import {
+  Bot,
+  Check,
+  Copy,
+  MessageSquarePlus,
+  PanelLeft,
+  RotateCcw,
+  SendHorizonal,
+  Square,
+} from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { copilot as copilotApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
-import type { ChatMessage, Citation, PlanExplanation, UUID } from '@/api/types';
+import type {
+  ChatMessage,
+  Citation,
+  CopilotQueryMetadata,
+  CopilotSource,
+  CopilotStreamDone,
+  PlanExplanation,
+  UUID,
+} from '@/api/types';
 import { Badge } from '@/components/common/Badge';
 import { getRiskVariant } from '@/lib/badges';
 import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
@@ -32,6 +49,7 @@ import { Button } from '@/components/common/Button';
 import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses } from '@/components/common/Field';
+import { Markdown } from '@/components/common/Markdown';
 import { formatDateTime, formatPercent, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
@@ -40,6 +58,9 @@ interface Turn {
   question: string;
   answer: string;
   citations: Citation[];
+  /** Supporting passages with their similarity, from the `done` event. */
+  sources: CopilotSource[];
+  metadata?: CopilotQueryMetadata;
   confidence?: number;
   confidenceBand?: string;
   needsReview: boolean;
@@ -94,93 +115,107 @@ export function CopilotPage() {
     setSessionsOpen(false);
   }
 
-  async function ask() {
-    const text = question.trim();
-    if (!text || streaming) return;
+  /**
+   * Ask a question and stream the answer.
+   *
+   * `turnId` is passed when retrying: the existing turn is reset and refilled in
+   * place, so a retry replaces the failed answer rather than repeating the
+   * question further down the thread.
+   */
+  const ask = useCallback(
+    async (text: string, retryTurnId?: string) => {
+      if (!text || streaming) return;
 
-    const turnId = `${turns.length}:${text.slice(0, 24)}`;
-    setQuestion('');
-    setStreaming(true);
-    setTurns((current) => [
-      ...current,
-      {
+      const turnId = retryTurnId ?? `${Date.now()}:${text.slice(0, 24)}`;
+      const blank: Turn = {
         id: turnId,
         question: text,
         answer: '',
         citations: [],
+        sources: [],
         needsReview: false,
         refused: false,
         warnings: [],
         streaming: true,
-      },
-    ]);
+      };
 
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    const patch = (changes: Partial<Turn>) =>
+      setStreaming(true);
       setTurns((current) =>
-        current.map((turn) => (turn.id === turnId ? { ...turn, ...changes } : turn)),
+        retryTurnId
+          ? current.map((turn) => (turn.id === retryTurnId ? blank : turn))
+          : [...current, blank],
       );
 
-    try {
-      await copilotApi.stream(
-        {
-          query: text,
-          project_id: projectId,
-          session_id: sessionId,
-          response_format: format || null,
-        },
-        {
-          signal: controller.signal,
-          onEvent: (event, data) => {
-            if (event === 'plan') {
-              patch({ plan: data as PlanExplanation });
-            } else if (event === 'token') {
-              const token = (data as { text?: string }).text ?? '';
-              setTurns((current) =>
-                current.map((turn) =>
-                  turn.id === turnId ? { ...turn, answer: turn.answer + token } : turn,
-                ),
-              );
-            } else if (event === 'done') {
-              const payload = data as {
-                citations?: Citation[];
-                confidence?: number;
-                confidence_band?: string;
-                needs_review?: boolean;
-                warnings?: string[];
-                text?: string | null;
-              };
-              patch({
-                citations: payload.citations ?? [],
-                confidence: payload.confidence,
-                confidenceBand: payload.confidence_band,
-                needsReview: Boolean(payload.needs_review),
-                warnings: payload.warnings ?? [],
-                streaming: false,
-                // The server sends `text` only when it had to strip a fabricated
-                // citation label. What was streamed is then stale and must be
-                // replaced, not appended to.
-                ...(payload.text ? { answer: payload.text } : {}),
-              });
-            } else if (event === 'error') {
-              patch({
-                streaming: false,
-                error: (data as { message?: string }).message ?? 'The answer stream failed.',
-              });
-            }
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      const patch = (changes: Partial<Turn>) =>
+        setTurns((current) =>
+          current.map((turn) => (turn.id === turnId ? { ...turn, ...changes } : turn)),
+        );
+
+      try {
+        await copilotApi.stream(
+          {
+            query: text,
+            project_id: projectId,
+            session_id: sessionId,
+            response_format: format || null,
           },
-          onError: (error) => patch({ streaming: false, error: error.message }),
-        },
-      );
-    } catch (caught) {
-      patch({ streaming: false, error: errorMessage(caught) });
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
-      await queryClient.invalidateQueries({ queryKey: ['copilot-sessions'] });
-    }
+          {
+            signal: controller.signal,
+            onEvent: (event, data) => {
+              if (event === 'plan') {
+                patch({ plan: data as PlanExplanation });
+              } else if (event === 'token') {
+                const token = (data as { text?: string }).text ?? '';
+                setTurns((current) =>
+                  current.map((turn) =>
+                    turn.id === turnId ? { ...turn, answer: turn.answer + token } : turn,
+                  ),
+                );
+              } else if (event === 'done') {
+                const payload = data as CopilotStreamDone;
+                patch({
+                  citations: payload.citations ?? [],
+                  sources: payload.sources ?? [],
+                  metadata: payload.metadata,
+                  confidence: payload.confidence,
+                  confidenceBand: payload.confidence_band,
+                  needsReview: Boolean(payload.needs_review),
+                  warnings: payload.warnings ?? [],
+                  streaming: false,
+                  // The server sends `text` only when it had to strip a fabricated
+                  // citation label. What was streamed is then stale and must be
+                  // replaced, not appended to.
+                  ...(payload.text ? { answer: payload.text } : {}),
+                });
+              } else if (event === 'error') {
+                patch({
+                  streaming: false,
+                  error: (data as { message?: string }).message ?? 'The answer stream failed.',
+                });
+              }
+            },
+            onError: (error) => patch({ streaming: false, error: error.message }),
+          },
+        );
+      } catch (caught) {
+        patch({ streaming: false, error: errorMessage(caught) });
+      } finally {
+        setStreaming(false);
+        abortRef.current = null;
+        await queryClient.invalidateQueries({ queryKey: ['copilot-sessions'] });
+      }
+    },
+    [format, projectId, queryClient, sessionId, streaming],
+  );
+
+  function submit() {
+    const text = question.trim();
+    if (!text || streaming) return;
+    setQuestion('');
+    void ask(text);
   }
 
   const sessionList = (
@@ -274,7 +309,14 @@ export function CopilotPage() {
                 description="Try: “Which agreements let the counterparty terminate for convenience?” or “Summarise the indemnities in the Acme MSA.” Answers are drawn only from contracts in the projects you belong to."
               />
             ) : (
-              turns.map((turn) => <TurnView key={turn.id} turn={turn} />)
+              turns.map((turn) => (
+                <TurnView
+                  key={turn.id}
+                  turn={turn}
+                  busy={streaming}
+                  onRetry={() => void ask(turn.question, turn.id)}
+                />
+              ))
             )}
             <div ref={bottomRef} />
           </div>
@@ -285,7 +327,7 @@ export function CopilotPage() {
             className="sticky bottom-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-lg sm:p-4"
             onSubmit={(event) => {
               event.preventDefault();
-              void ask();
+              submit();
             }}
           >
             <textarea
@@ -297,7 +339,7 @@ export function CopilotPage() {
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
-                  void ask();
+                  submit();
                 }
               }}
               className={`${inputClasses} resize-none`}
@@ -348,7 +390,15 @@ export function CopilotPage() {
 // =============================================================================
 // Turn
 // =============================================================================
-function TurnView({ turn }: { turn: Turn }) {
+function TurnView({
+  turn,
+  busy,
+  onRetry,
+}: {
+  turn: Turn;
+  busy: boolean;
+  onRetry: () => void;
+}) {
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
@@ -365,12 +415,28 @@ function TurnView({ turn }: { turn: Turn }) {
         ) : null}
 
         {turn.error ? (
-          <ErrorBanner message={turn.error} />
+          <ErrorBanner message={turn.error} onRetry={busy ? undefined : onRetry} />
         ) : (
           <>
-            {turn.needsReview && !turn.streaming ? (
+            {turn.needsReview && !turn.streaming && !turn.metadata?.generationFailed ? (
               <div className="mb-3">
                 <NoticeBanner message="This answer needs review: a citation could not be tied back to the retrieved evidence. Verify against the source before relying on it." />
+              </div>
+            ) : null}
+
+            {/* Both of these describe a search that is not the one the reader would
+                assume from their question. A thin answer from a widened or
+                unnarrowed search reads exactly like a thin answer from a precise
+                one unless it says so. */}
+            {turn.metadata?.relaxedFilters && !turn.streaming ? (
+              <div className="mb-3">
+                <NoticeBanner message="Nothing matched within the document type this question appeared to be about, so the search was widened to every document type." />
+              </div>
+            ) : null}
+
+            {turn.metadata?.scopeTruncated && !turn.streaming ? (
+              <div className="mb-3">
+                <NoticeBanner message="This question matched more contracts than can be ranked individually. Results are drawn from across the project, so a specific agreement may not be represented." />
               </div>
             ) : null}
 
@@ -380,8 +446,15 @@ function TurnView({ turn }: { turn: Turn }) {
               </div>
             ) : null}
 
-            <div className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
-              {turn.answer}
+            <div className="text-sm leading-7 text-slate-800">
+              {/* Streaming text is rendered raw: a half-arrived `**` or an unclosed
+                  table row makes the markdown parser reflow the whole answer on
+                  every token. It is parsed once the stream closes. */}
+              {turn.streaming ? (
+                <span className="whitespace-pre-wrap">{turn.answer}</span>
+              ) : (
+                <Markdown>{turn.answer}</Markdown>
+              )}
               {turn.streaming ? (
                 <span
                   aria-hidden
@@ -412,38 +485,155 @@ function TurnView({ turn }: { turn: Turn }) {
                     )}
                   />
                 ) : null}
-                {turn.citations.length === 0 && turn.answer && !turn.refused ? (
+                {turn.metadata?.generationFailed ? (
+                  <Badge text="Not summarised" variant="warning" />
+                ) : turn.metadata?.insufficientContext ? (
+                  <Badge text="Not enough context" variant="warning" />
+                ) : turn.citations.length === 0 && turn.answer && !turn.refused ? (
                   <Badge text="No citations" variant="warning" />
                 ) : null}
+                {turn.metadata?.documentTypeDetected && turn.metadata.documentType ? (
+                  <Badge text={humanise(turn.metadata.documentType)} variant="neutral" />
+                ) : null}
+
+                <span className="ml-auto flex items-center gap-1">
+                  <CopyAnswerButton text={turn.answer} />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={RotateCcw}
+                    disabled={busy}
+                    onClick={onRetry}
+                  >
+                    Retry
+                  </Button>
+                </span>
               </div>
             ) : null}
 
-            {turn.citations.length ? (
-              <ol className="mt-4 space-y-3 border-t border-slate-100 pt-4">
-                {turn.citations.map((citation) => (
-                  <li key={citation.label} className="flex gap-3">
-                    <span className="shrink-0 rounded-lg bg-blue-50 px-2 py-0.5 font-mono text-xs font-semibold text-blue-700">
-                      [{citation.label}]
-                    </span>
-                    <div className="min-w-0">
-                      <Link
-                        to={`/contracts/${citation.contract_id}`}
-                        className="text-sm font-medium text-blue-600 hover:text-blue-700"
-                      >
-                        {citation.contract_title ?? 'Contract'}
-                        {citation.clause_number ? ` · ${citation.clause_number}` : ''}
-                        {citation.page_range ? ` · p${citation.page_range}` : ''}
-                      </Link>
-                      <p className="mt-1 text-xs leading-6 text-slate-500">{citation.text}</p>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-            ) : null}
+            <SourceList turn={turn} />
           </>
         )}
       </Card>
     </div>
+  );
+}
+
+/**
+ * The passages behind an answer.
+ *
+ * Prefers `sources` - which carry the similarity score and are what the server
+ * says the answer used - and falls back to `citations` for a turn rebuilt from a
+ * stored session, where only the citations were persisted.
+ */
+function SourceList({ turn }: { turn: Turn }) {
+  if (turn.streaming) return null;
+
+  const rows = turn.sources.length
+    ? turn.sources.map((source) => ({
+        key: `s${source.label}`,
+        label: source.label,
+        contractId: source.contractId,
+        title: source.contractName ?? 'Contract',
+        heading: source.clauseHeading,
+        section: source.sectionNumber,
+        page: source.pageNumber != null ? `p.${source.pageNumber}` : null,
+        similarity: source.similarityScore ?? null,
+        matchType: source.matchType,
+        text: source.text,
+      }))
+    : turn.citations.map((citation) => ({
+        key: `c${citation.label}`,
+        label: citation.label,
+        contractId: citation.contract_id,
+        title: citation.contract_title ?? 'Contract',
+        heading: citation.section_title,
+        section: citation.clause_number,
+        page: citation.page_range || null,
+        // A stored citation kept the fusion score, which is not a similarity and
+        // must not be shown as one.
+        similarity: null as number | null,
+        matchType: 'semantic',
+        text: citation.text,
+      }));
+
+  if (!rows.length) return null;
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-4">
+      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+        Sources
+      </p>
+      <ol className="space-y-3">
+        {rows.map((row) => (
+          <li key={row.key} className="flex gap-3">
+            <span className="shrink-0 rounded-lg bg-blue-50 px-2 py-0.5 font-mono text-xs font-semibold text-blue-700">
+              [{row.label}]
+            </span>
+            <div className="min-w-0 flex-1">
+              <Link
+                to={`/contracts/${row.contractId}`}
+                className="text-sm font-medium text-blue-600 hover:text-blue-700"
+              >
+                {row.title}
+              </Link>
+              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500">
+                {row.heading ? <span className="font-medium text-slate-600">{row.heading}</span> : null}
+                {row.section ? <span>Section {row.section}</span> : null}
+                {row.page ? <span>{row.page}</span> : null}
+                {row.similarity != null ? (
+                  <span title="Cosine similarity between your question and this passage">
+                    Similarity {row.similarity.toFixed(2)}
+                  </span>
+                ) : row.matchType === 'keyword' ? (
+                  // A keyword hit has no similarity. Saying which search found it
+                  // is honest; "Similarity 0.00" would not be.
+                  <span title="Found by exact wording rather than by meaning">
+                    Keyword match
+                  </span>
+                ) : null}
+              </p>
+              <p className="mt-1 text-xs leading-6 text-slate-500">{row.text}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** Copy the answer, confirming in place rather than with a toast. */
+function CopyAnswerButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      // Clipboard access is denied outside a secure context and in some
+      // browsers' permission settings. Nothing was copied, so the button simply
+      // does not report success - an error banner over a failed copy would be
+      // louder than the action itself.
+    }
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      icon={copied ? Check : Copy}
+      disabled={!text}
+      onClick={() => void copy()}
+    >
+      {copied ? 'Copied' : 'Copy'}
+    </Button>
   );
 }
 
@@ -457,6 +647,7 @@ function rebuildTurns(messages: ChatMessage[]): Turn[] {
         question: message.content,
         answer: '',
         citations: [],
+        sources: [],
         needsReview: false,
         refused: false,
         warnings: [],

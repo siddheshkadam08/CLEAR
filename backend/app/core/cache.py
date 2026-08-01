@@ -17,6 +17,7 @@ All operations fail open: a Redis outage degrades the platform to
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar, cast
 
@@ -142,12 +143,75 @@ def hash_payload(payload: Any) -> str:
 
 
 # =============================================================================
+# Availability
+# =============================================================================
+#: Consecutive failures before the cache is treated as down.
+#:
+#: One. A cache is an optimisation, so the cost of being wrong in each direction is
+#: wildly asymmetric: backing off unnecessarily costs a few uncached reads, while
+#: confirming the outage costs another full connect timeout on every request that
+#: arrives in the meantime. There is nothing to gain from a second opinion.
+_BREAKER_THRESHOLD = 1
+#: How long to skip Redis entirely once it is. Short enough that recovery is
+#: picked up promptly, long enough that the retry is not on every request.
+_BREAKER_COOLDOWN_SECONDS = 30.0
+
+_failures = 0
+_open_until = 0.0
+
+
+def _breaker_open() -> bool:
+    """True while Redis is presumed down and calls should be skipped.
+
+    Failing open is correct, but failing open *slowly* is not: the client has a
+    three-second connect timeout, so an unreachable Redis was adding three seconds
+    to every cache read and another three to every write. On the Copilot path -
+    which now reads the cache for the query classification and again for the query
+    embedding - that is twelve seconds of pure latency added to a question that
+    would otherwise have been answered normally, for a component whose entire
+    purpose is to make things faster.
+    """
+    return _open_until > time.monotonic()
+
+
+def _record_failure(cache_name: str) -> None:
+    global _failures, _open_until
+    _failures += 1
+    cache_operations_total.labels(cache=cache_name, outcome="error").inc()
+    if _failures >= _BREAKER_THRESHOLD and not _breaker_open():
+        _open_until = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
+        logger.warning(
+            "cache_unavailable",
+            failures=_failures,
+            cooldown_seconds=_BREAKER_COOLDOWN_SECONDS,
+            detail="skipping the cache; the platform stays correct but uncached",
+        )
+
+
+def _record_success() -> None:
+    global _failures
+    if _failures:
+        _failures = 0
+
+
+def reset_cache_breaker() -> None:
+    """Clear the breaker. For tests, and for a manual recovery poke."""
+    global _failures, _open_until
+    _failures = 0
+    _open_until = 0.0
+
+
+# =============================================================================
 # Operations
 # =============================================================================
 async def cache_get(key: str, *, cache_name: str = "default") -> Any | None:
+    if _breaker_open():
+        cache_operations_total.labels(cache=cache_name, outcome="skipped").inc()
+        return None
     try:
         redis = await get_redis()
         raw = await redis.get(key)
+        _record_success()
         if raw is None:
             cache_operations_total.labels(cache=cache_name, outcome="miss").inc()
             return None
@@ -155,7 +219,7 @@ async def cache_get(key: str, *, cache_name: str = "default") -> Any | None:
         return orjson.loads(raw)
     except Exception as exc:  # noqa: BLE001
         logger.debug("cache_get_failed", key=key, error=str(exc))
-        cache_operations_total.labels(cache=cache_name, outcome="error").inc()
+        _record_failure(cache_name)
         return None
 
 
@@ -166,6 +230,9 @@ async def cache_set(
     ttl: int | None = None,
     cache_name: str = "default",
 ) -> None:
+    if _breaker_open():
+        cache_operations_total.labels(cache=cache_name, outcome="skipped").inc()
+        return
     try:
         redis = await get_redis()
         ttl = ttl if ttl is not None else get_settings().redis.cache_ttl_seconds
@@ -174,9 +241,10 @@ async def cache_set(
             await redis.setex(key, ttl, payload)
         else:
             await redis.set(key, payload)
+        _record_success()
     except Exception as exc:  # noqa: BLE001
         logger.debug("cache_set_failed", key=key, error=str(exc))
-        cache_operations_total.labels(cache=cache_name, outcome="error").inc()
+        _record_failure(cache_name)
 
 
 async def cache_delete(*keys: str) -> None:
@@ -338,4 +406,5 @@ __all__ = [
     "invalidate_project_cache",
     "make_key",
     "redis_healthy",
+    "reset_cache_breaker",
 ]

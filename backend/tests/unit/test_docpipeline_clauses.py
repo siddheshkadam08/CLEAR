@@ -79,7 +79,9 @@ def test_clean_ref_accepts_the_bracketed_form() -> None:
 @pytest.mark.asyncio
 async def test_exact_heading_match_costs_no_call() -> None:
     pages = [
-        _page(1, [("15. FORCE MAJEURE", "sectionHeading"), ("15.1 A Force Majeure Event ...", None)])
+        _page(
+            1, [("15. FORCE MAJEURE", "sectionHeading"), ("15.1 A Force Majeure Event ...", None)]
+        )
     ]
     provider = StubProvider([])
 
@@ -185,7 +187,9 @@ async def test_outstanding_clause_forces_every_chunk_to_run() -> None:
         ]
     )
 
-    result = await ClauseDetector(provider).detect(pages, _specs("Non-solicit"), chunk_pages=4, chunk_overlap=0, concurrency=1)
+    result = await ClauseDetector(provider).detect(
+        pages, _specs("Non-solicit"), chunk_pages=4, chunk_overlap=0, concurrency=1
+    )
 
     assert [item.clause for item in result.detected] == ["Non-solicit"]
     assert result.llm_chunk_calls == 3
@@ -195,11 +199,11 @@ async def test_outstanding_clause_forces_every_chunk_to_run() -> None:
 @pytest.mark.asyncio
 async def test_early_stop_leaves_later_pages_unread() -> None:
     pages = [_page(number, [(f"page {number} " + "filler " * 40, None)]) for number in range(1, 13)]
-    provider = StubProvider(
-        [{"clauses": [{"clause": "Non-solicit", "paragraph_refs": ["1.1"]}]}]
-    )
+    provider = StubProvider([{"clauses": [{"clause": "Non-solicit", "paragraph_refs": ["1.1"]}]}])
 
-    result = await ClauseDetector(provider).detect(pages, _specs("Non-solicit"), chunk_pages=4, chunk_overlap=0, concurrency=1)
+    result = await ClauseDetector(provider).detect(
+        pages, _specs("Non-solicit"), chunk_pages=4, chunk_overlap=0, concurrency=1
+    )
 
     assert result.early_stopped
     assert result.pages_never_read == [5, 6, 7, 8, 9, 10, 11, 12]
@@ -237,7 +241,9 @@ async def test_thin_chunk_is_skipped_without_a_call() -> None:
     pages = [_page(1, [("Rs. 500", None)]), _page(2, [("INDIA NON JUDICIAL", None)])]
     provider = StubProvider([{"matches": []}])
 
-    result = await ClauseDetector(provider).detect(pages, _specs("Payment terms"), chunk_pages=4, chunk_overlap=0, concurrency=1)
+    result = await ClauseDetector(provider).detect(
+        pages, _specs("Payment terms"), chunk_pages=4, chunk_overlap=0, concurrency=1
+    )
 
     (chunk,) = result.chunk_outcomes
     assert chunk.skipped
@@ -262,7 +268,9 @@ async def test_boundary_repair_is_capped() -> None:
         [{"clauses": [{"clause": "Payment terms", "paragraph_refs": ["4.12"]}]}]
     )
 
-    result = await ClauseDetector(provider).detect(pages, _specs("Payment terms"), chunk_pages=4, chunk_overlap=0, concurrency=1)
+    result = await ClauseDetector(provider).detect(
+        pages, _specs("Payment terms"), chunk_pages=4, chunk_overlap=0, concurrency=1
+    )
 
     (clause,) = result.detected
     assert clause.boundary_repaired
@@ -411,9 +419,7 @@ async def test_extent_stops_at_the_signature_block() -> None:
         [{"matches": [{"heading_ref": "16.1", "clause": "Assignment/change of control"}]}]
     )
 
-    result = await ClauseDetector(provider).detect(
-        pages, _specs("Assignment/change of control")
-    )
+    result = await ClauseDetector(provider).detect(pages, _specs("Assignment/change of control"))
 
     (clause,) = result.detected
     assert len(clause.paragraphs) == 2  # heading + 17.4, stopping before the block

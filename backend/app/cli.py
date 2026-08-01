@@ -743,7 +743,9 @@ def process_doc(
     chunk_overlap: int = typer.Option(0, help="Pages re-read at the start of each window."),
     concurrency: int = typer.Option(4, help="Clause-search calls to run at once."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Extract and print only. No LLM, no DB."),
-    no_persist: bool = typer.Option(False, "--no-persist", help="Classify and detect, write nothing."),
+    no_persist: bool = typer.Option(
+        False, "--no-persist", help="Classify and detect, write nothing."
+    ),
     no_early_stop: bool = typer.Option(
         False, "--no-early-stop", help="Search every chunk even after all clauses are found."
     ),

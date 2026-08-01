@@ -94,9 +94,7 @@ class ExtractionStage(AIExtractionStage):
     async def _load_chunks(self, ctx: StageContext) -> list[CandidateChunk]:
         """Section-level chunks from the parser's cached page JSON."""
         settings = get_settings()
-        payloads = await ObjectCache(settings.parser.active_parser).load(
-            ctx.contract.sha256_hash
-        )
+        payloads = await ObjectCache(settings.parser.active_parser).load(ctx.contract.sha256_hash)
         if not payloads:
             raise PipelineError(
                 "No cached page JSON for this document. This stage reads the "
@@ -171,9 +169,7 @@ class ExtractionStage(AIExtractionStage):
             ctx.contract_id, ctx.project_id, EmbeddingLevel.CHUNK
         )
         await super().cleanup(ctx)
-        removed = await ChunkRepository(ctx.db).delete_for_contract(
-            ctx.contract_id, ctx.project_id
-        )
+        removed = await ChunkRepository(ctx.db).delete_for_contract(ctx.contract_id, ctx.project_id)
         if removed:
             logger.info(
                 "extraction_chunks_cleared",

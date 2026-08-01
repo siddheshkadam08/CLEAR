@@ -136,6 +136,17 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin):
     confidence_band: Mapped[ConfidenceBand | None] = mapped_column(
         pg_enum(ConfidenceBand, "confidence_band"), nullable=True
     )
+    #: Set when the answer needs a human to check it before it is relied on: a
+    #: fabricated citation, an uncited factual answer, or low grounding confidence.
+    #:
+    #: Persisted rather than recomputed. The flag is a statement about what the
+    #: system knew *at the time it answered* - the evidence it was shown and the
+    #: validation it ran - and none of that is reconstructable later. Without the
+    #: column a reloaded conversation silently presented every flagged answer as
+    #: clean, which is a worse failure than never flagging them.
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     #: Component scores behind ``confidence``: retrieval, evidence quality,
     #: citation coverage, model, validation (§17).
     confidence_breakdown: Mapped[dict[str, Any]] = mapped_column(

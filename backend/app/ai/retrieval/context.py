@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.ai.rag.providers import estimate_tokens
+from app.ai.rag.sanitise import sanitise_evidence
 from app.ai.retrieval.engine import Evidence, RetrievalResult
 from app.core.config import get_settings
 from app.core.enums import EmbeddingLevel, QueryIntent
@@ -48,6 +49,11 @@ _MAX_SINGLE_ITEM_RATIO = 0.25
 #: Minimum items to admit regardless of budget, so a tight budget still produces a
 #: citable answer rather than an empty context.
 _MIN_ITEMS = 3
+
+#: Share of the budget conversation history may occupy. History is context for the
+#: question; the evidence is what the answer must be grounded in, so history is
+#: never allowed to crowd it out.
+_HISTORY_BUDGET_RATIO = 0.15
 
 
 @dataclass(slots=True)
@@ -69,6 +75,14 @@ class Citation:
     chunk_id: uuid.UUID | None = None
     score: float = 0.0
     source: str = "vector"
+    #: Cosine similarity from the vector search. Distinct from ``score``, which
+    #: after hybrid fusion is a reciprocal-rank value on an unrelated scale - this
+    #: is the figure that means something to a reader.
+    similarity: float | None = None
+    #: Relevance as the re-ranker judged it, when one ran. A stronger signal than
+    #: ``similarity``: it answers "does this passage answer the question" rather
+    #: than "is it about the same subject".
+    rerank_score: float | None = None
 
     @property
     def marker(self) -> str:
@@ -98,6 +112,10 @@ class Citation:
             "bounding_boxes": self.bounding_boxes,
             "chunk_id": str(self.chunk_id) if self.chunk_id else None,
             "score": round(self.score, 6),
+            "similarity": round(self.similarity, 6) if self.similarity is not None else None,
+            "rerank_score": (
+                round(self.rerank_score, 6) if self.rerank_score is not None else None
+            ),
             "source": self.source,
             "text": self.text,
         }
@@ -162,7 +180,12 @@ class ContextPackage:
         for contract_id, group in by_contract.items():
             title = group[0].contract_title or f"Contract {contract_id}"
             lines = [f"=== {title} ==="]
-            for citation in group:
+            # Document order within a contract, not relevance order. Contract
+            # language is heavily order-dependent - a clause reading "subject to the
+            # foregoing" is misleading when the foregoing appears after it - and the
+            # labels stay in relevance order regardless, so nothing about the
+            # citation numbering changes.
+            for citation in sorted(group, key=_document_position):
                 header = citation.marker
                 if citation.clause_number:
                     header += f" Clause {citation.clause_number}"
@@ -172,7 +195,7 @@ class ContextPackage:
                     header += f" - {citation.section_title}"
                 if citation.page_range:
                     header += f" [{citation.page_range}]"
-                lines.append(f"{header}\n{citation.text.strip()}")
+                lines.append(f"{header}\n{sanitise_evidence(citation.text)}")
             blocks.append("\n\n".join(lines))
         return "\n\n".join(blocks)
 
@@ -245,10 +268,15 @@ class ContextAssembler:
         )
 
         package.metadata_rows = retrieval.metadata_rows[:25]
-        package.history = self._trim_history(history or [])
+        package.history = self._trim_history(history or [], budget=self._budget)
 
         ordered = self._prioritise(retrieval.evidence, intent)
+        # History counts against the budget like everything else. It used not to,
+        # and six long prior turns could push the real prompt well past the ceiling
+        # the budget exists to enforce - silently, because the accounting said the
+        # context fitted.
         spent = estimate_tokens(package.render_metadata()) if package.metadata_rows else 0
+        spent += sum(estimate_tokens(turn.get("content", "")) + 8 for turn in package.history)
         max_single = int(self._budget * _MAX_SINGLE_ITEM_RATIO)
         label = 1
 
@@ -286,6 +314,8 @@ class ContextAssembler:
                     bounding_boxes=item.bounding_boxes,
                     chunk_id=item.chunk_id,
                     score=item.score,
+                    similarity=item.similarity,
+                    rerank_score=item.rerank_score,
                     source=item.source,
                 )
             )
@@ -324,9 +354,17 @@ class ContextAssembler:
     def _prioritise(evidence: list[Evidence], intent: QueryIntent) -> list[Evidence]:
         """Order evidence for admission.
 
-        Score decides most of it, but the level matters for some intents: a clause
-        lookup wants whole clauses at the top even when a fragment scored marginally
-        higher, because a fragment cannot answer "what does the indemnity say".
+        Retrieval order decides most of it, but the level matters for some intents:
+        a clause lookup wants whole clauses at the top even when a fragment ranked
+        marginally higher, because a fragment cannot answer "what does the
+        indemnity say".
+
+        The tie-break is the item's **position** in the retrieved list, not its
+        ``score``. That distinction is load-bearing once re-ranking is enabled: the
+        re-ranker expresses its judgement by reordering, and leaves ``score`` as the
+        similarity or fusion value that produced the candidate. Sorting on ``score``
+        here would put the list straight back into the order the re-ranker was run
+        to change.
         """
         prefers_clauses = intent in {
             QueryIntent.CLAUSE_LOOKUP,
@@ -335,26 +373,70 @@ class ContextAssembler:
             QueryIntent.COMPLIANCE,
         }
 
-        def sort_key(item: Evidence) -> tuple[int, float]:
+        def sort_key(entry: tuple[int, Evidence]) -> tuple[int, int]:
+            position, item = entry
             level_rank = 0
             if prefers_clauses and item.level is EmbeddingLevel.CLAUSE:
                 level_rank = -1
-            # Neighbours are context, not answers: they go last regardless of score.
+            # Neighbours are context, not answers: they go last regardless of rank.
             if item.source in {"neighbour", "graph"}:
                 level_rank = 1
-            return (level_rank, -item.score)
+            return (level_rank, position)
 
-        return sorted(evidence, key=sort_key)
+        return [item for _, item in sorted(enumerate(evidence), key=sort_key)]
 
     @staticmethod
-    def _trim_history(history: list[dict[str, str]], *, keep: int = 6) -> list[dict[str, str]]:
-        """Keep the most recent turns.
+    def _trim_history(
+        history: list[dict[str, str]], *, keep: int = 6, budget: int = 0
+    ) -> list[dict[str, str]]:
+        """Keep the most recent turns, bounded by tokens as well as by count.
 
         Recent turns carry the referents ("it", "that clause") the current question
         depends on; older ones mostly cost tokens. Trimmed here rather than in the
         prompt builder so the budget accounting sees the real size.
+
+        The token bound matters more than the count: six turns is small if they are
+        questions and enormous if one of them is a summary of a fifty-page
+        agreement. Capped at a fraction of the budget so history can never crowd out
+        the evidence - the conversation is context for the question, but the
+        evidence is what the answer has to be grounded in.
         """
-        return history[-keep:]
+        recent = history[-keep:]
+        if budget <= 0:
+            return recent
+
+        ceiling = int(budget * _HISTORY_BUDGET_RATIO)
+        kept: list[dict[str, str]] = []
+        spent = 0
+        # Newest first, so the turns that resolve the current question's pronouns
+        # are the ones that survive a tight budget.
+        for turn in reversed(recent):
+            cost = estimate_tokens(turn.get("content", "")) + 8
+            if spent + cost > ceiling and kept:
+                break
+            kept.append(turn)
+            spent += cost
+        return list(reversed(kept))
+
+
+def _document_position(citation: Citation) -> tuple[int, tuple[int, ...], int]:
+    """Sort key placing a citation where it sits in the document.
+
+    Page first, then the clause number read as a tuple of integers so 12.3 follows
+    2.1 rather than preceding it - the string comparison that would otherwise apply
+    puts "12" before "2". Citations with neither fall to the end in label order,
+    which is the retrieval order they arrived in.
+    """
+    page = citation.page_start if citation.page_start is not None else 10**6
+    parts: tuple[int, ...] = ()
+    if citation.clause_number:
+        try:
+            parts = tuple(int(piece) for piece in citation.clause_number.split(".") if piece)
+        except ValueError:
+            # A clause numbered "12(a)" or "Schedule 2" is not comparable as
+            # integers; page order and the label decide it instead.
+            parts = ()
+    return (page, parts, citation.label)
 
 
 __all__ = ["Citation", "ContextAssembler", "ContextPackage"]

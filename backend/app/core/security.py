@@ -16,6 +16,7 @@ Design notes
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -256,20 +257,83 @@ def decode_token(token: str, *, expected_type: TokenType = "access") -> dict[str
 
 
 def create_signed_state(data: dict[str, Any], ttl_seconds: int = 600) -> str:
-    """Short-lived signed blob - used for the OIDC ``state`` parameter (CSRF)."""
+    """Short-lived signed blob - used for the OIDC ``state`` parameter (CSRF).
+
+    Two details here were wrong and are worth naming, because both failed
+    silently in a way that made Microsoft sign-in impossible to complete:
+
+    * **``sub`` is required.** :func:`decode_token` demands ``exp``, ``iat`` and
+      ``sub`` on every token it validates, and this payload had no ``sub`` - so
+      ``verify_signed_state`` raised on *every* state it had itself produced, and
+      the callback always reported "expired or tampered with". A random state id
+      satisfies it and is the honest subject: the thing this token identifies is
+      one sign-in attempt.
+    * **Caller data is spread last.** It used to be spread first and then have a
+      freshly generated ``nonce`` written over the top, which discarded any nonce
+      the caller passed in. The replay check compares the id token's ``nonce``
+      claim against the one in the state; against a value that was never sent,
+      that check can only ever fail.
+    """
     issued_at = _now()
     payload = {
-        **data,
         "type": "oidc_state",
+        "sub": secrets.token_urlsafe(12),
         "iat": int(issued_at.timestamp()),
         "exp": int((issued_at + timedelta(seconds=ttl_seconds)).timestamp()),
-        "nonce": secrets.token_urlsafe(12),
+        # Last, so a caller-supplied nonce survives rather than being overwritten.
+        **data,
     }
     return _encode(payload)
 
 
 def verify_signed_state(token: str) -> dict[str, Any]:
     return decode_token(token, expected_type="oidc_state")
+
+
+# =============================================================================
+# PKCE (RFC 7636)
+# =============================================================================
+#: Length of the PKCE verifier in random bytes. RFC 7636 requires the encoded
+#: form to be 43-128 characters; 32 bytes of entropy encodes to 43.
+_PKCE_VERIFIER_BYTES = 32
+
+
+def create_pkce_verifier() -> str:
+    """A high-entropy secret that proves the code exchange came from us.
+
+    PKCE is what lets a **public** client - a browser app with no secret it can
+    keep - exchange an authorization code safely. The verifier is generated
+    before the redirect, only its SHA-256 hash travels to the identity provider,
+    and the original is presented at the exchange. Anyone who intercepts the code
+    cannot use it without the verifier they never saw.
+
+    It is required here even though the redirect lands on our own backend, where
+    code interception is already unlikely: it is one line, Microsoft recommends
+    it for every flow, and it removes the client secret from the list of things
+    this deployment has to hold.
+    """
+    return secrets.token_urlsafe(_PKCE_VERIFIER_BYTES)
+
+
+def pkce_challenge(verifier: str) -> str:
+    """The S256 challenge for a verifier.
+
+    S256 rather than ``plain``: with ``plain`` the challenge *is* the verifier,
+    so anyone who sees the authorization request can complete the exchange, and
+    PKCE stops protecting anything.
+    """
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def create_nonce() -> str:
+    """Replay guard bound into the id token.
+
+    The value is sent on the authorization request and Entra echoes it into the
+    ``nonce`` claim of the token it issues. Comparing the two is what stops a
+    token minted for one sign-in attempt being replayed into another.
+    """
+    return secrets.token_urlsafe(16)
 
 
 # =============================================================================
@@ -294,6 +358,8 @@ def generate_api_key() -> str:
 
 __all__ = [
     "create_access_token",
+    "create_nonce",
+    "create_pkce_verifier",
     "create_refresh_token",
     "create_signed_state",
     "decode_token",
@@ -301,6 +367,7 @@ __all__ = [
     "hash_password",
     "hash_token",
     "needs_rehash",
+    "pkce_challenge",
     "sha256_bytes",
     "validate_password_strength",
     "verify_internal_token",

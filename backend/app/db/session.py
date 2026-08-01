@@ -259,21 +259,44 @@ def _register_listeners(engine: AsyncEngine) -> None:
     # before it ever reached an INSERT.
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _set_hnsw_ef_search(dbapi_connection: Any, _record: Any) -> None:  # pragma: no cover
-        """Set ``hnsw.ef_search`` once per connection.
+    def _set_hnsw_search_params(dbapi_connection: Any, _record: Any) -> None:  # pragma: no cover
+        """Set the HNSW search parameters once per connection.
 
-        Higher values trade latency for recall. Setting it at connect time rather
+        ``ef_search`` trades latency for recall. Setting it at connect time rather
         than per query keeps it out of the hot path.
+
+        ``iterative_scan`` is the one that matters as the table grows, and it is
+        worth stating why. Every similarity query this platform issues carries
+        filters the index cannot use - ``project_id``, ``contract_id``, the model,
+        and the metadata containment - so pgvector's default single-pass scan
+        returns ``ef_search`` globally-nearest rows and *then* Postgres discards
+        the ones outside the caller's scope. On a small single-tenant table that is
+        invisible. At a million rows across hundreds of projects, the 80 nearest
+        chunks overall are frequently none of the caller's, and a question with a
+        perfect answer in the corpus returns nothing at all - silently, because an
+        empty result is indistinguishable from a genuine miss.
+
+        ``relaxed_order`` lets the scan keep going until it has enough rows that
+        survive the filter, bounded by ``max_scan_tuples`` so a query that can
+        never be satisfied gives up rather than walking the graph. Requires
+        pgvector 0.8+; on an older server the SET fails and is logged, and
+        behaviour is what it was before.
         """
         raw = getattr(dbapi_connection, "_connection", None)
         if raw is None:
             return
-        try:
-            dbapi_connection.await_(
-                raw.execute(f"SET hnsw.ef_search = {settings.embedding.hnsw_ef_search}")
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("hnsw_ef_search_not_set", error=str(exc))
+
+        embedding = settings.embedding
+        statements = [
+            f"SET hnsw.ef_search = {embedding.hnsw_ef_search}",
+            f"SET hnsw.iterative_scan = {embedding.hnsw_iterative_scan}",
+            f"SET hnsw.max_scan_tuples = {embedding.hnsw_max_scan_tuples}",
+        ]
+        for statement in statements:
+            try:
+                dbapi_connection.await_(raw.execute(statement))
+            except Exception as exc:  # noqa: BLE001 - an older pgvector lacks these GUCs
+                logger.debug("hnsw_parameter_not_set", statement=statement, error=str(exc))
 
 
 __all__ = [

@@ -127,8 +127,9 @@ def test_a_paragraph_without_geometry_is_kept_as_text() -> None:
     """Real text worth extracting, simply not pointable-at."""
     chunks = _section_chunks(
         [
-            Paragraph(page_number=1, index=1, role="sectionHeading",
-                      content="1. Definitions", polygon=()),
+            Paragraph(
+                page_number=1, index=1, role="sectionHeading", content="1. Definitions", polygon=()
+            ),
             Paragraph(page_number=1, index=2, role=None, content=BODY, polygon=()),
         ]
     )

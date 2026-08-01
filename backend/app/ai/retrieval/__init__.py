@@ -14,6 +14,7 @@ Every query is bounded by the caller's accessible projects. Cross-project retrie
 is prohibited (§1.1), and an unscoped plan returns nothing rather than everything.
 """
 
+from app.ai.retrieval.analysis import QueryAnalysis, QueryAnalysisService
 from app.ai.retrieval.context import Citation, ContextAssembler, ContextPackage
 from app.ai.retrieval.engine import Evidence, RetrievalEngine, RetrievalResult
 from app.ai.retrieval.planner import (
@@ -22,16 +23,23 @@ from app.ai.retrieval.planner import (
     RetrievalPlan,
     RetrievalPlanner,
 )
+from app.ai.retrieval.rerank import IReranker, LLMReranker, NoopReranker, get_reranker
 
 __all__ = [
     "Citation",
     "ContextAssembler",
     "ContextPackage",
     "Evidence",
+    "IReranker",
+    "LLMReranker",
     "LevelBudget",
     "MetadataFilter",
+    "NoopReranker",
+    "QueryAnalysis",
+    "QueryAnalysisService",
     "RetrievalEngine",
     "RetrievalPlan",
     "RetrievalPlanner",
     "RetrievalResult",
+    "get_reranker",
 ]

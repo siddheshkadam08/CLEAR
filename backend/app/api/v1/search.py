@@ -36,6 +36,12 @@ from app.core.enums import AuditAction, ChatRole
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
 from app.schemas.common import BoundingBox, MessageResponse
+from app.schemas.copilot import (
+    CopilotQueryMetadata,
+    CopilotQueryRequest,
+    CopilotQueryResponse,
+    CopilotSource,
+)
 from app.schemas.search import (
     AnswerResponse,
     AskRequest,
@@ -202,6 +208,110 @@ async def ask(
     )
 
 
+@copilot_router.post(
+    "/query",
+    response_model=CopilotQueryResponse,
+    summary="Ask a question about a project or one contract",
+)
+async def query(
+    payload: CopilotQueryRequest,
+    user: CurrentUserDep,
+    db: DbSession,
+    scope: AccessScopeDep,
+    info: RequestInfoDep,
+) -> CopilotQueryResponse:
+    """Answer a question strictly from the contract knowledge base.
+
+    The document-type-aware path: the question is classified, and when the type is
+    identified confidently enough it becomes a retrieval filter. When it is not,
+    the search widens rather than guessing - excluding the right document is a
+    worse failure than searching a few more.
+
+    When nothing retrieved clears the similarity threshold the answer says so and
+    no model is called. An ungrounded answer to a contract question is the failure
+    this endpoint exists to avoid, so producing none is the correct outcome.
+    """
+    from app.services.audit import AuditService
+    from app.services.copilot import CopilotService
+    from app.services.retrieval_audit import RetrievalAuditService
+
+    project_ids = await resolve_scope_for_project(payload.project_id, scope)
+
+    result = await CopilotService(db).answer(
+        payload.query,
+        project_ids=project_ids,
+        contract_id=payload.contract_id,
+        history=await _history(db, payload.session_id, user),
+    )
+
+    session_id, message_id = await _persist_query_turn(
+        db, payload=payload, user=user, result=result
+    )
+
+    await RetrievalAuditService(db).record(
+        operation="copilot",
+        query=payload.query,
+        project_id=payload.project_id,
+        user_id=user.id,
+        session_id=session_id,
+        message_id=message_id,
+        plan=result.plan,
+        retrieval=result.retrieval,
+        package=result.package,
+        answer=result.generated,
+        analysis=result.analysis,
+        timings=result.timings,
+    )
+
+    await AuditService(db).record(
+        action=AuditAction.COPILOT_QUERY,
+        entity_type="chat_session",
+        entity_id=session_id,
+        project_id=payload.project_id,
+        user_id=user.id,
+        user_email=user.email,
+        ip=info.ip,
+        user_agent=info.user_agent,
+        route=info.route,
+        after={
+            "query": payload.query,
+            "contract_id": str(payload.contract_id) if payload.contract_id else None,
+            "retrieval_mode": result.retrieval_mode,
+            "sources": len(result.sources),
+            "insufficient_context": result.insufficient_context,
+            "confidence": result.confidence,
+        },
+    )
+
+    return CopilotQueryResponse(
+        answer=result.answer,
+        sources=[_source(item) for item in result.sources],
+        metadata=CopilotQueryMetadata(
+            document_type_detected=result.document_type_detected,
+            document_type=result.document_type,
+            document_type_confidence=result.document_type_confidence,
+            retrieval_mode=result.retrieval_mode,
+            retrieved_chunks=result.retrieved_chunks,
+            top_similarity=result.top_similarity,
+            insufficient_context=result.insufficient_context,
+            generation_failed=result.generation_failed,
+            relaxed_filters=result.relaxed_filters,
+            scope_truncated=result.scope_truncated,
+            confidence=round(result.confidence, 4),
+            confidence_band=result.confidence_band,
+            needs_review=result.needs_review,
+            refused=result.refused,
+            warnings=result.warnings,
+            model=result.model,
+            tokens=result.tokens,
+            cost_usd=round(result.cost_usd, 6),
+            timings=result.timings,
+        ),
+        session_id=session_id,
+        message_id=message_id,
+    )
+
+
 @copilot_router.post("/stream", summary="Ask a question, streamed")
 async def ask_stream(
     payload: AskRequest,
@@ -211,6 +321,10 @@ async def ask_stream(
 ) -> EventSourceResponse:
     """Stream the answer token by token over SSE.
 
+    Runs the same pipeline as ``/query`` - classification, document-type filter,
+    re-ranking and the similarity guardrail - so a question is never refused over
+    one transport and answered over the other. Only the delivery differs.
+
     Citations are emitted **after** the text completes, not during. A citation can
     only be checked once the text containing it exists, and streaming an unverified
     label would put a reference on screen that might then be withdrawn.
@@ -218,30 +332,23 @@ async def ask_stream(
     project_ids = await _scope_for(payload, scope)
 
     from app.ai.rag.engine import RAGEngine
-    from app.ai.retrieval import (
-        ContextAssembler,
-        RetrievalEngine,
-        RetrievalPlanner,
-    )
+    from app.services.copilot import CopilotService
 
-    plan = RetrievalPlanner().plan(
+    service = CopilotService(db)
+    preparation = await service.prepare(
         payload.query,
         project_ids=project_ids,
-        scope=payload.scope,
-        contract_ids=payload.contract_ids or None,
-        mode=payload.mode,
+        contract_id=payload.contract_ids[0] if payload.contract_ids else None,
+        history=await _history(db, payload.session_id, user),
     )
-    retrieval = await RetrievalEngine(db).retrieve(plan)
-    history = await _history(db, payload.session_id, user)
-    package = ContextAssembler().assemble(
-        query=payload.query,
-        intent=plan.intent,
-        retrieval=retrieval,
-        history=history,
-    )
+    plan = preparation.plan
 
     engine = RAGEngine()
-    stream, prompt = await engine.stream(package, response_format=payload.response_format)
+    stream, prompt = (
+        await engine.stream(preparation.package, response_format=payload.response_format)
+        if preparation.package is not None
+        else (None, None)
+    )
 
     async def events() -> Any:
         import json
@@ -250,21 +357,12 @@ async def ask_stream(
         # token arrives.
         yield {"event": "plan", "data": json.dumps(_plan_explanation(plan).model_dump(mode="json"))}
 
-        if stream is None:
-            from app.ai.rag.engine import RAGEngine as _Engine
-
-            empty = await _Engine().answer(package)
-            yield {"event": "token", "data": json.dumps({"text": empty.text})}
-            yield {
-                "event": "done",
-                "data": json.dumps(
-                    {
-                        "citations": [],
-                        "confidence": 0.0,
-                        "needs_review": False,
-                    }
-                ),
-            }
+        if preparation.package is None or stream is None:
+            # The guardrail fired, or there was nothing to stream. Either way the
+            # text is fixed and no model was asked for it.
+            result = service.guardrail_result(preparation)
+            yield {"event": "token", "data": json.dumps({"text": result.answer})}
+            yield {"event": "done", "data": json.dumps(_stream_done(result))}
             return
 
         collected: list[str] = []
@@ -283,22 +381,18 @@ async def ask_stream(
             return
 
         # Validate only now: a citation is checkable once its text exists.
-        answer = engine.validate_text("".join(collected), package, prompt)
-        yield {
-            "event": "done",
-            "data": json.dumps(
-                {
-                    "citations": [_citation(c).model_dump(mode="json") for c in answer.citations],
-                    "confidence": answer.confidence,
-                    "confidence_band": answer.confidence_band.value,
-                    "needs_review": answer.needs_review,
-                    "warnings": answer.warnings,
-                    # If any label was fabricated the client must re-render the
-                    # cleaned text rather than keep what it streamed.
-                    "text": answer.text if answer.invalid_citations else None,
-                }
-            ),
-        }
+        answer = engine.validate_text("".join(collected), preparation.package, prompt)
+        result = service.finish(preparation, answer)
+        payload_out = _stream_done(result)
+        payload_out.update(
+            {
+                "citations": [_citation(c).model_dump(mode="json") for c in answer.citations],
+                # If any label was fabricated the client must re-render the cleaned
+                # text rather than keep what it streamed.
+                "text": answer.text if answer.invalid_citations else None,
+            }
+        )
+        yield {"event": "done", "data": json.dumps(payload_out)}
 
     return EventSourceResponse(events())
 
@@ -395,7 +489,7 @@ async def get_session(
                     CitationResponse(**_rehydrate_citation(c)) for c in (message.citations or [])
                 ],
                 confidence=float(message.confidence) if message.confidence else None,
-                needs_review=bool(getattr(message, "needs_review", False)),
+                needs_review=message.needs_review,
             )
             for message in messages
         ],
@@ -538,6 +632,7 @@ async def _persist_turn(
         content=answer.text,
         citations=[_citation(c).model_dump(mode="json") for c in answer.citations],
         confidence=round(answer.confidence, 4),
+        needs_review=answer.needs_review,
     )
     db.add(assistant)
 
@@ -552,6 +647,108 @@ async def _persist_turn(
 
     await db.flush()
     return session.id, assistant.id
+
+
+async def _persist_query_turn(
+    db: Any, *, payload: CopilotQueryRequest, user: Any, result: Any
+) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    """Store a ``/query`` turn when it belongs to a conversation.
+
+    Separate from :func:`_persist_turn` only because the two receive different
+    objects. What is *stored* is deliberately identical: ``chat_messages.citations``
+    is read back by :func:`get_session` as a ``CitationResponse``, so a turn written
+    in the ``CopilotSource`` shape would load as a validation error and 500 the whole
+    conversation - including the turns that were fine.
+
+    A one-off question is still not persisted: an unsolicited chat history is a
+    privacy cost with no user benefit.
+    """
+    if payload.session_id is None:
+        return None, None
+
+    from app.models.chat import ChatMessage
+
+    session, _ = await _load_session(db, payload.session_id, user)
+
+    db.add(ChatMessage(session_id=session.id, role=ChatRole.USER, content=payload.query))
+    assistant = ChatMessage(
+        session_id=session.id,
+        role=ChatRole.ASSISTANT,
+        content=result.answer,
+        citations=[
+            _citation(c).model_dump(mode="json")
+            for c in (result.generated.citations if result.generated else [])
+        ],
+        confidence=round(result.confidence, 4),
+        needs_review=result.needs_review,
+    )
+    db.add(assistant)
+
+    if not session.title or session.title == "New conversation":
+        session.title = payload.query[:120]
+    session.message_count = (session.message_count or 0) + 2
+    session.last_message_at = datetime.now(UTC)
+
+    await db.flush()
+    return session.id, assistant.id
+
+
+def _stream_done(result: Any) -> dict[str, Any]:
+    """The ``done`` payload, carrying the same sources and metadata as ``/query``.
+
+    Built from the Copilot result rather than from the answer alone, so a client
+    on the streaming transport can render the source list and explain the search
+    without a second request.
+    """
+    return {
+        "citations": [],
+        "confidence": round(result.confidence, 4),
+        "confidence_band": result.confidence_band,
+        "needs_review": result.needs_review,
+        "warnings": result.warnings,
+        "text": None,
+        # by_alias, like `/query`: a client must not have to know which transport
+        # delivered a source in order to read its fields.
+        "sources": [
+            _source(item).model_dump(mode="json", by_alias=True) for item in result.sources
+        ],
+        "metadata": CopilotQueryMetadata(
+            document_type_detected=result.document_type_detected,
+            document_type=result.document_type,
+            document_type_confidence=result.document_type_confidence,
+            retrieval_mode=result.retrieval_mode,
+            retrieved_chunks=result.retrieved_chunks,
+            top_similarity=result.top_similarity,
+            insufficient_context=result.insufficient_context,
+            generation_failed=result.generation_failed,
+            relaxed_filters=result.relaxed_filters,
+            scope_truncated=result.scope_truncated,
+            confidence=round(result.confidence, 4),
+            confidence_band=result.confidence_band,
+            needs_review=result.needs_review,
+            refused=result.refused,
+            warnings=result.warnings,
+            model=result.model,
+            tokens=result.tokens,
+            cost_usd=round(result.cost_usd, 6),
+            timings=result.timings,
+        ).model_dump(mode="json", by_alias=True),
+    }
+
+
+def _source(item: Any) -> CopilotSource:
+    return CopilotSource(
+        contract_id=item.contract_id,
+        contract_name=item.contract_name,
+        clause_heading=item.clause_heading,
+        section_number=item.section_number,
+        page_number=item.page_number,
+        similarity_score=item.similarity_score,
+        rerank_score=item.rerank_score,
+        match_type=item.match_type,
+        text=item.text,
+        label=item.label,
+    )
 
 
 def _session_response(

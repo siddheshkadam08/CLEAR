@@ -211,12 +211,9 @@ def _report_detection(
     heading_found = [item for item in detection.detected if item.method.startswith("heading")]
     for item in heading_found:
         tag = "exact" if item.method == "heading:exact" else "llm  "
-        emit(
-            f"  [{tag}] {item.clause:<34} {item.page_span:<9} {len(item.paragraphs)} paras"
-        )
+        emit(f"  [{tag}] {item.clause:<34} {item.page_span:<9} {len(item.paragraphs)} paras")
     emit(
-        f"  {len(heading_found)} found, "
-        f"{detection.total_targets - len(heading_found)} outstanding"
+        f"  {len(heading_found)} found, {detection.total_targets - len(heading_found)} outstanding"
     )
 
     if detection.chunk_outcomes:
@@ -230,10 +227,7 @@ def _report_detection(
             if chunk.skipped:
                 emit(f"{label} skipped ({chunk.skip_reason})")
             else:
-                emit(
-                    f"{label} -> {len(chunk.found)} found, "
-                    f"{chunk.outstanding_after} outstanding"
-                )
+                emit(f"{label} -> {len(chunk.found)} found, {chunk.outstanding_after} outstanding")
         if detection.early_stopped and detection.pages_never_read:
             emit("  every clause found - remaining chunks skipped")
         else:
@@ -243,8 +237,12 @@ def _report_detection(
     emit("===== CLAUSE DETECTION SUMMARY =====")
     doc_type = outcome.classification.doc_type if outcome.classification else "?"
     emit(f"  document type : {doc_type}   (cip_docMapping: {detection.total_targets} clauses)")
-    percent = (len(detection.detected) / detection.total_targets * 100) if detection.total_targets else 0
-    emit(f"  detected      : {len(detection.detected)} / {detection.total_targets}   ({percent:.0f}%)")
+    percent = (
+        (len(detection.detected) / detection.total_targets * 100) if detection.total_targets else 0
+    )
+    emit(
+        f"  detected      : {len(detection.detected)} / {detection.total_targets}   ({percent:.0f}%)"
+    )
 
     emit("")
     emit(f"  FOUND ({len(detection.detected)})")
@@ -274,14 +272,13 @@ def _report_detection(
             f"  classification : {window[0].page_number}-{window[-1].page_number}"
             f"     (page window = {page_window})"
         )
-    emit(f"  heading pass   : all {len(outcome.pages)} pages    (headings only - no body text sent)")
+    emit(
+        f"  heading pass   : all {len(outcome.pages)} pages    (headings only - no body text sent)"
+    )
 
     sent = detection.pages_sent_to_chunks
     if sent:
-        emit(
-            f"  chunk fallback : {sent[0]}-{sent[-1]}    "
-            f"({detection.llm_chunk_calls} call(s))"
-        )
+        emit(f"  chunk fallback : {sent[0]}-{sent[-1]}    ({detection.llm_chunk_calls} call(s))")
     else:
         emit("  chunk fallback : none    (every clause matched a heading)")
 

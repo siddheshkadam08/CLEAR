@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.embedding import get_embedding_provider
 from app.ai.retrieval.planner import RetrievalPlan
+from app.ai.retrieval.rerank import apply_reranker
 from app.core import metrics
 from app.core.config import get_settings
 from app.core.enums import EmbeddingLevel, RetrievalStrategy, SearchMode
@@ -56,6 +57,15 @@ _RRF_K = 60
 #: search. Beyond this the pre-filter has not actually narrowed anything, and a huge
 #: `IN` list is slower than letting the ANN index do its job.
 _MAX_CANDIDATE_CONTRACTS = 200
+
+#: Levels whose similarity means "this text can answer the question". L1 ranks
+#: documents and is deliberately excluded - see ``RetrievalResult.answerable_similarity``.
+_ANSWERING_LEVELS = frozenset({EmbeddingLevel.CLAUSE.value, EmbeddingLevel.CHUNK.value})
+
+#: Shingle containment above which two passages are the same text. High enough
+#: that a clause and its neighbour survive as separate evidence; low enough to
+#: catch a clause against the chunk it was read from.
+_NEAR_DUPLICATE_CONTAINMENT = 0.8
 
 
 @dataclass(slots=True)
@@ -83,6 +93,15 @@ class Evidence:
     bounding_boxes: list[dict[str, Any]] = field(default_factory=list)
     chunk_id: uuid.UUID | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Cosine similarity as the vector search reported it, before fusion turned
+    #: ``score`` into a reciprocal-rank value. Kept because the two are not
+    #: interchangeable: a user-facing "similarity 0.91" and the answer-level
+    #: guardrail both mean the cosine figure, and an RRF score (~0.016) would be
+    #: nonsense in either place.
+    similarity: float | None = None
+    #: Relevance as the re-ranker judged it, when one ran. A different measurement
+    #: from ``similarity``, so it gets a different field.
+    rerank_score: float | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -105,6 +124,10 @@ class Evidence:
             "page_end": self.page_end,
             "bounding_boxes": self.bounding_boxes,
             "chunk_id": str(self.chunk_id) if self.chunk_id else None,
+            "similarity": round(self.similarity, 6) if self.similarity is not None else None,
+            "rerank_score": (
+                round(self.rerank_score, 6) if self.rerank_score is not None else None
+            ),
         }
 
 
@@ -118,9 +141,41 @@ class RetrievalResult:
     #: Rows the metadata-only strategy answers from directly.
     metadata_rows: list[dict[str, Any]] = field(default_factory=list)
     duration_ms: int = 0
+    #: Time spent re-ranking, when a re-ranker ran. Reported separately from
+    #: ``duration_ms`` so a slow answer can be attributed to the right stage.
+    rerank_ms: int = 0
     counts: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    #: True when the metadata pre-filter matched more contracts than it can carry.
+    #: The consequence is not cosmetic - see ``RetrievalEngine.retrieve``.
     truncated: bool = False
+    #: Best cosine similarity per level, taken before fusion overwrote ``score``.
+    #: Per level, not one number: an L1 document summary is long and topical and
+    #: scores 0.55-0.70 against almost any question about that contract, so a
+    #: single maximum would let a document that is merely *about* the subject
+    #: vouch for clause evidence that scored far lower.
+    top_similarity_by_level: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def top_similarity(self) -> float:
+        """Best similarity at any level. Reporting only - see ``answerable_similarity``."""
+        return max(self.top_similarity_by_level.values(), default=0.0)
+
+    @property
+    def answerable_similarity(self) -> float:
+        """Best similarity among the levels that can actually answer a question.
+
+        L1 selects *documents*; it never contains the answer. Guardrails compare
+        against this, not against ``top_similarity``.
+        """
+        return max(
+            (
+                score
+                for level, score in self.top_similarity_by_level.items()
+                if level in _ANSWERING_LEVELS
+            ),
+            default=0.0,
+        )
 
     @property
     def is_empty(self) -> bool:
@@ -143,6 +198,8 @@ class RetrievalResult:
             "candidates": len(self.candidate_contracts),
             "metadata_rows": len(self.metadata_rows),
             "duration_ms": self.duration_ms,
+            "rerank_ms": self.rerank_ms,
+            "top_similarity": round(self.top_similarity, 4),
             "by_source": self.counts,
             "truncated": self.truncated,
         }
@@ -169,9 +226,33 @@ class RetrievalEngine:
             return result
 
         # ---- 1. metadata pre-filter -----------------------------------------
-        candidates, metadata_rows = await self._metadata_prefilter(plan)
-        result.candidate_contracts = candidates
+        candidates, metadata_rows, truncated = await self._metadata_prefilter(plan)
         result.metadata_rows = metadata_rows
+        result.truncated = truncated
+
+        if truncated:
+            # The pre-filter did not narrow anything, so it must not pretend to.
+            #
+            # Carrying an arbitrary N contracts into `WHERE contract_id IN (...)`
+            # would silently restrict every vector search to that slice - ordered
+            # by risk score, which has nothing to do with the question - and
+            # exclude the rest of the project without a word. The project boundary
+            # is already enforced on every vector row, so dropping the list widens
+            # the search back to what the user actually asked about.
+            logger.info(
+                "metadata_prefilter_not_narrowing",
+                matched_at_least=len(candidates),
+                cap=_MAX_CANDIDATE_CONTRACTS,
+                detail="candidate list dropped; the project boundary bounds the scan",
+            )
+            result.warnings.append(
+                f"More than {_MAX_CANDIDATE_CONTRACTS} contracts match this question, "
+                "so results are ranked across the whole project rather than a "
+                "pre-selected subset of it."
+            )
+            candidates = []
+
+        result.candidate_contracts = candidates
 
         if plan.strategy is RetrievalStrategy.METADATA_ONLY:
             result.duration_ms = int((time.perf_counter() - started) * 1000)
@@ -183,7 +264,11 @@ class RetrievalEngine:
             ).inc()
             return result
 
-        if not candidates and not plan.filters.is_empty:
+        # `not truncated` is load-bearing: after a truncated pre-filter the candidate
+        # list is emptied deliberately, and without this the engine would read that
+        # as "the filters matched nothing" and return no results for a question that
+        # matched thousands of contracts.
+        if not candidates and not truncated and not plan.filters.is_empty:
             # The filters matched nothing. Searching anyway would answer a question
             # the user did not ask, so it stops here and says so.
             result.warnings.append("No contracts matched the filters implied by this question.")
@@ -204,6 +289,16 @@ class RetrievalEngine:
                 if plan.mode in {SearchMode.HYBRID, SearchMode.KEYWORD}
                 else []
             )
+
+            # Taken here, before fusion: `_fuse` replaces `score` with a
+            # reciprocal-rank value, so this is the last point at which a cosine
+            # similarity is still on the object.
+            if vector_hits:
+                level = budget.level.value
+                result.top_similarity_by_level[level] = max(
+                    result.top_similarity_by_level.get(level, 0.0),
+                    max(item.score for item in vector_hits),
+                )
 
             if plan.mode is SearchMode.SEMANTIC:
                 merged = vector_hits
@@ -228,8 +323,12 @@ class RetrievalEngine:
         if plan.graph_depth > 0:
             result.evidence.extend(await self._expand_graph(plan, result))
 
-        # ---- 4. finalise -----------------------------------------------------
+        # ---- 4. re-rank ------------------------------------------------------
         result.evidence = self._deduplicate(result.evidence)
+        if plan.rerank and result.evidence:
+            result.evidence, result.rerank_ms = await self._rerank(plan, result.evidence)
+
+        # ---- 5. finalise -----------------------------------------------------
         result.counts = _count_by_source(result.evidence)
         result.duration_ms = int((time.perf_counter() - started) * 1000)
 
@@ -255,12 +354,17 @@ class RetrievalEngine:
     # =========================================================================
     async def _metadata_prefilter(
         self, plan: RetrievalPlan
-    ) -> tuple[list[uuid.UUID], list[dict[str, Any]]]:
+    ) -> tuple[list[uuid.UUID], list[dict[str, Any]], bool]:
         """Narrow to candidate contracts from the projection.
 
         Runs first for every strategy. Even when the answer needs document content,
         knowing the twelve contracts that can possibly be relevant turns the vector
         search from a repository-wide scan into a bounded one.
+
+        Returns ``(contract_ids, rows, truncated)``. ``truncated`` is the important
+        one: it says the filters matched more contracts than the cap, which means
+        the returned ids are a *slice* and not the candidate set. The caller must
+        not use a slice as an inclusion filter - see :meth:`retrieve`.
         """
         filters = plan.filters
         stmt: Select[Any] = (
@@ -318,9 +422,16 @@ class RetrievalEngine:
         stmt = stmt.order_by(
             ContractMetadata.risk_score.desc().nullslast(),
             ContractMetadata.expiration_date.asc().nullslast(),
-        ).limit(_MAX_CANDIDATE_CONTRACTS)
+            # Tie-break so the slice is at least stable between identical queries.
+            ContractMetadata.contract_id,
+            # One past the cap, so "exactly at the cap" is distinguishable from
+            # "more than the cap". Without the extra row the two look identical
+            # and the truncation goes unnoticed.
+        ).limit(_MAX_CANDIDATE_CONTRACTS + 1)
 
         rows = (await self.db.execute(stmt)).all()
+        truncated = len(rows) > _MAX_CANDIDATE_CONTRACTS
+        rows = rows[:_MAX_CANDIDATE_CONTRACTS]
         contract_ids = [row.contract_id for row in rows]
         payload = [
             {
@@ -340,7 +451,7 @@ class RetrievalEngine:
             }
             for row in rows
         ]
-        return contract_ids, payload
+        return contract_ids, payload, truncated
 
     # =========================================================================
     # Vector
@@ -403,6 +514,9 @@ class RetrievalEngine:
                 source="vector",
                 rank=index + 1,
                 metadata=match.filter_metadata,
+                # Kept alongside `score` because fusion overwrites the latter. This
+                # is the number the guardrail and the reported source score mean.
+                similarity=match.score,
             )
             for index, match in enumerate(matches)
         ]
@@ -569,18 +683,40 @@ class RetrievalEngine:
         it - scored below the hit itself so they inform without displacing it.
         """
         repository = ChunkRepository(self.db)
+        seeds = [
+            item
+            for item in result.by_level(EmbeddingLevel.CHUNK)[: self._settings.max_chunks]
+            if item.chunk_id is not None
+        ]
+        if not seeds:
+            return []
+
+        # Two queries for the whole expansion, not two per chunk. This used to be a
+        # loop of `get_scoped` + `neighbours` per hit - forty sequential round trips
+        # for twenty chunks, all on the critical path, each holding a connection
+        # from a pool of thirty.
+        by_project: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for item in seeds:
+            by_project.setdefault(item.project_id, []).append(item.chunk_id)  # type: ignore[arg-type]
+
+        chunks_by_id: dict[uuid.UUID, Any] = {}
+        neighbours_by_chunk: dict[uuid.UUID, list[Any]] = {}
+        for project_id, chunk_ids in by_project.items():
+            chunks = await repository.list_by_ids(chunk_ids, project_id)
+            chunks_by_id.update({chunk.id: chunk for chunk in chunks})
+            neighbours_by_chunk.update(
+                await repository.neighbours_for_many(
+                    chunks, project_id, window=plan.neighbour_window
+                )
+            )
+
         seen = {item.chunk_id for item in result.evidence if item.chunk_id}
         expanded: list[Evidence] = []
 
-        for item in result.by_level(EmbeddingLevel.CHUNK)[: self._settings.max_chunks]:
-            if item.chunk_id is None:
+        for item in seeds:
+            if item.chunk_id not in chunks_by_id:
                 continue
-            chunk = await repository.get_scoped(item.chunk_id, item.project_id)
-            if chunk is None:
-                continue
-            for neighbour in await repository.neighbours(
-                chunk, item.project_id, window=plan.neighbour_window
-            ):
+            for neighbour in neighbours_by_chunk.get(item.chunk_id, []):
                 if neighbour.id in seen:
                     continue
                 seen.add(neighbour.id)
@@ -667,6 +803,39 @@ class RetrievalEngine:
         return related
 
     # =========================================================================
+    # Re-ranking
+    # =========================================================================
+    async def _rerank(
+        self, plan: RetrievalPlan, evidence: list[Evidence]
+    ) -> tuple[list[Evidence], int]:
+        """Re-order the primary hits, leaving expansion material behind them.
+
+        Neighbours and graph hops are deliberately excluded from the re-ranked set.
+        They were never retrieved on their own merit - they are there to give a hit
+        the context it depends on - so scoring them for relevance would spend the
+        budget on passages that are not candidates, and could float one above the
+        hit that pulled it in.
+        """
+        primary = [item for item in evidence if item.source not in {"neighbour", "graph"}]
+        expansion = [item for item in evidence if item.source in {"neighbour", "graph"}]
+        if not primary:
+            return evidence, 0
+
+        ordered, duration_ms = await apply_reranker(
+            plan.query,
+            primary,
+            # The ANN scan has already done the cheap narrowing; re-ranking is the
+            # expensive read, so it sees a bounded list.
+            limit=min(len(primary), self._settings.rerank_top_k),
+        )
+        kept = {item.key for item in ordered}
+        # Anything the top-K cut dropped goes back at the end rather than being
+        # discarded: the context assembler has its own budget and is entitled to
+        # see the full retrieval, ordered worst-last.
+        ordered.extend(item for item in primary if item.key not in kept)
+        return ordered + expansion, duration_ms
+
+    # =========================================================================
     # Finalisation
     # =========================================================================
     @staticmethod
@@ -687,6 +856,7 @@ class RetrievalEngine:
                 best[item.key] = item
 
         ordered = sorted(best.values(), key=lambda item: -item.score)
+        ordered = _suppress_near_duplicates(ordered)
         for index, item in enumerate(ordered, start=1):
             item.rank = index
         return ordered
@@ -720,11 +890,17 @@ def _fuse(
     # Computed once, not per iteration: an item found by *both* legs is the strongest
     # signal hybrid search produces, and it is worth labelling as such.
     in_both = {item.key for item in vector_hits} & {item.key for item in keyword_hits}
+    # The cosine similarity per key, so it survives the keyword record being the one
+    # kept above. Without this, a passage found by both legs would come out of
+    # fusion with no similarity at all and read as unscored downstream.
+    similarities = {item.key: item.score for item in vector_hits}
 
     fused: list[Evidence] = []
     for key, score in sorted(scores.items(), key=lambda entry: -entry[1])[:limit]:
         item = items[key]
         item.score = score
+        if item.similarity is None:
+            item.similarity = similarities.get(key)
         if key in in_both:
             item.source = "fused"
         fused.append(item)
@@ -732,6 +908,59 @@ def _fuse(
     for index, item in enumerate(fused, start=1):
         item.rank = index
     return fused
+
+
+def _suppress_near_duplicates(evidence: list[Evidence]) -> list[Evidence]:
+    """Drop passages that repeat text already admitted higher up.
+
+    Identity dedup on ``(level, ref_id)`` is not enough. Chunking overlaps by
+    design, and the same paragraph legitimately arrives as an L2 clause and again
+    as the L3 chunk it was read from - different rows, different ids, the same
+    words. Left alone, two or three of the eight context slots hold one paragraph:
+    the evidence budget is spent on repetition, and the answer reads as though a
+    term were corroborated by several sources when it has one.
+
+    Shingle containment rather than equality, because the duplicates are rarely
+    byte-identical - one copy usually carries a heading or a trailing sentence the
+    other does not.
+    """
+    kept: list[Evidence] = []
+    signatures: list[tuple[Evidence, frozenset[str]]] = []
+
+    for item in evidence:
+        shingles = _shingles(item.text)
+        if shingles:
+            duplicate = False
+            for existing, existing_shingles in signatures:
+                overlap = len(shingles & existing_shingles) / min(
+                    len(shingles), len(existing_shingles)
+                )
+                if overlap >= _NEAR_DUPLICATE_CONTAINMENT:
+                    # Keep the one already admitted - it scored higher, and if the
+                    # shorter of the two is the survivor it is because it is the
+                    # more precisely retrieved passage.
+                    existing.metadata.setdefault("duplicates_suppressed", 0)
+                    existing.metadata["duplicates_suppressed"] += 1
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            signatures.append((item, shingles))
+        kept.append(item)
+
+    return kept
+
+
+def _shingles(text: str, *, size: int = 8) -> frozenset[str]:
+    """Overlapping word n-grams, for containment comparison."""
+    words = text.lower().split()
+    if len(words) < size:
+        # Too short to shingle: compared by exact text instead, which is the right
+        # test for a one-line clause anyway.
+        return frozenset({" ".join(words)}) if words else frozenset()
+    return frozenset(
+        " ".join(words[index : index + size]) for index in range(len(words) - size + 1)
+    )
 
 
 def _count_by_level(evidence: list[Evidence]) -> dict[str, int]:

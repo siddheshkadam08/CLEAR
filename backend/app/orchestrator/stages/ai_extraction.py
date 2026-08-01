@@ -875,9 +875,7 @@ def _evidence_chunk_id(
     return _as_uuid(primary.chunk_id, chunk_ids) if primary is not None else None
 
 
-def _as_uuid(
-    value: str | None, chunk_ids: dict[str, uuid.UUID] | None = None
-) -> uuid.UUID | None:
+def _as_uuid(value: str | None, chunk_ids: dict[str, uuid.UUID] | None = None) -> uuid.UUID | None:
     """A chunk reference as a database id, or ``None`` if it is neither.
 
     Two id spaces meet here. Chunks read from the `chunks` table are already

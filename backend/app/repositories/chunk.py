@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, or_, select
 
 from app.ai.chunking.models import SemanticChunk
 from app.core.enums import ChunkType
@@ -188,6 +188,71 @@ class ChunkRepository(ProjectScopedRepository[Chunk]):
             .order_by(Chunk.reading_order)
         )
         return (await self.db.execute(stmt)).scalars().all()
+
+    async def neighbours_for_many(
+        self,
+        chunks: Sequence[Chunk],
+        project_id: uuid.UUID,
+        *,
+        window: int = 1,
+    ) -> dict[uuid.UUID, list[Chunk]]:
+        """Neighbours for a set of chunks, in one round trip.
+
+        The per-chunk :meth:`neighbours` is correct but was being called in a loop
+        during context expansion - twenty retrieved chunks meant forty sequential
+        queries on the critical path of every question, each holding a pooled
+        connection for its duration. With a default pool of 20+10 that put the
+        concurrency ceiling in the low hundreds of users, for work that is one
+        query.
+
+        The window is resolved in Python rather than with a lateral join: the
+        candidate set is bounded by the retrieval budget, the reading orders are
+        already contiguous integers, and a range query per contract is both simpler
+        to read and cheaper to plan than a correlated subquery.
+        """
+        if window <= 0 or not chunks:
+            return {}
+
+        # One range per (contract, version), covering every requested chunk in it.
+        spans: dict[tuple[uuid.UUID, int], tuple[int, int]] = {}
+        for chunk in chunks:
+            key = (chunk.contract_id, chunk.version)
+            low, high = chunk.reading_order - window, chunk.reading_order + window
+            if key in spans:
+                existing_low, existing_high = spans[key]
+                spans[key] = (min(existing_low, low), max(existing_high, high))
+            else:
+                spans[key] = (low, high)
+
+        conditions = [
+            and_(
+                Chunk.contract_id == contract_id,
+                Chunk.version == version,
+                Chunk.reading_order.between(low, high),
+            )
+            for (contract_id, version), (low, high) in spans.items()
+        ]
+        rows = (
+            (await self.db.execute(self.scoped(project_id).where(or_(*conditions)))).scalars().all()
+        )
+
+        # Index by (contract, version, reading_order) so the assignment below is a
+        # lookup rather than a scan per chunk.
+        by_position = {(row.contract_id, row.version, row.reading_order): row for row in rows}
+
+        result: dict[uuid.UUID, list[Chunk]] = {}
+        for chunk in chunks:
+            found: list[Chunk] = []
+            for offset in range(-window, window + 1):
+                if offset == 0:
+                    continue
+                neighbour = by_position.get(
+                    (chunk.contract_id, chunk.version, chunk.reading_order + offset)
+                )
+                if neighbour is not None:
+                    found.append(neighbour)
+            result[chunk.id] = found
+        return result
 
     async def ancestors(self, chunk: Chunk, project_id: uuid.UUID) -> list[Chunk]:
         """Walk parent links to the root, nearest ancestor first.

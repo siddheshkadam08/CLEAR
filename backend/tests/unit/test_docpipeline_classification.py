@@ -76,7 +76,9 @@ async def test_only_the_first_five_pages_reach_the_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_a_short_document_uses_every_page_it_has() -> None:
-    provider = StubProvider({"document_type": "NDA", "confidence": 0.8, "reason": "confidentiality"})
+    provider = StubProvider(
+        {"document_type": "NDA", "confidence": 0.8, "reason": "confidentiality"}
+    )
 
     result = await DocumentTypeClassifier(provider).classify(_pages(3), DOC_TYPES)
 
