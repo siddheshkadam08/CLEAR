@@ -34,8 +34,29 @@ x-backend-env: &backend-env
   DEBUG: ${DEBUG:-true}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_FORMAT: ${LOG_FORMAT:-json}
-  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-cip_dev_password}@postgres:5432/${POSTGRES_DB:-cip}
+  # An explicit DATABASE_URL wins; otherwise the bundled Postgres service is
+  # composed from the POSTGRES_* values. Previously this was hardcoded to the
+  # `postgres` service, so setting DATABASE_URL in .env appeared to work and was
+  # silently ignored - the app kept talking to the container while the operator
+  # believed it had been repointed at an external database.
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-cip_dev_password}@postgres:5432/${POSTGRES_DB:-cip}}
+  # Schema the application's tables live in. Empty means `public`. Set this when
+  # the database is shared with another application that already owns table names
+  # we also use - see DatabaseSettings.schema_name.
+  DB_SCHEMA: ${DB_SCHEMA:-}
+  DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-60000}
+  # Must exceed the slowest stage. A stage runs in one transaction and
+  # ai_extraction spends minutes in provider calls, so the connection is idle
+  # *in transaction* throughout - set this too low and Postgres kills the
+  # session mid-extraction, which surfaces as "no clauses could be identified".
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: ${DB_IDLE_IN_TRANSACTION_TIMEOUT_MS:-1800000}
   REDIS_URL: redis://redis:6379/0
+  # Reject a re-upload of a file already in the project. Temporarily off while
+  # the document pipeline is being iterated on - re-running the same test PDF is
+  # the workflow. Defaulted here rather than only in .env.example because
+  # deploy.sh keeps an existing server .env, so a new key added there never
+  # reaches a deployment that has already been provisioned once.
+  UPLOAD_DUPLICATE_CHECK: ${UPLOAD_DUPLICATE_CHECK:-false}
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
   STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
@@ -54,10 +75,13 @@ x-backend-env: &backend-env
   # layout roles and coordinates. `pymupdf` is the local fallback. Docling is not
   # used by this deployment and is not an accepted value.
   ACTIVE_PARSER: ${ACTIVE_PARSER:-idoc}
-  # `fixture` replays recorded parser responses and never touches the network.
-  # Set `live` to call the real layout service; responses are recorded on the
-  # way through so the next run can replay them.
-  PARSER_MODE: ${PARSER_MODE:-fixture}
+  # `live` calls the PDF service; `fixture` replays a recorded response and is
+  # for offline development and tests. Defaulting to fixture meant a running
+  # deployment could not process any document it had not already seen - the
+  # upload parsed nothing and failed with "no recorded response for this
+  # document". The response is cached in object storage by file hash, so live
+  # sends a given PDF to the vendor once, ever.
+  PARSER_MODE: ${PARSER_MODE:-live}
   PARSER_FIXTURE_DIR: ${PARSER_FIXTURE_DIR:-/app/storage/fixtures/parser}
   IDOC_ENDPOINT: ${IDOC_ENDPOINT:-https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json}
 
@@ -78,25 +102,65 @@ x-backend-env: &backend-env
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
   ALLOW_MOCK_AI: ${ALLOW_MOCK_AI:-false}
   # Model names used only when a real provider is selected; inert under `mock`.
+  #
+  # All three tiers must be forwarded. Compose passes only the variables named
+  # here, so a tier left out of this block silently falls back to its Pydantic
+  # default no matter what .env says - and the default is an Anthropic-native
+  # model id, which a gateway like OpenRouter rejects with
+  # `<model> is not a valid model ID`. Every simple-tier call then 400s, which is
+  # most of the pipeline.
   LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
+  LLM_MODEL_SIMPLE: ${LLM_MODEL_SIMPLE:-claude-haiku-4-5}
+  LLM_MODEL_COMPLEX: ${LLM_MODEL_COMPLEX:-claude-opus-5}
+  # Empty falls back to LLM_MODEL_COMPLEX - see ModelRouter._model_for_tier.
+  LLM_MODEL_REASONING: ${LLM_MODEL_REASONING:-}
+  LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-4096}
+  # Per-tier deadlines: a simple-tier call that has not answered inside its
+  # window is not going to, and holding a worker slot for the reasoning-tier
+  # timeout starves the pool behind it.
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+  LLM_TIMEOUT_SECONDS_SIMPLE: ${LLM_TIMEOUT_SECONDS_SIMPLE:-90}
+  LLM_TIMEOUT_SECONDS_COMPLEX: ${LLM_TIMEOUT_SECONDS_COMPLEX:-300}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
+  LLM_RETRY_BACKOFF_SECONDS: ${LLM_RETRY_BACKOFF_SECONDS:-1.0}
+  # `none` for models behind an OpenAI-compatible gateway that do not implement
+  # the strict json_schema response format - see LLMSettings.llm_structured_output.
+  LLM_STRUCTURED_OUTPUT: ${LLM_STRUCTURED_OUTPUT:-json_schema}
   # NVIDIA Nemotron 3 Embed 1B. 2048 is the model's real output width, and
   # `halfvec` is required rather than preferred: pgvector's HNSW index stops at
   # 2000 dimensions for the `vector` type, so a vector(2048) column cannot be
   # indexed and every similarity search becomes a sequential scan.
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}
-  EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
   EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
   EMBEDDING_VERIFY_ON_STARTUP: ${EMBEDDING_VERIFY_ON_STARTUP:-true}
   NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
   NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
   # All optional. Left empty the platform stays on the mock providers.
   GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  # Azure OpenAI. The embedding block is separate because embeddings routinely
+  # live on a different resource from the chat model; each falls back to the
+  # AZURE_OPENAI_* value when unset, so one resource for both needs nothing here.
+  AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+  AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+  AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}
+  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+  AZURE_OPENAI_EMBEDDING_ENDPOINT: ${AZURE_OPENAI_EMBEDDING_ENDPOINT:-}
+  AZURE_OPENAI_EMBEDDING_API_KEY: ${AZURE_OPENAI_EMBEDDING_API_KEY:-}
+  AZURE_OPENAI_EMBEDDING_API_VERSION: ${AZURE_OPENAI_EMBEDDING_API_VERSION:-2024-02-01}
+  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
   GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
   GEMINI_MODEL_SIMPLE: ${GEMINI_MODEL_SIMPLE:-gemini-2.5-flash-lite}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-  AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+  # Points the OpenAI-compatible client at a gateway instead of OpenAI itself
+  # (OpenRouter, Together, vLLM, LM Studio). Empty means OpenAI.
+  #
+  # Must be forwarded explicitly: compose passes only the variables named here,
+  # so omitting it lets the key through while silently dropping the endpoint -
+  # every request then goes to api.openai.com and fails with "Incorrect API key
+  # provided", which reads like a bad key rather than a missing base URL.
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
   INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-internal-token}
   OTEL_ENABLED: ${OTEL_ENABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
@@ -305,6 +369,19 @@ services:
       redis:
         condition: service_healthy
     command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    # Overrides the image's HEALTHCHECK, which probes 8000 - the API's port. A
+    # worker serves `app.worker_app` on 8001, so the inherited check can never
+    # pass and every worker reports `unhealthy` while processing jobs perfectly
+    # well. A health signal that is always red is worse than none: it trains
+    # everyone to ignore the column that is supposed to show a real outage.
+    healthcheck: &worker-healthcheck
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/healthz', timeout=4).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
     logging: *default-logging
 
   worker-ai:
@@ -322,6 +399,7 @@ services:
       redis:
         condition: service_healthy
     command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    healthcheck: *worker-healthcheck
     logging: *default-logging
 
   # Periodic evaluator: alerts, expiry windows, DLQ sweep, index maintenance.
@@ -342,6 +420,13 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "app.cli", "scheduler"]
+    # The scheduler is a bare sweep loop with no HTTP server, so the image's
+    # HEALTHCHECK - an HTTP probe - cannot ever succeed. Disabled rather than
+    # replaced with a process check: podman/docker already restart the container
+    # if the process exits, which is the only failure mode a liveness probe on a
+    # single-loop process could detect anyway.
+    healthcheck:
+      disable: true
     logging: *default-logging
 
   # ------------------------------------------------------------ nvidia profile
@@ -365,8 +450,8 @@ services:
     environment:
       <<: *backend-env
       EMBEDDING_PROVIDER: nvidia
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-2048}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
       # Plain substitution, NOT `${NVIDIA_API_KEY:?...}`. podman-compose evaluates
       # the required-variable form for every service at parse time, including ones
@@ -425,6 +510,12 @@ services:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: ${COMPOSE_PROJECT:-cip}-otel
     command: ["--config=/etc/otel/config.yaml"]
+    environment:
+      # The collector config stamps this onto every span as
+      # `deployment.environment`. It has a default in the config file so an unset
+      # value cannot stop the collector booting, but passing it here is what makes
+      # the label actually correct per deployment.
+      APP_ENV: ${APP_ENV:-development}
     volumes:
       - ./infra/otel/collector-config.yaml:/etc/otel/config.yaml:ro,z
     ports:

@@ -36,7 +36,14 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Pagination } from '@/components/common/Pagination';
 import { ExportButton } from '@/components/ExportButton';
 import { useAuth } from '@/lib/auth';
-import { daysUntil, formatDate, formatMoney, formatNumber, humanise } from '@/lib/format';
+import {
+  daysUntil,
+  formatAgreementType,
+  formatDate,
+  formatMoney,
+  formatNumber,
+  humanise,
+} from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
 const STATUSES = ['uploaded', 'processing', 'ready', 'needs_review', 'failed', 'archived'];
@@ -526,7 +533,7 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
           </div>
         ) : null}
       </td>
-      <td className="px-5 py-3 text-slate-600 uppercase dark:text-slate-400">{humanise(contract.agreement_type)}</td>
+      <td className="px-5 py-3 text-slate-600 uppercase dark:text-slate-400">{formatAgreementType(contract.agreement_type)}</td>
       <td className="px-5 py-3">
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge
@@ -612,7 +619,7 @@ function ContractCard({
         {contract.needs_review && contract.status !== 'needs_review' ? (
           <Badge text="Review" variant="warning" />
         ) : null}
-        <span className="text-xs text-slate-500 dark:text-slate-400">{humanise(contract.agreement_type)}</span>
+        <span className="text-xs text-slate-500 dark:text-slate-400">{formatAgreementType(contract.agreement_type)}</span>
       </div>
 
       <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3 text-xs dark:border-slate-700">

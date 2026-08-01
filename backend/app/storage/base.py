@@ -111,6 +111,21 @@ class StorageKey:
         return f"projects/{project_id}/contracts/{contract_id}/pages/{page:05d}.png"
 
     @classmethod
+    def parser_cache(cls, parser: str, file_hash: str) -> str:
+        """Cached raw parser response for a document, keyed by content hash.
+
+        Deliberately **not** project-prefixed, unlike everything else here. The key
+        is the SHA-256 of the file itself, so the same PDF uploaded to two projects
+        - or re-uploaded after a delete - hits one cache entry and the layout
+        service is paid for once. Nothing project-identifying is stored: the value
+        is the vendor's rendering of bytes the uploader already possessed.
+
+        The hash is the whole key, so a changed file cannot collide with a stale
+        entry.
+        """
+        return f"parser-cache/{cls._safe(parser)}/{cls._safe(file_hash)}.json"
+
+    @classmethod
     def contract_prefix(cls, project_id: uuid.UUID, contract_id: uuid.UUID) -> str:
         """Prefix covering everything derived from one contract - the delete scope."""
         return f"projects/{project_id}/contracts/{contract_id}/"

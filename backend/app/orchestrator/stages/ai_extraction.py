@@ -128,6 +128,7 @@ class AIExtractionStage(StageHandler):
         await ctx.report_progress(60, "loading chunks")
 
         chunks = await self._load_chunks(ctx)
+        chunk_ids = await self._prepare_chunks(ctx, chunks)
         definitions = await self._load_clause_definitions(ctx)
 
         if not definitions:
@@ -182,7 +183,7 @@ class AIExtractionStage(StageHandler):
             )
 
         await ctx.report_progress(84, "saving extracted knowledge")
-        counts = await self._persist(ctx, result)
+        counts = await self._persist(ctx, result, chunk_ids)
 
         await ctx.report_progress(88, "updating contract metadata")
         await self._update_metadata(ctx, result, counts)
@@ -207,7 +208,7 @@ class AIExtractionStage(StageHandler):
         )
 
         return StageResult(
-            artifacts=self._artifacts(result, counts),
+            artifacts=self._artifacts(result, counts, chunks, chunk_ids),
             stats={
                 "clauses_extracted": counts["clauses"],
                 "clause_types": len(result.clause_types_found()),
@@ -229,6 +230,12 @@ class AIExtractionStage(StageHandler):
                 "risk_band": result.assessment.band.value,
                 "clause_count": counts["clauses"],
                 "needs_review": result.needs_review,
+                # The metadata call already asks for the agreement title as
+                # printed; nothing consumed it, so `contracts.title` stayed null
+                # and the list page showed the filename twice. Promoted by
+                # `_apply_context_updates`, which only fills an empty title -
+                # a title a person has edited is never overwritten by a re-run.
+                "title": result.facts.title,
             },
             warnings=result.warnings + result.review_reasons,
         )
@@ -296,9 +303,33 @@ class AIExtractionStage(StageHandler):
     # =========================================================================
     # Persistence
     # =========================================================================
-    async def _persist(self, ctx: StageContext, result: ExtractionResult) -> dict[str, int]:
+    async def _prepare_chunks(
+        self, ctx: StageContext, chunks: list[CandidateChunk]
+    ) -> dict[str, uuid.UUID]:
+        """Engine chunk id -> database id, for the rows `_persist` will link to.
+
+        Empty here, and correctly so: this stage's chunks come *from* the
+        `chunks` table, so their ids already are database ids and `_as_uuid`
+        parses them directly.
+
+        A subclass whose chunks have no database row yet overrides this to write
+        them and return the mapping. It is a hook rather than a flag because the
+        map must not be stashed anywhere: handlers are module-level singletons,
+        so `self` is shared by every job on the worker, and `StageContext` is
+        ``slots=True``. Threading it through the two call sites is the only way
+        that is safe under concurrency.
+        """
+        return {}
+
+    async def _persist(
+        self,
+        ctx: StageContext,
+        result: ExtractionResult,
+        chunk_ids: dict[str, uuid.UUID] | None = None,
+    ) -> dict[str, int]:
         contract_id, project_id = ctx.contract_id, ctx.project_id
         profile_version = getattr(ctx.profile, "version", None)
+        chunk_ids = chunk_ids or {}
 
         # ---- clauses first: obligations and risks reference them --------------
         clause_ids: dict[int, uuid.UUID] = {}
@@ -311,7 +342,7 @@ class AIExtractionStage(StageHandler):
                     "id": row_id,
                     "contract_id": contract_id,
                     "project_id": project_id,
-                    "chunk_id": _as_uuid(clause.chunk_id),
+                    "chunk_id": _as_uuid(clause.chunk_id, chunk_ids),
                     "clause_type": clause.clause_type,
                     "title": clause.title,
                     "text": clause.text,
@@ -340,7 +371,7 @@ class AIExtractionStage(StageHandler):
                 "id": uuid.uuid4(),
                 "contract_id": contract_id,
                 "project_id": project_id,
-                "chunk_id": _evidence_chunk_id(party),
+                "chunk_id": _evidence_chunk_id(party, chunk_ids),
                 "entity_type": party.entity_type,
                 "name": party.name,
                 "legal_name": party.legal_name,
@@ -364,7 +395,7 @@ class AIExtractionStage(StageHandler):
                 "contract_id": contract_id,
                 "project_id": project_id,
                 "clause_id": by_type.get(obligation.clause_type or ""),
-                "chunk_id": _as_uuid(obligation.chunk_id),
+                "chunk_id": _as_uuid(obligation.chunk_id, chunk_ids),
                 "responsible_party": obligation.responsible_party,
                 "action": obligation.action,
                 "due_date": obligation.due_date,
@@ -388,7 +419,7 @@ class AIExtractionStage(StageHandler):
                 "contract_id": contract_id,
                 "project_id": project_id,
                 "clause_id": by_type.get(risk.clause_type or ""),
-                "chunk_id": _as_uuid(risk.chunk_id),
+                "chunk_id": _as_uuid(risk.chunk_id, chunk_ids),
                 "risk_type": risk.risk_type,
                 "severity": risk.severity,
                 "description": risk.description,
@@ -409,7 +440,7 @@ class AIExtractionStage(StageHandler):
                 "contract_id": contract_id,
                 "project_id": project_id,
                 "clause_id": None,
-                "chunk_id": _as_uuid(entry.chunk_id),
+                "chunk_id": _as_uuid(entry.chunk_id, chunk_ids),
                 "date_type": entry.date_type,
                 "date_value": entry.date_value,
                 "date_expression": entry.date_expression,
@@ -447,7 +478,11 @@ class AIExtractionStage(StageHandler):
                     "source_id": None,
                     "target_id": None,
                     "label": relationship.label,
-                    "attributes": relationship.attributes,
+                    # `origin` distinguishes these from the structural edges the
+                    # indexing stage derives. Both land in one table, and without
+                    # it a cleanup cannot delete one kind without the other -
+                    # which is why `cleanup()` still clears the table wholesale.
+                    "attributes": {**relationship.attributes, "origin": "extracted"},
                     # Resolved to concrete ids by the indexing stage, which owns the
                     # graph; extraction only states what the text says.
                     "is_resolved": False,
@@ -601,12 +636,22 @@ class AIExtractionStage(StageHandler):
     # =========================================================================
     # Artifacts
     # =========================================================================
-    def _artifacts(self, result: ExtractionResult, counts: dict[str, int]) -> list[StageArtifact]:
+    def _artifacts(
+        self,
+        result: ExtractionResult,
+        counts: dict[str, int],
+        chunks: list[CandidateChunk] | None = None,
+        chunk_ids: dict[str, uuid.UUID] | None = None,
+    ) -> list[StageArtifact]:
         """One artifact per knowledge kind, as the stage contract declares (§7.3).
 
         Split rather than combined because they are consumed separately - the
         knowledge API reads clauses, the alert sweep reads timelines - and neither
         should have to load the other.
+
+        ``chunks``/``chunk_ids`` are ignored here: this stage's chunks were
+        written by the chunking stage, which emits its own ``CHUNKS`` artifact.
+        A subclass that persists its own chunks overrides this to declare them.
         """
         return [
             StageArtifact(
@@ -822,15 +867,34 @@ def _decimal(value: float | None) -> float | None:
     return round(min(max(float(value), 0.0), 1.0), 4)
 
 
-def _evidence_chunk_id(item: ExtractedItem) -> uuid.UUID | None:
+def _evidence_chunk_id(
+    item: ExtractedItem, chunk_ids: dict[str, uuid.UUID] | None = None
+) -> uuid.UUID | None:
     """The chunk an item's primary evidence points at, if it has any."""
     primary = item.primary_evidence
-    return _as_uuid(primary.chunk_id) if primary is not None else None
+    return _as_uuid(primary.chunk_id, chunk_ids) if primary is not None else None
 
 
-def _as_uuid(value: str | None) -> uuid.UUID | None:
+def _as_uuid(
+    value: str | None, chunk_ids: dict[str, uuid.UUID] | None = None
+) -> uuid.UUID | None:
+    """A chunk reference as a database id, or ``None`` if it is neither.
+
+    Two id spaces meet here. Chunks read from the `chunks` table are already
+    database ids and parse directly. Chunks built in memory from page JSON carry
+    a short human ref ("3.1") because the model has to echo it back verbatim in
+    a citation, and a 36-character UUID is a lot to copy without a slip - so
+    those are translated through `chunk_ids` instead.
+
+    `None` is a normal outcome: it means the evidence cannot be traced to a
+    stored chunk, and the column is nullable precisely for that.
+    """
     if not value:
         return None
+    if chunk_ids:
+        mapped = chunk_ids.get(str(value))
+        if mapped is not None:
+            return mapped
     try:
         return uuid.UUID(str(value))
     except (ValueError, AttributeError, TypeError):

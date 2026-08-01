@@ -21,6 +21,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core import metrics
@@ -645,7 +646,55 @@ async def _handle_failure(
     if isinstance(exc, PipelineError) and exc.stage:
         error["stage"] = exc.stage
 
-    await runs.finish_run(run, status=StageStatus.FAILED, error=error)
+    # Recording the failure must not itself be able to fail silently.
+    #
+    # Whatever went wrong may have left the session with a poisoned transaction -
+    # a constraint violation, or Postgres terminating the connection outright.
+    # Writing the failure record on that session then raises
+    # `PendingRollbackError`, and *that* propagates instead of the original
+    # exception: the stage's real cause is replaced by a generic database error.
+    # The one record that would explain the failure is the one thing the failure
+    # stops from being written.
+    #
+    # So: try the normal path, and if it fails, roll back and write a fresh row.
+    # A rollback cannot come first - `start_run` only flushed, so the whole
+    # stage including its own run row is uncommitted, and rolling back would
+    # discard the record we are trying to complete.
+    try:
+        await runs.finish_run(run, status=StageStatus.FAILED, error=error)
+    except Exception as record_error:  # noqa: BLE001 - diagnostics must survive
+        logger.warning(
+            "stage_failure_record_retrying",
+            stage=message.stage.value,
+            attempt=message.attempt,
+            error=str(record_error)[:200],
+        )
+        error.setdefault("details", {})["record_error"] = str(record_error)[:300]
+        try:
+            await runs.db.rollback()
+            await runs.create(
+                job_id=job.id,
+                contract_id=message.contract_id,
+                project_id=message.project_id,
+                stage=message.stage,
+                status=StageStatus.FAILED,
+                attempt=message.attempt,
+                worker_id=WORKER_ID,
+                error=error,
+                started_at=run.started_at,
+                finished_at=datetime.now(UTC),
+            )
+            await runs.db.commit()
+        except Exception as retry_error:  # noqa: BLE001
+            # The connection is gone, not just the transaction. Log the original
+            # cause so it is not lost along with it.
+            logger.error(
+                "stage_failure_not_recorded",
+                stage=message.stage.value,
+                attempt=message.attempt,
+                original_error=repr(exc)[:400],
+                record_error=str(retry_error)[:300],
+            )
 
     can_retry = retryable and message.attempt < max_attempts
     if can_retry:

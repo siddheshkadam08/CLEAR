@@ -165,3 +165,23 @@ def test_every_priority_round_trips(priority: JobPriority) -> None:
     )
     assert isinstance(resolved, JobPriority)
     assert resolved.value == priority.value
+
+
+def test_duplicate_check_defaults_to_on_in_code() -> None:
+    """The safe behaviour stays the code default.
+
+    It is switched off in configuration, not here: re-uploading the same file is
+    the workflow while the document pipeline is being tuned, but a future reader
+    of this class should see the intended behaviour, not the temporary one.
+    """
+    from app.core.config import UploadSettings
+
+    assert UploadSettings().duplicate_check is True
+
+
+def test_duplicate_check_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.config import UploadSettings
+
+    monkeypatch.setenv("UPLOAD_DUPLICATE_CHECK", "false")
+
+    assert UploadSettings().duplicate_check is False

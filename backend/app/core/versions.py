@@ -62,7 +62,20 @@ CHUNK_STRATEGY_VERSIONS: dict[str, str] = {
 
 #: AI extraction engine, output schemas and validation rules.
 EXTRACTION_ENGINE_VERSION = "1.0.0"
+
+#: Document pipeline: classification window, heading pass, chunk search, extents.
+#: Bump when any of those change shape - it invalidates the stage's checkpoint
+#: and makes a re-run produce the new behaviour rather than replaying the old.
+DOCPIPELINE_VERSION = "1.0.0"
 EXTRACTION_SCHEMA_VERSION = "1.0.0"
+
+#: How the extraction stage groups page-JSON paragraphs into the sections it
+#: both scores and persists as ``chunks``. Separate from ``CHUNK_ENGINE_VERSION``
+#: because these rows did not come from the chunking engine - one number cannot
+#: honestly describe two different producers. Bump when the grouping, the size
+#: cap or the split rule changes: the chunk text and its ids both move, so any
+#: embedding keyed to them has to be regenerated.
+EXTRACTION_CHUNK_STRATEGY_VERSION = "1.0.0"
 VALIDATION_RULES_VERSION = "1.0.0"
 
 #: Prompt template versions, keyed by template id. Prompts version *independently*
@@ -197,6 +210,26 @@ class ComponentVersions(BaseModel):
         return result
 
 
+def _simple_tier_model(settings: Any) -> str:
+    """The model the simple tier will actually use, per the active provider.
+
+    ``LLM_MODEL_SIMPLE`` is the generic name and is what the router returns, but
+    the Gemini adapter substitutes its own ``GEMINI_MODEL_SIMPLE`` before the
+    request goes out. Stamping the generic value recorded `z-ai/glm-4.7` on work
+    that `gemini-2.5-flash-lite` had done - a provenance claim that was simply
+    untrue, and a checkpoint that stayed "current" across a model change, so the
+    stage was skipped instead of re-run.
+    """
+    if settings.llm.provider == "gemini":
+        return settings.llm.gemini_model_simple
+    if settings.llm.provider == "azure_openai" and settings.llm.azure_openai_deployment:
+        # Azure addresses a deployment, and the deployment name is what actually
+        # determines the model that answered. `LLM_MODEL_SIMPLE` is not consulted
+        # on this path at all, so stamping it would name a model that never ran.
+        return settings.llm.azure_openai_deployment
+    return settings.llm.model_simple
+
+
 def current_versions_for_stage(
     stage: PipelineStage,
     *,
@@ -222,6 +255,34 @@ def current_versions_for_stage(
             parser_name=parser_name,
             parser_version=PARSER_FRAMEWORK_VERSION,
             parser_adapter_version=PARSER_ADAPTER_VERSIONS.get(parser_name, "unknown"),
+        )
+
+    if stage is PipelineStage.EXTRACTION:
+        # Reads docpipeline's clauses and the parser's pages, so both bound it,
+        # along with the model and the prompt set that turn text into attributes.
+        return ComponentVersions(
+            parser_name=parser_name,
+            parser_adapter_version=PARSER_ADAPTER_VERSIONS.get(parser_name, "unknown"),
+            extraction_engine_version=EXTRACTION_ENGINE_VERSION,
+            extraction_schema_version=EXTRACTION_SCHEMA_VERSION,
+            model_name=_simple_tier_model(settings),
+            prompt_versions=dict(PROMPT_VERSIONS),
+        )
+
+    if stage is PipelineStage.DOCPIPELINE:
+        # What actually changes this stage's output: the parse it reads, the
+        # model that classifies and locates, and the embedder. The clause
+        # taxonomy lives in cip_docMapping and is not versioned here - it is
+        # another system's data, and a change to it is a data change.
+        return ComponentVersions(
+            parser_name=parser_name,
+            parser_adapter_version=PARSER_ADAPTER_VERSIONS.get(parser_name, "unknown"),
+            extraction_engine_version=DOCPIPELINE_VERSION,
+            model_name=_simple_tier_model(settings),
+            embedding_provider=settings.embedding.provider,
+            embedding_model=settings.embedding.model,
+            embedding_dim=settings.embedding.dim,
+            embedding_version=settings.embedding.version,
         )
 
     if stage is PipelineStage.ENRICHMENT:
@@ -362,6 +423,7 @@ __all__ = [
     "CONTEXT_ENGINE_VERSION",
     "EMBEDDING_STRATEGY_VERSION",
     "ENRICHMENT_ENGINE_VERSION",
+    "EXTRACTION_CHUNK_STRATEGY_VERSION",
     "EXTRACTION_ENGINE_VERSION",
     "EXTRACTION_SCHEMA_VERSION",
     "GRAPH_VERSION",

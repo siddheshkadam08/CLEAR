@@ -18,6 +18,11 @@ import { z } from 'zod';
 export const STAGES = [
   'validation',
   'parser',
+  'docpipeline',
+  'extraction',
+  // The six below are no longer in Python's STAGE_ORDER, so nothing is
+  // dispatched to them. Their queues stay declared so a message left over from
+  // before the switch still has somewhere to land rather than being dropped.
   'enrichment',
   'classification',
   'chunking',
@@ -79,6 +84,12 @@ export const config = parsed.data;
 const defaultConcurrency: Record<Stage, number> = {
   validation: 10,
   parser: 20,
+  // One at a time: the stage makes a dozen or more model calls per document and
+  // running several documents in parallel just queues behind the same gateway.
+  docpipeline: 4,
+  // Several model calls per document, so the same reasoning as docpipeline:
+  // more parallel documents just queue behind the same provider.
+  extraction: 4,
   enrichment: 10,
   classification: 10,
   chunking: 20,

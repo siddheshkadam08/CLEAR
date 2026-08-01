@@ -47,6 +47,7 @@ from app.ai.chunking.models import (
     ChunkRejection,
     ChunkStatistics,
     ChunkValidationReport,
+    RejectionRule,
     SemanticChunk,
 )
 from app.ai.rag.providers import estimate_tokens
@@ -145,11 +146,25 @@ class ChunkingResult:
 
 
 class ChunkingEngine:
-    """Builds semantic chunks from a canonical document. Stateless."""
+    """Builds semantic chunks from a canonical document.
+
+    Per-run state is reset at the top of :meth:`chunk`; it is initialised here too
+    so a builder called directly (as tests do) still has somewhere to record.
+    """
+
+    def __init__(self) -> None:
+        self._counter = 0
+        self._order = 0
+        self._skipped_sections: list[ChunkRejection] = []
 
     def chunk(self, document: CanonicalDocument, config: ChunkConfig) -> ChunkingResult:
         self._counter = 0
         self._order = 0
+        # Sections that yield no text never become chunks, so they never reach
+        # validation and never appear in any count. That made a parser returning
+        # empty sections indistinguishable from a document that genuinely has
+        # none - the content simply was not there, and nothing said so.
+        self._skipped_sections = []
 
         builder = {
             ChunkStrategy.SECTION_BASED: self._section_based,
@@ -169,12 +184,20 @@ class ChunkingEngine:
         accepted, report = self._validate(chunks, config)
         accepted = self._renumber(accepted)
 
+        # Merged after validation so the counts describe everything that was
+        # dropped, not only what a rule refused.
+        if self._skipped_sections:
+            report.total += len(self._skipped_sections)
+            report.rejected.extend(self._skipped_sections)
+
         logger.info(
             "chunking_completed",
             strategy=config.strategy.value,
             produced=len(chunks),
             accepted=len(accepted),
             rejected=report.rejection_count,
+            rejections_by_rule=report.by_rule,
+            dominant_rule=report.dominant_rule,
         )
 
         return ChunkingResult(
@@ -455,6 +478,20 @@ class ChunkingEngine:
 
         text = "\n\n".join(part for part in parts if part.strip())
         if not text.strip():
+            self._skipped_sections.append(
+                ChunkRejection(
+                    chunk_id=f"section:{section.section_id}",
+                    reason="no_content",
+                    rule=RejectionRule.SECTION_PRODUCED_NO_TEXT.value,
+                    detail=(
+                        f"section has {len(paragraphs)} paragraph(s), {len(tables)} table(s), "
+                        f"{len(lists)} list(s), none with text"
+                    ),
+                    chunk_type=str(getattr(chunk_type, "value", chunk_type)),
+                    page=section.start_page,
+                    section_title=(section.title or "")[:120],
+                )
+            )
             return None
 
         boxes = self._collect_boxes(
@@ -832,15 +869,18 @@ class ChunkingEngine:
 
         for chunk in chunks:
             if not chunk.text.strip():
-                report.rejected.append(ChunkRejection(chunk.chunk_id, "empty"))
+                report.rejected.append(
+                    _rejection(chunk, "empty", RejectionRule.EMPTY_TEXT, "no text content")
+                )
                 continue
 
             if chunk.chunk_type not in structural:
                 if chunk.token_count < config.min_tokens:
                     report.rejected.append(
-                        ChunkRejection(
-                            chunk.chunk_id,
+                        _rejection(
+                            chunk,
                             "too_small",
+                            RejectionRule.BELOW_MIN_TOKENS,
                             f"{chunk.token_count} < {config.min_tokens} tokens",
                         )
                     )
@@ -851,19 +891,22 @@ class ChunkingEngine:
                 is_parent = any(other.parent_id == chunk.chunk_id for other in chunks)
                 if chunk.token_count > config.max_tokens * 2 and not is_parent:
                     report.rejected.append(
-                        ChunkRejection(
-                            chunk.chunk_id,
+                        _rejection(
+                            chunk,
                             "oversized",
-                            f"{chunk.token_count} tokens with no children",
+                            RejectionRule.ABOVE_MAX_TOKENS,
+                            f"{chunk.token_count} tokens with no children "
+                            f"(limit {config.max_tokens * 2})",
                         )
                     )
                     continue
 
                 if _ends_mid_clause(chunk.text):
                     report.rejected.append(
-                        ChunkRejection(
-                            chunk.chunk_id,
+                        _rejection(
+                            chunk,
                             "broken_clause",
+                            RejectionRule.ENDS_MID_CLAUSE,
                             "text ends mid-clause",
                         )
                     )
@@ -881,9 +924,14 @@ class ChunkingEngine:
             report.accepted += 1
 
         if not report.is_healthy and report.total:
+            # Name the dominant rule in the warning. "The strategy may not suit this
+            # document" is true but unactionable; "most chunks were below
+            # min_tokens" points at the setting to change.
+            dominant = report.dominant_rule
+            detail = f" Most rejections were {dominant}." if dominant else ""
             report.warnings.append(
                 f"Only {report.accepted} of {report.total} chunks passed validation; "
-                "the chunking strategy may not suit this document."
+                f"the chunking strategy may not suit this document.{detail}"
             )
         return accepted, report
 
@@ -945,6 +993,28 @@ class ChunkingEngine:
         for index, chunk in enumerate(chunks, start=1):
             chunk.reading_order = index
         return chunks
+
+
+def _rejection(
+    chunk: SemanticChunk, reason: str, rule: RejectionRule, detail: str
+) -> ChunkRejection:
+    """Capture a rejected chunk's diagnostics before it is discarded.
+
+    Built here rather than at each call site so no rejection path can forget a
+    field - the whole point is that every dropped chunk is equally accountable.
+    """
+    return ChunkRejection(
+        chunk_id=chunk.chunk_id,
+        reason=reason,
+        rule=rule.value,
+        detail=detail,
+        chunk_type=str(getattr(chunk.chunk_type, "value", chunk.chunk_type)),
+        page=chunk.page_start,
+        token_count=chunk.token_count,
+        char_count=chunk.char_count,
+        section_title=(chunk.section_title or "")[:120],
+        text_preview=chunk.text.strip()[:200],
+    )
 
 
 def _ends_mid_clause(text: str) -> bool:

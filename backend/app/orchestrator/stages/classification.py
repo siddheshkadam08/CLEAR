@@ -15,7 +15,12 @@ exactly the case a reviewer needs to see.
 from __future__ import annotations
 
 from app.ai.cdm.models import CanonicalDocument
-from app.ai.classification import DocumentClassifier, confidence_to_decimal
+from app.ai.classification import (
+    ClassificationResult,
+    DocumentClassifier,
+    confidence_to_decimal,
+)
+from app.core import metrics
 from app.core.enums import ArtifactKind, PipelineStage
 from app.core.errors import PipelineError
 from app.core.logging import get_logger
@@ -24,6 +29,7 @@ from app.core.versions import (
     CLASSIFICATION_TAXONOMY_VERSION,
     ComponentVersions,
 )
+from app.models.profile import DocumentProfile
 from app.orchestrator.stages.base import (
     StageArtifact,
     StageContext,
@@ -85,6 +91,7 @@ class ClassificationStage(StageHandler):
         profile = result.profile
         threshold = float(profile.confidence_threshold or 0.85)
         needs_review = result.is_fallback or result.confidence < threshold
+        metrics.classification_confidence.labels(method=result.method).observe(result.confidence)
 
         if needs_review:
             # Surfaced rather than smoothed over: a contract classified below its
@@ -97,6 +104,8 @@ class ClassificationStage(StageHandler):
                 confidence=round(result.confidence, 3),
                 threshold=threshold,
                 is_fallback=result.is_fallback,
+                fallback_reason=result.fallback_reason.value,
+                top_predictions=result.top_predictions[:3],
             )
 
         await ctx.report_progress(49, f"classified as {profile.name}")
@@ -125,6 +134,8 @@ class ClassificationStage(StageHandler):
                         "confidence": round(result.confidence, 4),
                         "method": result.method,
                         "is_fallback": result.is_fallback,
+                        "fallback_used": result.fallback_used,
+                        "fallback_reason": result.fallback_reason.value,
                         "needs_review": needs_review,
                     },
                 )
@@ -134,6 +145,8 @@ class ClassificationStage(StageHandler):
                 "classification_confidence": round(result.confidence, 4),
                 "classification_profile": profile.key,
                 "classification_candidates": len(result.signals),
+                "classification_fallback_reason": result.fallback_reason.value,
+                "classification_matched_rules": result.matched_rules,
             },
             # Promoted onto the job and contract by the runner: this is what pins the
             # contract to the exact profile version that processed it.
@@ -147,15 +160,30 @@ class ClassificationStage(StageHandler):
                 "title": result.detected_title,
                 "language": result.language,
             },
-            warnings=(
-                [
-                    f"Classified as '{profile.name}' with low confidence "
-                    f"({result.confidence:.0%}); flagged for human review."
-                ]
-                if needs_review
-                else []
-            ),
+            # The warning reaches the Processing screen, so it has to name the
+            # actual cause. "Low confidence" was shown even when the tie-break
+            # provider was down, which sends a reviewer to read a document when the
+            # fix is to restore a service and reprocess.
+            warnings=self._review_warnings(result, profile, needs_review),
         )
+
+    @staticmethod
+    def _review_warnings(
+        result: ClassificationResult, profile: DocumentProfile, needs_review: bool
+    ) -> list[str]:
+        if not needs_review:
+            return []
+        headline = (
+            f"Classified as '{profile.name}' with low confidence "
+            f"({result.confidence:.0%}); flagged for human review."
+        )
+        if not result.fallback_used:
+            return [headline]
+        return [
+            f"Applied the default profile '{profile.key}' - the document type was "
+            f"not determined ({result.fallback_reason.value}).",
+            *result.notes[:1],
+        ]
 
     async def _load_cdm(self, ctx: StageContext) -> CanonicalDocument:
         artifacts = DocumentArtifactRepository(ctx.db)

@@ -485,7 +485,9 @@ async def _embedding_status() -> None:
 
     async with session_scope() as db:
         report = await diagnose(db)
-        counts = await EmbeddingReindexer(db).stale_model_counts()
+        reindexer = EmbeddingReindexer(db)
+        counts = await reindexer.stale_model_counts()
+        audit = await reindexer.audit()
 
     _echo(f"Provider   : {report.provider}")
     _echo(f"Model      : {report.model}")
@@ -505,6 +507,16 @@ async def _embedding_status() -> None:
         for model, count in sorted(counts.items()):
             _echo(f"  {model}: {count:,}")
 
+    # The check that matters more than the counts: are the stored vectors all in
+    # one space? A mixed store answers queries without erroring, so nothing else
+    # in the system will report this.
+    if not audit.is_consistent:
+        _echo(f"\n  [FAIL] {audit.incompatible_rows:,} vector(s) are not in {audit.active.label}:")
+        for label in audit.foreign_spaces:
+            _echo(f"    {label}: {audit.spaces[label]:,}")
+        _echo("    Similarity search across these is meaningless. Run:")
+        _echo("      cip reindex-embeddings")
+
     if not report.ok:
         _fail("The embedding configuration has problems (see above).")
 
@@ -513,41 +525,81 @@ async def _embedding_status() -> None:
 def reindex_embeddings(
     project_id: str = typer.Option("", help="Limit to one project."),
     limit: int = typer.Option(0, help="Stop after N contracts. 0 means all."),
+    all_contracts: bool = typer.Option(
+        False,
+        "--all",
+        help="Re-embed every contract, including ones already in the target space.",
+    ),
+    batch_size: int = typer.Option(25, help="Contracts between progress log lines."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report what would run."),
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
 ) -> None:
-    """Regenerate vectors for contracts embedded with a different model.
+    """Regenerate vectors that are not in the configured embedding space.
+
+    "Not in the space" means any of provider, model, dimension, embedding version
+    or strategy version differs - not just the model name. Vectors from two spaces
+    cannot be compared, so a partially-migrated index answers queries with a
+    ranking that has no meaning.
 
     Safe to interrupt and re-run: the work list is derived from the database, so a
     second run picks up whatever is left rather than starting over. Contracts are
     queued through the normal pipeline from the embedding stage, so progress is
     visible on the Processing screen and retries behave as they do for any job.
+
+    ``--all`` forces every contract, for when the vectors are suspect for a reason
+    the provenance columns cannot express.
     """
     configure_logging()
-    _run(_reindex(project_id or None, limit or None, dry_run, yes))
+    _run(
+        _reindex(
+            project_id or None,
+            limit or None,
+            dry_run,
+            yes,
+            include_current=all_contracts,
+            batch_size=batch_size,
+        )
+    )
 
 
-async def _reindex(project_id: str | None, limit: int | None, dry_run: bool, yes: bool) -> None:
+async def _reindex(
+    project_id: str | None,
+    limit: int | None,
+    dry_run: bool,
+    yes: bool,
+    *,
+    include_current: bool = False,
+    batch_size: int = 25,
+) -> None:
     from app.ai.embedding.reindex import EmbeddingReindexer
-    from app.core.config import get_settings
     from app.db.session import session_scope
 
     scope = uuid.UUID(project_id) if project_id else None
 
     async with session_scope() as db:
         reindexer = EmbeddingReindexer(db)
-        counts = await reindexer.stale_model_counts()
-        targets = await reindexer.contracts_needing_reindex(project_id=scope, limit=limit)
+        audit = await reindexer.audit(scope)
+        targets = await reindexer.contracts_needing_reindex(
+            project_id=scope, limit=limit, include_current=include_current
+        )
 
         if not targets:
-            _echo("Every vector already matches the configured model. Nothing to do.")
+            _echo(f"Every vector is already in {audit.active.label}. Nothing to do.")
             return
 
-        _echo(f"Target model : {get_settings().embedding.model}")
+        _echo(f"Target space : {audit.active.label}")
         _echo(f"Contracts    : {len(targets)}")
-        if counts:
-            for model, count in sorted(counts.items()):
-                _echo(f"  {model}: {count:,} vector(s)")
+        if audit.spaces:
+            _echo("Stored vectors by space:")
+            for label, count in sorted(audit.spaces.items()):
+                mark = "  " if label == audit.active.label else "! "
+                _echo(f"  {mark}{label}: {count:,} vector(s)")
+        if not audit.is_consistent:
+            _echo(
+                f"\n  {audit.incompatible_rows:,} vector(s) are in a space that cannot be "
+                "compared with the active one. Search results involving them are "
+                "not meaningful until this completes."
+            )
 
         if not dry_run and not yes:
             typer.confirm(
@@ -564,7 +616,12 @@ async def _reindex(project_id: str | None, limit: int | None, dry_run: bool, yes
             )
 
         result = await reindexer.run(
-            project_id=scope, limit=limit, on_progress=report, dry_run=dry_run
+            project_id=scope,
+            limit=limit,
+            on_progress=report,
+            dry_run=dry_run,
+            include_current=include_current,
+            batch_size=batch_size,
         )
 
     if dry_run:
@@ -579,6 +636,259 @@ async def _reindex(project_id: str | None, limit: int | None, dry_run: bool, yes
         for contract_id, error in result.failures[:10]:
             _echo(f"  FAILED {contract_id}: {error}", err=True)
         _fail(f"{len(result.failures)} contract(s) could not be queued.")
+
+
+@app.command("replay-chunking")
+def replay_chunking(
+    contract_id: str = typer.Argument(..., help="Contract to re-chunk."),
+    strategy: str = typer.Option("", help="Override the chunking strategy."),
+    min_tokens: int = typer.Option(0, help="Override the minimum chunk size."),
+    max_tokens: int = typer.Option(0, help="Override the maximum chunk size."),
+    sweep: bool = typer.Option(False, "--sweep", help="Try several min_tokens values and compare."),
+    show_rejections: int = typer.Option(10, help="How many rejected chunks to print."),
+) -> None:
+    """Re-run chunking over a parsed contract and report what was rejected.
+
+    Reads the stored canonical document and runs the engine in memory. Nothing is
+    written, so this is safe to run against production data and safe to repeat
+    while tuning a threshold - which is the point: the alternative is a full
+    reprocess per attempt, so in practice thresholds never get tuned at all.
+    """
+    configure_logging()
+    _run(
+        _replay_chunking(
+            contract_id,
+            strategy or None,
+            min_tokens or None,
+            max_tokens or None,
+            sweep,
+            show_rejections,
+        )
+    )
+
+
+async def _replay_chunking(
+    contract_id: str,
+    strategy: str | None,
+    min_tokens: int | None,
+    max_tokens: int | None,
+    sweep: bool,
+    show_rejections: int,
+) -> None:
+    from app.ai.chunking.replay import ChunkingReplay
+    from app.db.session import session_scope
+    from app.storage import get_storage
+
+    target = uuid.UUID(contract_id)
+
+    async with session_scope() as db:
+        replay = ChunkingReplay(db, get_storage())
+        try:
+            if sweep:
+                outcomes = await replay.sweep(target, min_tokens_values=[20, 40, 60, 80, 120])
+            else:
+                outcomes = [
+                    await replay.run(
+                        target,
+                        strategy=strategy,
+                        min_tokens=min_tokens,
+                        max_tokens=max_tokens,
+                    )
+                ]
+        except LookupError as exc:
+            _fail(str(exc))
+            return
+
+    for outcome in outcomes:
+        config = outcome.config
+        _echo(
+            f"\n{outcome.strategy}  min={config['min_tokens']} max={config['max_tokens']}"
+            f"  ->  {outcome.accepted} kept, {outcome.rejected} rejected "
+            f"({outcome.acceptance_rate:.0%} accepted)"
+        )
+        diagnostics = outcome.diagnostics
+        if diagnostics.get("by_rule"):
+            for rule, count in sorted(diagnostics["by_rule"].items(), key=lambda kv: -kv[1]):
+                _echo(f"    {rule}: {count}")
+        if diagnostics.get("worst_pages"):
+            worst = ", ".join(
+                f"p{entry['page']}({entry['rejected']})" for entry in diagnostics["worst_pages"]
+            )
+            _echo(f"    worst pages: {worst}")
+
+    if not sweep and show_rejections:
+        for rejection in outcomes[0].diagnostics.get("rejections", [])[:show_rejections]:
+            _echo(
+                f"\n  p{rejection['page']} {rejection['chunk_type']} "
+                f"[{rejection['rule']}] {rejection['detail']}"
+            )
+            preview = (rejection.get("text_preview") or "").replace("\n", " ")
+            if preview:
+                _echo(f"    {preview[:140]}")
+
+    if sweep:
+        best = max(outcomes, key=lambda o: o.accepted)
+        _echo(
+            f"\nBest: min_tokens={best.config['min_tokens']} keeps {best.accepted} chunks "
+            f"({best.acceptance_rate:.0%})."
+        )
+
+
+@app.command("process-doc")
+def process_doc(
+    json_dir: str = typer.Argument(..., help="Directory of page_*.json from the PDF service."),
+    pdf_path: str = typer.Option("", help="Path of the source PDF, recorded on the master row."),
+    pages: int = typer.Option(5, help="Pages the classifier reads."),
+    chunk_pages: int = typer.Option(4, help="Pages per clause-search call."),
+    chunk_overlap: int = typer.Option(0, help="Pages re-read at the start of each window."),
+    concurrency: int = typer.Option(4, help="Clause-search calls to run at once."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Extract and print only. No LLM, no DB."),
+    no_persist: bool = typer.Option(False, "--no-persist", help="Classify and detect, write nothing."),
+    no_early_stop: bool = typer.Option(
+        False, "--no-early-stop", help="Search every chunk even after all clauses are found."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Print every page, and the full text of every clause found."
+    ),
+) -> None:
+    """Classify a document, find its clauses, embed them and record the result.
+
+    Reads the per-page JSON already on disk - the PDF service is never called.
+    The document type decides which clauses to look for, via ``cip_docMapping``;
+    each clause found is written to ``cip_DocContentMaster`` with its page
+    numbers, bounding box and embedding.
+    """
+    _use_utf8_stdout()
+    configure_logging()
+
+    target = Path(json_dir).expanduser()
+    if not target.is_dir():
+        _fail(f"Not a directory: {target}")
+
+    _run(
+        _process_doc(
+            target,
+            pdf_path or None,
+            pages,
+            chunk_pages,
+            chunk_overlap,
+            concurrency,
+            classify=not dry_run,
+            persist=not (dry_run or no_persist),
+            early_stop=not no_early_stop,
+            verbose=verbose,
+        )
+    )
+
+
+async def _process_doc(
+    json_dir: Path,
+    pdf_path: str | None,
+    page_window: int,
+    chunk_pages: int,
+    chunk_overlap: int,
+    concurrency: int,
+    *,
+    classify: bool,
+    persist: bool,
+    early_stop: bool,
+    verbose: bool,
+) -> None:
+    from app.ai.docpipeline import run_document_pipeline
+
+    try:
+        await run_document_pipeline(
+            json_dir,
+            pdf_path=pdf_path,
+            page_window=page_window,
+            chunk_pages=chunk_pages,
+            chunk_overlap=chunk_overlap,
+            concurrency=concurrency,
+            early_stop=early_stop,
+            classify=classify,
+            persist=persist,
+            verbose=verbose,
+            emit=_echo,
+        )
+    except (FileNotFoundError, LookupError) as exc:
+        _fail(str(exc))
+
+
+@app.command("fix-cip-schema")
+def fix_cip_schema(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the SQL without executing it."),
+) -> None:
+    """Apply the corrective DDL for the externally-owned cip_* tables.
+
+    Idempotent: safe to re-run. See ``sql/cip_schema_fixes.sql`` for what each
+    statement fixes and why leaving it alone was not an option.
+    """
+    configure_logging()
+    script = _BACKEND_ROOT / "sql" / "cip_schema_fixes.sql"
+    if not script.is_file():
+        _fail(f"Missing {script}")
+
+    sql = script.read_text(encoding="utf-8")
+    if dry_run:
+        _echo(sql)
+        return
+
+    statements = _split_sql(sql)
+    _run(_apply_sql(statements))
+    _echo(f"cip_* schema fixes applied ({len(statements)} statements).")
+
+
+def _split_sql(sql: str) -> list[str]:
+    """Split a script into individual statements.
+
+    asyncpg sends each statement as a prepared statement and refuses more than
+    one per call, so the script cannot be handed over whole. Splitting naively on
+    ``;`` would cut the ``DO $$ ... $$`` block in half, so dollar-quoted bodies
+    are tracked and their semicolons ignored.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    in_dollar = False
+
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if not in_dollar and (not stripped or stripped.startswith("--")):
+            continue
+
+        if line.count("$$") % 2 == 1:
+            in_dollar = not in_dollar
+
+        current.append(line)
+        if not in_dollar and stripped.endswith(";"):
+            statements.append("\n".join(current).strip())
+            current = []
+
+    if current:
+        statements.append("\n".join(current).strip())
+    return [statement for statement in statements if statement]
+
+
+async def _apply_sql(statements: list[str]) -> None:
+    from app.db.session import session_scope
+
+    async with session_scope() as db:
+        connection = await db.connection()
+        for statement in statements:
+            # exec_driver_sql, not text(): `$$` and `%` in the DDL would
+            # otherwise be read as bind-parameter syntax.
+            await connection.exec_driver_sql(statement)
+
+
+def _use_utf8_stdout() -> None:
+    """Make stdout able to carry the document's own script.
+
+    Contract pages carry Devanagari, accented Latin and typographic quotes. A
+    default Windows console is cp1252, so the first such paragraph aborts the
+    command with UnicodeEncodeError - the pipeline works and the report dies.
+    """
+    stream = sys.stdout
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 
 @app.command()

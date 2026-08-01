@@ -56,15 +56,73 @@ class EmbeddingRepository(ProjectScopedRepository[Embedding]):
     # =========================================================================
     # Writes
     # =========================================================================
-    async def insert_many(self, rows: Sequence[dict[str, Any]]) -> int:
+    async def insert_many(self, rows: Sequence[dict[str, Any]], *, validate: bool = True) -> int:
+        """Insert vectors, refusing any that are not comparable with the rest.
+
+        Validation is on by default and enforced *here*, at the single write
+        boundary, rather than in the stage that happens to call it. A vector from
+        a different model is not a bad row that fails loudly - it inserts fine and
+        then silently corrupts every similarity search that touches the index, so
+        the check belongs somewhere no future caller can forget it.
+
+        ``validate=False`` exists for the reindex path, which is deliberately
+        writing a *new* space and has already cleared the old one.
+        """
         if not rows:
             return 0
+
+        if validate:
+            from app.ai.embedding.validation import EmbeddingValidator
+
+            rows, _report = EmbeddingValidator().validate_batch(rows, strict=True)
+            if not rows:
+                return 0
+
         for start in range(0, len(rows), _INSERT_BATCH):
             await self.db.execute(
                 table_of(Embedding).insert(), list(rows[start : start + _INSERT_BATCH])
             )
         await self.db.flush()
         return len(rows)
+
+    async def space_census(self, project_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
+        """Stored vectors grouped by embedding space.
+
+        Feeds the consistency audit and the reindex planner: "how many vectors
+        exist, in how many mutually incomparable spaces".
+        """
+        stmt = select(
+            Embedding.provider,
+            Embedding.model,
+            Embedding.dim,
+            Embedding.embedding_version,
+            Embedding.strategy_version,
+            # Not `.label("count")`: a Row is a tuple, so `row.count` resolves to
+            # `tuple.count` - the method, not this column - and the read silently
+            # returns a bound method instead of a number.
+            func.count().label("vector_count"),
+        ).group_by(
+            Embedding.provider,
+            Embedding.model,
+            Embedding.dim,
+            Embedding.embedding_version,
+            Embedding.strategy_version,
+        )
+        if project_id is not None:
+            stmt = stmt.where(Embedding.project_id == project_id)
+
+        rows = (await self.db.execute(stmt)).all()
+        return [
+            {
+                "provider": r.provider,
+                "model": r.model,
+                "dim": r.dim,
+                "embedding_version": r.embedding_version,
+                "strategy_version": r.strategy_version,
+                "count": int(r.vector_count),
+            }
+            for r in rows
+        ]
 
     async def delete_for_contract_level(
         self, contract_id: uuid.UUID, project_id: uuid.UUID, level: EmbeddingLevel

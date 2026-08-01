@@ -273,24 +273,32 @@ class IInferenceProvider(ABC):
         }
 
     # ------------------------------------------------------------------ routing
+    #
+    # Delegated to `app.ai.routing`, which owns the task -> tier table. These stay
+    # as the public surface because every provider and several services call them;
+    # what changed is that they no longer fall through to `settings.llm.model` for
+    # anything unlisted. `extraction`, `classification` and `summary` - the three
+    # highest-volume workloads - previously inherited that default, so pointing it
+    # at a reasoning model silently made the whole pipeline slow.
     @staticmethod
-    def route_model(purpose: Purpose) -> str:
-        """Pick the model for a purpose (§17 cost optimisation)."""
-        settings = get_settings()
-        if purpose in _COMPLEX_PURPOSES:
-            return settings.llm.model_complex
-        if purpose in _SIMPLE_PURPOSES:
-            return settings.llm.model_simple
-        return settings.llm.model
+    def route_model(purpose: Purpose | str) -> str:
+        """The model for a task or legacy purpose."""
+        from app.ai.routing import get_router
+
+        return get_router().resolve(purpose).model
 
     @staticmethod
-    def route_effort(purpose: Purpose) -> str:
-        settings = get_settings()
-        if purpose in _COMPLEX_PURPOSES:
-            return settings.llm.effort_complex
-        if purpose in _SIMPLE_PURPOSES:
-            return settings.llm.effort_simple
-        return settings.llm.effort
+    def route_effort(purpose: Purpose | str) -> str:
+        from app.ai.routing import get_router
+
+        return get_router().resolve(purpose).effort
+
+    @staticmethod
+    def route_timeout(purpose: Purpose | str) -> float:
+        """Per-tier request timeout, in seconds."""
+        from app.ai.routing import get_router
+
+        return get_router().resolve(purpose).timeout_seconds
 
     # -------------------------------------------------------------- JSON parsing
     @staticmethod
@@ -750,6 +758,21 @@ def _sanitise_schema(schema: dict[str, Any]) -> dict[str, Any]:
     supported and would fail schema compilation. They are dropped here and
     enforced by the business validator instead, which is where a range violation
     belongs anyway - it is a data-quality finding, not a parse failure.
+
+    Strict mode also demands that every object forbid extra properties *and*
+    list every one of its properties in ``required``. Three seeded Clause Master
+    rules - ``insurance``, ``notice``, ``definitions`` - have a nested array item
+    with no ``required`` at all, and the provider rejects the whole request:
+
+        Invalid schema for response_format 'extraction': In context=(...,
+        'notice_addresses', 'items'), 'required' is required to be supplied and
+        to be an array including every key in properties. Missing 'email'.
+
+    That 400 costs the entire category, so it is repaired here rather than left
+    to whoever next edits the seed data. Optionality is preserved by widening a
+    newly-required property to accept ``null``, which is how strict mode expects
+    "may be absent" to be written - and how these three schemas already write it
+    for every field but the one that tripped the check.
     """
     unsupported = {
         "minimum",
@@ -773,12 +796,47 @@ def _sanitise_schema(schema: dict[str, Any]) -> dict[str, Any]:
             # Every object must forbid extra properties, or compilation fails.
             if result.get("type") == "object" and "additionalProperties" not in result:
                 result["additionalProperties"] = False
+
+            properties = result.get("properties")
+            if isinstance(properties, dict) and properties:
+                required = set(result.get("required") or ())
+                for name in properties:
+                    if name not in required:
+                        properties[name] = _accepts_null(properties[name])
+                result["required"] = list(properties)
             return result
         if isinstance(node, list):
             return [clean(item) for item in node]
         return node
 
     return clean(schema)  # type: ignore[no-any-return]
+
+
+def _accepts_null(subschema: Any) -> Any:
+    """Widen a subschema so ``null`` is a valid value.
+
+    Left alone when the type is already nullable, or when there is no ``type``
+    to widen - a ``$ref`` or an ``anyOf`` branch is not ours to rewrite, and
+    guessing at one risks producing a schema that compiles but means something
+    else. An ``enum`` gains ``null`` alongside the type, since a value outside
+    the enumeration fails validation however the type is declared.
+    """
+    if not isinstance(subschema, dict):
+        return subschema
+    declared = subschema.get("type")
+    if declared is None:
+        return subschema
+
+    types = list(declared) if isinstance(declared, list) else [declared]
+    if "null" in types:
+        return subschema
+
+    widened = dict(subschema)
+    widened["type"] = [*types, "null"]
+    enum = widened.get("enum")
+    if isinstance(enum, list) and None not in enum:
+        widened["enum"] = [*enum, None]
+    return widened
 
 
 # =============================================================================

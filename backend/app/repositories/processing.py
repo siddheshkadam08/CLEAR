@@ -104,7 +104,21 @@ class ProcessingJobRepository(ProjectScopedRepository[ProcessingJob]):
         contract_id: uuid.UUID | None = None,
         failed_only: bool = False,
     ) -> Select[tuple[ProcessingJob]]:
-        stmt = self.query().where(ProcessingJob.project_id.in_(list(project_ids)))
+        from sqlalchemy.orm import selectinload
+
+        # `contract` is eager-loaded because the list serialiser reads
+        # `job.contract.title`. On an async session a lazy load there raises
+        # `MissingGreenlet: greenlet_spawn has not been called` and the endpoint
+        # 500s - and it does so for *every* row, so the failure is total rather
+        # than partial. It stayed hidden while the table was empty: with no jobs
+        # the serialiser never ran, so the first real job would have broken the
+        # Processing screen. Eager-loading also collapses the N+1 this would
+        # otherwise be.
+        stmt = (
+            self.query()
+            .options(selectinload(ProcessingJob.contract))
+            .where(ProcessingJob.project_id.in_(list(project_ids)))
+        )
         if state:
             stmt = stmt.where(ProcessingJob.state.in_(state))
         if stage:

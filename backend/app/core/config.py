@@ -92,6 +92,22 @@ class DatabaseSettings(BaseSettings):
         ),
     ] = "postgresql+asyncpg://cip:cip_dev_password@localhost:5432/cip"  # type: ignore[assignment]
 
+    #: Postgres schema the application's tables live in. Empty means ``public``.
+    #:
+    #: Exists for the case where the database is shared with another application
+    #: that already owns table names we also use - ``contracts`` and ``clauses``
+    #: are not distinctive, and two apps in one ``public`` schema would collide.
+    #: Pointing this at a dedicated schema isolates the two without either side
+    #: renaming anything.
+    #:
+    #: Applied as a connection-level ``search_path``, never per model, so the 36
+    #: table definitions stay schema-agnostic and a redeployment elsewhere needs
+    #: no code change. ``public`` is kept second on the path so extension-owned
+    #: objects - the ``vector`` type, ``uuid_generate_v4()``, ``gin_trgm_ops`` -
+    #: still resolve; extensions are installed once per database, in ``public``,
+    #: and are not duplicated per schema.
+    schema_name: Annotated[str, Field(validation_alias="DB_SCHEMA")] = ""
+
     pool_size: Annotated[int, Field(validation_alias="DB_POOL_SIZE", ge=1, le=200)] = 20
     max_overflow: Annotated[int, Field(validation_alias="DB_MAX_OVERFLOW", ge=0, le=200)] = 10
     pool_timeout: Annotated[int, Field(validation_alias="DB_POOL_TIMEOUT", ge=1)] = 30
@@ -100,6 +116,26 @@ class DatabaseSettings(BaseSettings):
     statement_timeout_ms: Annotated[
         int, Field(validation_alias="DB_STATEMENT_TIMEOUT_MS", ge=0)
     ] = 60_000
+    #: How long a connection may sit inside an open transaction before Postgres
+    #: terminates the session. 0 disables it.
+    #:
+    #: This is not a tuning knob - it decides whether the pipeline works. A stage
+    #: runs inside one transaction, and ``ai_extraction`` spends minutes in
+    #: provider calls with that transaction open, so the connection is *idle in
+    #: transaction* for the whole run. At the previous hardcoded 2 minutes,
+    #: Postgres killed the session partway through every non-trivial contract:
+    #: the extraction results were lost, the failure handler could not even
+    #: record why (its own write hit ``PendingRollbackError`` on the dead
+    #: session), and the job surfaced the generic "Extraction produced no
+    #: clauses, parties or dates" - which points at prompts and profiles rather
+    #: than at the database that severed the connection.
+    #:
+    #: The default is generous rather than absent so a genuinely stuck
+    #: transaction still gets reclaimed. See the note in db/session.py: the real
+    #: fix is for long provider work not to hold a transaction at all.
+    idle_in_transaction_timeout_ms: Annotated[
+        int, Field(validation_alias="DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", ge=0)
+    ] = 1_800_000
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -120,6 +156,19 @@ class DatabaseSettings(BaseSettings):
         return raw.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1).replace(
             "postgresql://", "postgresql+psycopg://", 1
         )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def search_path(self) -> str:
+        """``search_path`` every connection is opened with.
+
+        ``public`` is always retained as the second entry: the Postgres
+        extensions this schema depends on live there, and dropping it would break
+        the ``vector`` column type and the ``uuid_generate_v4()`` defaults even
+        though the tables themselves are elsewhere.
+        """
+        name = self.schema_name.strip()
+        return f"{name},public" if name and name != "public" else "public"
 
 
 class RedisSettings(BaseSettings):
@@ -300,13 +349,32 @@ class UploadSettings(BaseSettings):
     max_files_per_upload: Annotated[
         int, Field(validation_alias="MAX_FILES_PER_UPLOAD", ge=1, le=1000)
     ] = 100
-    allowed_file_types: Annotated[list[str], Field(validation_alias="ALLOWED_FILE_TYPES")] = [
-        "pdf",
-        "docx",
-    ]
+    # `NoDecode` for the same reason as `cors_origins`: pydantic-settings tries to
+    # JSON-decode a `list[str]` before any validator runs, so the CSV form this
+    # file documents - ALLOWED_FILE_TYPES=pdf,docx - aborts startup with
+    # `error parsing value for field "allowed_file_types"`. It went unnoticed
+    # because compose never sets the variable, leaving containers on the default;
+    # only a local run that reads .env hit it.
+    allowed_file_types: Annotated[
+        list[str], NoDecode, Field(validation_alias="ALLOWED_FILE_TYPES")
+    ] = ["pdf", "docx"]
     virus_scan_enabled: Annotated[bool, Field(validation_alias="VIRUS_SCAN_ENABLED")] = False
     clamav_host: Annotated[str, Field(validation_alias="CLAMAV_HOST")] = "clamav"
     clamav_port: Annotated[int, Field(validation_alias="CLAMAV_PORT")] = 3310
+
+    #: Reject a file whose SHA-256 already exists in the project.
+    #:
+    #: Defaults to on because that is the correct behaviour: the same contract
+    #: uploaded twice is one contract, and accepting it again spends a full
+    #: pipeline run - parse, extract, embed - to produce a duplicate row.
+    #:
+    #: Currently switched **off** in configuration while the document pipeline is
+    #: being iterated on, because re-running the same test PDF is the whole
+    #: workflow. With it off, each upload of the same file creates a new contract
+    #: and a new job; `replace_existing` remains the supported way to add a
+    #: version to the existing contract. Turn it back on by setting
+    #: ``UPLOAD_DUPLICATE_CHECK=true``.
+    duplicate_check: Annotated[bool, Field(validation_alias="UPLOAD_DUPLICATE_CHECK")] = True
 
     @field_validator("allowed_file_types", mode="before")
     @classmethod
@@ -407,6 +475,10 @@ class LLMSettings(BaseSettings):
     model: Annotated[str, Field(validation_alias="LLM_MODEL")] = "claude-opus-5"
     model_complex: Annotated[str, Field(validation_alias="LLM_MODEL_COMPLEX")] = "claude-opus-5"
     model_simple: Annotated[str, Field(validation_alias="LLM_MODEL_SIMPLE")] = "claude-haiku-4-5"
+    #: Chain-of-thought tier. Empty falls back to `model_complex` - deliberately
+    #: not to `model`, so an unset reasoning model degrades to "strong" rather
+    #: than to whatever the default happens to be. See app.ai.routing.
+    model_reasoning: Annotated[str, Field(validation_alias="LLM_MODEL_REASONING")] = ""
 
     # --- Google Gemini -------------------------------------------------------
     #: Read from the environment only. Never committed, never defaulted to a real
@@ -432,6 +504,7 @@ class LLMSettings(BaseSettings):
     effort: Annotated[str, Field(validation_alias="LLM_EFFORT")] = "high"
     effort_simple: Annotated[str, Field(validation_alias="LLM_EFFORT_SIMPLE")] = "low"
     effort_complex: Annotated[str, Field(validation_alias="LLM_EFFORT_COMPLEX")] = "xhigh"
+    effort_reasoning: Annotated[str, Field(validation_alias="LLM_EFFORT_REASONING")] = ""
 
     #: Hard output ceiling. Generous because thinking counts against it on models
     #: where thinking is on by default - a tight budget truncates mid-answer.
@@ -444,7 +517,23 @@ class LLMSettings(BaseSettings):
         int, Field(validation_alias="LLM_MAX_OUTPUT_TOKENS_STREAMING", ge=1024, le=128_000)
     ] = 64_000
     timeout_seconds: Annotated[int, Field(validation_alias="LLM_TIMEOUT_SECONDS", ge=5)] = 600
+    #: Per-tier timeouts. Empty (0) inherits `timeout_seconds`.
+    #:
+    #: One shared ceiling has to be set for the slowest legitimate case, which
+    #: means a hung *extraction* holds a worker slot for as long as a genuine
+    #: reasoning call would take. Splitting them lets a fast tier fail fast.
+    timeout_seconds_simple: Annotated[
+        int, Field(validation_alias="LLM_TIMEOUT_SECONDS_SIMPLE", ge=0)
+    ] = 90
+    timeout_seconds_complex: Annotated[
+        int, Field(validation_alias="LLM_TIMEOUT_SECONDS_COMPLEX", ge=0)
+    ] = 300
     max_retries: Annotated[int, Field(validation_alias="LLM_MAX_RETRIES", ge=0, le=10)] = 3
+    #: Base delay for exponential backoff between provider retries, in seconds.
+    #: Doubles per attempt with jitter; see app.ai.rag.providers.
+    retry_backoff_seconds: Annotated[
+        float, Field(validation_alias="LLM_RETRY_BACKOFF_SECONDS", ge=0.0, le=60.0)
+    ] = 1.0
 
     #: Server-side refusal fallback. Safety classifiers can decline a request with
     #: HTTP 200 + ``stop_reason: "refusal"``; without a fallback the request simply
@@ -458,7 +547,34 @@ class LLMSettings(BaseSettings):
     prompt_caching_enabled: Annotated[bool, Field(validation_alias="LLM_PROMPT_CACHING")] = True
 
     anthropic_api_key: Annotated[str, Field(validation_alias="ANTHROPIC_API_KEY")] = ""
+    #: How structured (JSON) output is requested from an OpenAI-compatible model.
+    #:
+    #: * ``json_schema`` - send ``response_format={"type": "json_schema", strict}``.
+    #:   Correct for OpenAI, where malformed JSON becomes a provider-level
+    #:   impossibility rather than something the validator has to catch.
+    #: * ``none`` - send no ``response_format`` and recover the object from the
+    #:   text instead.
+    #:
+    #: ``none`` exists because the strict modes are an OpenAI extension that many
+    #: models behind an OpenAI-compatible gateway do not implement, and the
+    #: failure is silent rather than an error: `z-ai/glm-4.7` on OpenRouter
+    #: answers a `json_schema` request with 16 tokens and `content: null`, which
+    #: surfaces only as "The model returned an empty structured response". The
+    #: same model without `response_format` returns correct JSON, which
+    #: `_salvage_json` already unwraps from a ```json fence.
+    llm_structured_output: Annotated[
+        Literal["json_schema", "none"], Field(validation_alias="LLM_STRUCTURED_OUTPUT")
+    ] = "json_schema"
+
     openai_api_key: Annotated[str, Field(validation_alias="OPENAI_API_KEY")] = ""
+    #: Base URL for the OpenAI-compatible endpoint. Empty means OpenAI itself.
+    #:
+    #: Exists so an OpenAI-compatible gateway - OpenRouter, Together, vLLM, LM
+    #: Studio - can be used without a separate adapter: they all speak the same
+    #: `/chat/completions` and `/embeddings` wire format, so the only thing that
+    #: differs is where the request goes. Applies to both inference and
+    #: embeddings, which is correct for a gateway that serves both.
+    openai_base_url: Annotated[str, Field(validation_alias="OPENAI_BASE_URL")] = ""
     azure_openai_endpoint: Annotated[str, Field(validation_alias="AZURE_OPENAI_ENDPOINT")] = ""
     azure_openai_api_key: Annotated[str, Field(validation_alias="AZURE_OPENAI_API_KEY")] = ""
     azure_openai_api_version: Annotated[str, Field(validation_alias="AZURE_OPENAI_API_VERSION")] = (
@@ -513,6 +629,25 @@ class EmbeddingSettings(BaseSettings):
     ] = "sentence-transformers/all-MiniLM-L6-v2"
     max_retries: Annotated[int, Field(validation_alias="EMBEDDING_MAX_RETRIES", ge=0)] = 3
     timeout_seconds: Annotated[int, Field(validation_alias="EMBEDDING_TIMEOUT_SECONDS", ge=5)] = 60
+
+    # --- Azure OpenAI --------------------------------------------------------
+    #: Embeddings may live on a different Azure resource from the chat model, and
+    #: routinely do: the chat deployment is often a dev resource in one region
+    #: while embeddings run on a shared production one. The provider previously
+    #: read `LLMSettings.azure_openai_*` for both, so pointing them at separate
+    #: resources was not expressible - the embedding calls went to the chat
+    #: endpoint and 404ed on a deployment that is not there.
+    #:
+    #: Each falls back to the corresponding LLM value when empty, so a deployment
+    #: using one resource for both keeps working with nothing set here.
+    azure_endpoint: Annotated[str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_ENDPOINT")] = ""
+    azure_api_key: Annotated[str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_API_KEY")] = ""
+    azure_api_version: Annotated[
+        str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_API_VERSION")
+    ] = ""
+    azure_deployment: Annotated[
+        str, Field(validation_alias="AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
+    ] = ""
 
     # --- NVIDIA NIM ----------------------------------------------------------
     nvidia_api_key: Annotated[str, Field(validation_alias="NVIDIA_API_KEY")] = ""

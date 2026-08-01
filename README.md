@@ -21,6 +21,7 @@ confidence, and the exact parser/prompt/model/embedding versions used to produce
 - [Development](#development)
 - [Observability](#observability)
 - [Deployment](#deployment)
+- [Further reading](#further-reading)
 
 ---
 
@@ -412,3 +413,26 @@ podman compose up -d --scale worker-ai=4
 
 CI/CD (`.github/workflows/ci.yml`) runs lint → type-check → migrate against a real
 Postgres → test → interface-contract checks → image build.
+
+---
+
+## Further reading
+
+| Document | Covers |
+|---|---|
+| [`docs/BACKEND_GUIDE.md`](docs/BACKEND_GUIDE.md) | End-to-end walkthrough of the backend in plain language, with flow diagrams. Start here. |
+| [`docs/DATABASE_SCHEMA.md`](docs/DATABASE_SCHEMA.md) | Every table, column, enum, index and trigger. |
+| [`docs/ai-pipeline-reliability.md`](docs/ai-pipeline-reliability.md) | Model routing and tiers, retry/timeout behaviour, embedding-space validation, classification fallback reasons, chunk rejection diagnostics, and the operator commands for each. |
+| [`docs/embedding-migration.md`](docs/embedding-migration.md) | Changing embedding model or dimension. |
+| [`docs/artifact-persistence.md`](docs/artifact-persistence.md) | How stage artifacts are stored, versioned and superseded. |
+| [`docs/alerting.md`](docs/alerting.md) | Alert rules, evaluation and delivery. |
+
+Operator commands that come up most often:
+
+```bash
+cip embeddings                       # embedding config + vector-space consistency
+cip reindex-embeddings [--all]       # re-embed into the configured space
+cip replay-chunking <id> [--sweep]   # test chunk thresholds; writes nothing
+python -m scripts.benchmark_routing  # model routing cost, before vs after
+python scripts/audit_secrets.py      # credential scan over every tracked file
+```

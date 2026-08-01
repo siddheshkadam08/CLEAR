@@ -11,6 +11,7 @@ from app.api.v1 import (
     admin,
     auth,
     contracts,
+    docpipeline,
     exports,
     jobs,
     knowledge,
@@ -51,6 +52,9 @@ api_router.include_router(exports.project_export_router)
 
 api_router.include_router(admin.clause_master_router)
 api_router.include_router(admin.dashboard_router)
+# Insights over the document pipeline's own tables, kept separate from the
+# overview dashboard because the two count different things.
+api_router.include_router(docpipeline.router)
 api_router.include_router(admin.alert_router)
 
 __all__ = ["api_router"]

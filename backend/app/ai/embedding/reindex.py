@@ -27,9 +27,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.embedding.validation import EmbeddingSpace, EmbeddingValidator, StoreAudit
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.embedding import Embedding
@@ -37,6 +38,9 @@ from app.models.embedding import Embedding
 logger = get_logger(__name__)
 
 ProgressCallback = Callable[["ReindexProgress"], None]
+
+#: Contracts enqueued between progress log lines.
+_DEFAULT_BATCH = 25
 
 
 @dataclass(slots=True)
@@ -99,6 +103,11 @@ class EmbeddingReindexer:
         self._settings = get_settings().embedding
 
     # ------------------------------------------------------------------ survey
+    @property
+    def target(self) -> EmbeddingSpace:
+        """The space every vector is supposed to end up in."""
+        return EmbeddingSpace.active()
+
     async def stale_model_counts(self) -> dict[str, int]:
         """How many vectors exist per model. The "do I need this?" query."""
         rows = (
@@ -106,22 +115,64 @@ class EmbeddingReindexer:
         ).all()
         return {str(model): int(count) for model, count in rows}
 
+    async def audit(self, project_id: uuid.UUID | None = None) -> StoreAudit:
+        """Group every stored vector by space and report what is incomparable.
+
+        Finer-grained than :meth:`stale_model_counts`, which only sees the model
+        name. Two vectors can share a model and still be incomparable - a
+        truncated dimension or a bumped strategy version moves them.
+        """
+        from app.repositories.embedding import EmbeddingRepository
+
+        census = await EmbeddingRepository(self.db).space_census(project_id)
+        return EmbeddingValidator(self.target).audit_rows(census)
+
+    def _stale_predicate(self) -> Any:
+        """SQL for "this vector is not in the target space".
+
+        Every field of the space identity participates. Matching on ``model``
+        alone - which is what this did - silently declares a re-index unnecessary
+        after a dimension change or a strategy bump, leaving vectors that cannot
+        be compared with the ones written next to them. That is the whole failure
+        this module exists to prevent, so the predicate has to mirror
+        :class:`EmbeddingSpace` exactly.
+        """
+        target = self.target
+        return or_(
+            Embedding.model != target.model,
+            Embedding.provider != target.provider,
+            Embedding.dim != target.dim,
+            Embedding.embedding_version != target.embedding_version,
+            Embedding.strategy_version != target.strategy_version,
+        )
+
     async def contracts_needing_reindex(
-        self, *, project_id: uuid.UUID | None = None, limit: int | None = None
+        self,
+        *,
+        project_id: uuid.UUID | None = None,
+        limit: int | None = None,
+        include_current: bool = False,
     ) -> list[uuid.UUID]:
-        """Contracts holding at least one vector that is not the target model.
+        """Contracts holding at least one vector outside the target space.
 
         This is what makes the job resumable and idempotent without any external
         state: the set shrinks as work completes, and re-running simply finds
         whatever is left.
+
+        ``include_current`` is the ``--all`` sweep: re-embed everything, including
+        contracts that already look correct. Needed when the vectors are suspect
+        for a reason the provenance columns cannot express - a provider that
+        changed behaviour behind a stable model name, or an index known to have
+        been written before validation existed.
         """
-        stmt = (
-            select(Embedding.contract_id)
-            .where(Embedding.model != self._settings.model)
-            .group_by(Embedding.contract_id)
-        )
+        stmt = select(Embedding.contract_id).group_by(Embedding.contract_id)
+        if not include_current:
+            stmt = stmt.where(self._stale_predicate())
         if project_id is not None:
             stmt = stmt.where(Embedding.project_id == project_id)
+        # Deterministic order, so an interrupted sweep resumes over a stable
+        # sequence instead of reshuffling what is left.
+        stmt = stmt.order_by(Embedding.contract_id)
         if limit is not None:
             stmt = stmt.limit(limit)
         return list((await self.db.execute(stmt)).scalars().all())
@@ -135,26 +186,39 @@ class EmbeddingReindexer:
         limit: int | None = None,
         on_progress: ProgressCallback | None = None,
         dry_run: bool = False,
+        include_current: bool = False,
+        batch_size: int = _DEFAULT_BATCH,
     ) -> ReindexReport:
-        """Re-embed every contract that needs it."""
+        """Re-embed every contract that needs it.
+
+        ``batch_size`` bounds how many contracts are enqueued between progress
+        log lines. A sweep over a large repository is a long-running operation
+        with no natural output; without periodic structured logging the only
+        signal an operator has is that nothing has crashed yet.
+        """
         targets = (
             list(contract_ids)
             if contract_ids
-            else await self.contracts_needing_reindex(project_id=project_id, limit=limit)
+            else await self.contracts_needing_reindex(
+                project_id=project_id, limit=limit, include_current=include_current
+            )
         )
 
+        target = self.target
         progress = ReindexProgress(contracts_total=len(targets))
         report = ReindexReport(
             progress=progress,
-            target_model=self._settings.model,
-            target_dim=self._settings.dim,
+            target_model=target.model,
+            target_dim=target.dim,
         )
 
         logger.info(
             "reindex_started",
             contracts=len(targets),
-            target_model=self._settings.model,
-            target_dim=self._settings.dim,
+            target_space=target.label,
+            target_model=target.model,
+            target_dim=target.dim,
+            include_current=include_current,
             dry_run=dry_run,
         )
         if dry_run:
@@ -163,7 +227,7 @@ class EmbeddingReindexer:
                 on_progress(progress)
             return report
 
-        for contract_id in targets:
+        for index, contract_id in enumerate(targets, start=1):
             progress.current_contract = contract_id
             try:
                 written, stale = await self._reindex_contract(contract_id)
@@ -185,6 +249,8 @@ class EmbeddingReindexer:
             finally:
                 if on_progress:
                     on_progress(progress)
+                if batch_size > 0 and (index % batch_size == 0 or index == len(targets)):
+                    logger.info("reindex_progress", **progress.as_dict())
 
         logger.info("reindex_finished", **report.as_dict())
         return report

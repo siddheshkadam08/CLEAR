@@ -46,6 +46,9 @@ const DashboardPage = lazy(() =>
   import('@/pages/DashboardPage').then((m) => ({ default: m.DashboardPage })),
 );
 const JobsPage = lazy(() => import('@/pages/JobsPage').then((m) => ({ default: m.JobsPage })));
+const DocPipelinePage = lazy(() =>
+  import('@/pages/DocPipelinePage').then((m) => ({ default: m.DocPipelinePage })),
+);
 const SearchPage = lazy(() =>
   import('@/pages/SearchPage').then((m) => ({ default: m.SearchPage })),
 );
@@ -156,6 +159,7 @@ export default function App() {
           <Route path="search" element={<SearchPage />} />
           <Route path="copilot" element={<CopilotPage />} />
           <Route path="jobs" element={<JobsPage />} />
+          <Route path="doc-pipeline" element={<DocPipelinePage />} />
           <Route path="alerts" element={<AlertsPage />} />
           <Route element={<AdminRoute />}>
             <Route path="clause-master" element={<ClauseMasterPage />} />

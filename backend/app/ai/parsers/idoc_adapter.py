@@ -183,11 +183,33 @@ class IDocParser(IDocumentParser):
 
         settings = get_settings().parser
         store = fixtures.FixtureStore(parser=self.capabilities.name)
+        cache = fixtures.ObjectCache(parser=self.capabilities.name)
+
+        # Object storage is consulted first, in *both* modes and before anything
+        # else. The layout service is the slowest and only metered step in the
+        # pipeline, and re-uploading a document - a replacement version, the same
+        # agreement into a second project, a reprocess after a prompt change - is
+        # routine rather than exceptional. Keyed by content hash, so this is a hit
+        # whenever the bytes have been seen before, whichever worker saw them.
+        cached = await cache.load(request.file_hash)
+        if cached is not None:
+            return cached
 
         if settings.is_fixture_mode:
+            # No cache entry and no live calls permitted: fall back to the on-disk
+            # fixtures, which is what makes offline development possible.
             return fixtures.resolve(store, request.file_hash, file_name=request.file_name)
 
         payloads = await self._analyse(request)
+
+        # Written before the local fixture: the shared copy is the one that saves
+        # a future call, and a failure here is logged rather than raised.
+        await cache.save(
+            request.file_hash,
+            payloads,
+            file_name=request.file_name,
+            source=settings.idoc_endpoint,
+        )
 
         if settings.record_fixtures:
             try:

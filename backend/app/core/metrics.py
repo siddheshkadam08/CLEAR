@@ -449,6 +449,73 @@ llm_duration_seconds = Histogram(
     registry=REGISTRY,
 )
 
+# --- routing-aware AI observability ------------------------------------------
+#
+# Labelled by task and tier, not only by model. A model name answers "what was
+# billed"; the tier answers "was this workload routed correctly", which is the
+# question that matters after the routing refactor. A rise in `simple`-tier
+# latency and a fall in `complex` is a misroute, and no model-only metric shows it.
+#
+# Histograms rather than gauges because the brief asks for p95/p99, which are
+# quantiles over a distribution - a gauge of "last latency" cannot produce them.
+# Query with:  histogram_quantile(0.95, sum by (le, llm_tier)
+#                (rate(cip_llm_task_duration_seconds_bucket[5m])))
+llm_task_duration_seconds = Histogram(
+    "cip_llm_task_duration_seconds",
+    "LLM call latency by routed task and tier.",
+    ["task", "tier", "provider", "model"],
+    buckets=_AI_BUCKETS,
+    registry=REGISTRY,
+)
+
+llm_retries_total = Counter(
+    "cip_llm_retries_total",
+    "LLM call retries, by why the attempt was retried.",
+    ["provider", "tier", "reason"],  # reason: timeout|rate_limit|transport|server
+    registry=REGISTRY,
+)
+
+llm_timeouts_total = Counter(
+    "cip_llm_timeouts_total",
+    "LLM calls abandoned at the per-tier timeout.",
+    ["provider", "tier", "model"],
+    registry=REGISTRY,
+)
+
+llm_payload_bytes = Histogram(
+    "cip_llm_payload_bytes",
+    "Prompt and completion sizes, for spotting evidence-budget regressions.",
+    ["direction", "tier"],  # direction: input|output
+    buckets=(256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576),
+    registry=REGISTRY,
+)
+
+chunk_rejections_total = Counter(
+    "cip_chunk_rejections_total",
+    "Chunks discarded during validation, by the rule that refused them. Labelled by "
+    "rule rather than reason so a miscalibrated threshold is distinguishable from a "
+    "genuinely unusable document.",
+    ["rule", "chunk_type"],
+    registry=REGISTRY,
+)
+
+classification_fallback_total = Counter(
+    "cip_classification_fallback_total",
+    "Documents processed with the default profile because classification did not "
+    "decide, by reason. A rising llm_unavailable is an outage; a rising ambiguous "
+    "means the profiles' hints need work - the two look identical without this label.",
+    ["reason"],
+    registry=REGISTRY,
+)
+
+classification_confidence = Histogram(
+    "cip_classification_confidence",
+    "Confidence of the selected profile, by how it was chosen.",
+    ["method"],  # method: rules|llm|forced|upload_hint|fallback
+    buckets=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0),
+    registry=REGISTRY,
+)
+
 provider_health = Gauge(
     "cip_provider_health",
     "1 when the provider's last health check passed, else 0.",
@@ -570,8 +637,11 @@ __all__ = [
     "auth_attempts_total",
     "authorization_denied_total",
     "cache_operations_total",
+    "chunk_rejections_total",
     "chunk_validation_failures_total",
     "chunks_created_total",
+    "classification_confidence",
+    "classification_fallback_total",
     "contracts_expiring",
     "contracts_high_risk",
     "contracts_total",
@@ -598,7 +668,11 @@ __all__ = [
     "jobs_total",
     "llm_cost_usd_total",
     "llm_duration_seconds",
+    "llm_payload_bytes",
     "llm_requests_total",
+    "llm_retries_total",
+    "llm_task_duration_seconds",
+    "llm_timeouts_total",
     "llm_tokens_total",
     "metrics_enabled",
     "observe_duration",

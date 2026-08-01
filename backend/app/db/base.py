@@ -51,7 +51,34 @@ NAMING_CONVENTION: dict[str, str] = {
     "pk": "pk_%(table_name)s",
 }
 
-metadata_obj = MetaData(naming_convention=NAMING_CONVENTION)
+
+def _configured_schema() -> str | None:
+    """The schema every table belongs to, or ``None`` for ``public``.
+
+    Qualifying the metadata is not interchangeable with setting a connection
+    ``search_path``, and the difference is destructive rather than cosmetic.
+    ``create_all`` runs with ``checkfirst=True``: with only a search_path of
+    ``clear,public``, its existence probe for ``contracts`` finds a *different*
+    application's ``public.contracts`` sitting later on the path, concludes ours
+    already exists, and skips it. Every foreign key then resolves to that foreign
+    table, and the migration dies on:
+
+        Key columns "contract_id" and "id" are of incompatible types:
+        uuid and integer
+
+    With the schema on the metadata, DDL and existence checks are both
+    schema-qualified, so neither can be satisfied by a same-named table
+    elsewhere. The search_path is still set on connections, so extension-owned
+    objects in ``public`` - the ``vector`` type, ``uuid_generate_v4()`` - keep
+    resolving.
+    """
+    from app.core.config import get_settings
+
+    name = get_settings().db.schema_name.strip()
+    return name or None
+
+
+metadata_obj = MetaData(naming_convention=NAMING_CONVENTION, schema=_configured_schema())
 
 
 class Base(DeclarativeBase):

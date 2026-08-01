@@ -27,8 +27,9 @@ PLACEHOLDER = re.compile(r"\{([^}:]+)")
 
 
 def main() -> int:
-    from app.main import create_app
     from fastapi.routing import APIRoute
+
+    from app.main import create_app
 
     app = create_app()
     # Force the deferred `_IncludedRouter` entries to flatten.

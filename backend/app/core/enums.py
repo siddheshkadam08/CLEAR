@@ -147,10 +147,19 @@ class JobState(StrEnum):
 
 
 class PipelineStage(StrEnum):
-    """The eight pipeline stages. Order is significant - see ``STAGE_ORDER``."""
+    """Every stage a job can run. Order is significant - see ``STAGE_ORDER``.
+
+    ``ENRICHMENT`` through ``INDEXING`` are the old pipeline. Their handlers
+    still exist and still work, but they are no longer in ``STAGE_ORDER``, so
+    nothing dispatches them - see the note there. The members stay because
+    historical ``job_stage_runs`` rows name them and would not deserialise
+    otherwise.
+    """
 
     VALIDATION = "validation"
     PARSER = "parser"
+    DOCPIPELINE = "docpipeline"
+    EXTRACTION = "extraction"
     ENRICHMENT = "enrichment"
     CLASSIFICATION = "classification"
     CHUNKING = "chunking"
@@ -161,21 +170,43 @@ class PipelineStage(StrEnum):
 
 #: Canonical execution order. Index position drives resume-from-checkpoint and
 #: "regenerate only downstream stages" logic.
+#:
+#: Three stages, not eight. The six that used to follow the parser - enrichment,
+#: classification, chunking, ai_extraction, embedding, indexing - are replaced by
+#: ``DOCPIPELINE``, which does the same job against a different taxonomy and
+#: writes to the ``cip_*`` tables instead of ``clauses``/``chunks``/``embeddings``.
+#:
+#: The old path could not classify a document type it had no profile for, and
+#: then failed the whole job when the wrong profile's clauses found nothing: a
+#: License and Services Agreement was filed as an NDA because it contains the
+#: words "confidential information", four NDA clauses were searched for across
+#: 61 chunks, none were found, and the contract was marked failed. The new stage
+#: reads its types from ``cip_docMapping``, which has a License Agreement.
+#:
+#: ``EXTRACTION`` then turns what ``DOCPIPELINE`` located into typed knowledge:
+#: it writes ``clauses``, ``entities``, ``obligations``, ``risks``, ``key_dates``
+#: and ``chunks``, so the clause tabs on Contract Detail and the keyword leg of
+#: Search have data again. ``EMBEDDING`` follows it and fills ``embeddings``,
+#: which is what lets Copilot answer from document text rather than refusing.
 STAGE_ORDER: tuple[PipelineStage, ...] = (
     PipelineStage.VALIDATION,
     PipelineStage.PARSER,
-    PipelineStage.ENRICHMENT,
-    PipelineStage.CLASSIFICATION,
-    PipelineStage.CHUNKING,
-    PipelineStage.AI_EXTRACTION,
+    PipelineStage.DOCPIPELINE,
+    PipelineStage.EXTRACTION,
     PipelineStage.EMBEDDING,
-    PipelineStage.INDEXING,
 )
 
 #: Stage → the job state held while that stage runs.
+#:
+#: ``DOCPIPELINE`` reuses ``AI_EXTRACTION`` rather than introducing a state of
+#: its own: ``job_state`` is a native Postgres enum, and adding a value to it
+#: needs a migration on a shared database for no behavioural gain. The state
+#: means "the model is reading the document", which is exactly what it is doing.
 STAGE_TO_STATE: dict[PipelineStage, JobState] = {
     PipelineStage.VALIDATION: JobState.VALIDATING,
     PipelineStage.PARSER: JobState.PARSING,
+    PipelineStage.DOCPIPELINE: JobState.AI_EXTRACTION,
+    PipelineStage.EXTRACTION: JobState.AI_EXTRACTION,
     PipelineStage.ENRICHMENT: JobState.ENRICHING,
     PipelineStage.CLASSIFICATION: JobState.CLASSIFYING,
     PipelineStage.CHUNKING: JobState.CHUNKING,
@@ -188,17 +219,45 @@ STAGE_TO_STATE: dict[PipelineStage, JobState] = {
 STAGE_DEPENDENCIES: dict[PipelineStage, tuple[PipelineStage, ...]] = {
     PipelineStage.VALIDATION: (),
     PipelineStage.PARSER: (PipelineStage.VALIDATION,),
+    PipelineStage.DOCPIPELINE: (PipelineStage.PARSER,),
+    PipelineStage.EXTRACTION: (PipelineStage.DOCPIPELINE,),
+    # EXTRACTION now writes the `chunks` rows this reads, so it depends on the
+    # live stage rather than the retired AI_EXTRACTION it used to follow.
+    PipelineStage.EMBEDDING: (PipelineStage.EXTRACTION,),
+    # Retained for the stages no longer in STAGE_ORDER, so anything that reads
+    # this map for a historical run still resolves.
     PipelineStage.ENRICHMENT: (PipelineStage.PARSER,),
     PipelineStage.CLASSIFICATION: (PipelineStage.ENRICHMENT,),
     PipelineStage.CHUNKING: (PipelineStage.CLASSIFICATION,),
     PipelineStage.AI_EXTRACTION: (PipelineStage.CHUNKING,),
-    PipelineStage.EMBEDDING: (PipelineStage.AI_EXTRACTION,),
     PipelineStage.INDEXING: (PipelineStage.EMBEDDING,),
 }
 
 
 def stage_index(stage: PipelineStage) -> int:
+    """Position in the execution order.
+
+    Raises ``ValueError`` for a stage that is no longer dispatched. Use
+    :func:`stage_position` when the stage may have come from a persisted
+    execution plan rather than from ``STAGE_ORDER`` itself.
+    """
     return STAGE_ORDER.index(stage)
+
+
+def stage_position(stage: PipelineStage) -> int | None:
+    """Position in the execution order, or ``None`` for a retired stage.
+
+    An ``execution_plan`` is persisted on the job, so a job planned before the
+    pipeline changed still names stages that have since left ``STAGE_ORDER``.
+    Those rows are history: they cannot be dispatched and cannot be "next", but
+    they must not stop the plan being read either - `STAGE_ORDER.index` raising
+    mid-traversal turned every stage completion on such a job into a 500, which
+    the queue could only read as a transport failure and dead-letter.
+    """
+    try:
+        return STAGE_ORDER.index(stage)
+    except ValueError:
+        return None
 
 
 def stages_from(stage: PipelineStage) -> tuple[PipelineStage, ...]:
@@ -250,12 +309,30 @@ class ArtifactKind(StrEnum):
     INDEX_STATISTICS = "index_statistics"
     STATISTICS = "statistics"
     EXPORT = "export"
+    #: What the document pipeline found: the classified type and every clause it
+    #: located, with the pages and method for each.
+    DOC_PIPELINE = "doc_pipeline"
 
 
 #: Which artifacts each stage produces. Used to invalidate downstream artifacts.
 STAGE_ARTIFACTS: dict[PipelineStage, tuple[ArtifactKind, ...]] = {
     PipelineStage.VALIDATION: (ArtifactKind.VALIDATION,),
     PipelineStage.PARSER: (ArtifactKind.NORMALIZED_DOCUMENT,),
+    PipelineStage.DOCPIPELINE: (ArtifactKind.DOC_PIPELINE,),
+    # Must list every kind the stage actually emits, not just the interesting
+    # ones: `DocumentArtifactRepository.invalidate_from_stage` builds its
+    # supersede list from this map, so a kind omitted here is never retired and
+    # a second row is left `is_current` on every reprocess.
+    PipelineStage.EXTRACTION: (
+        ArtifactKind.CHUNKS,
+        ArtifactKind.CLAUSES,
+        ArtifactKind.ENTITIES,
+        ArtifactKind.OBLIGATIONS,
+        ArtifactKind.RISKS,
+        ArtifactKind.TIMELINES,
+        ArtifactKind.RELATIONSHIPS,
+        ArtifactKind.EXTRACTION_STATISTICS,
+    ),
     PipelineStage.ENRICHMENT: (ArtifactKind.CANONICAL_DOCUMENT, ArtifactKind.STATISTICS),
     PipelineStage.CLASSIFICATION: (ArtifactKind.CLASSIFICATION,),
     PipelineStage.CHUNKING: (
@@ -833,5 +910,6 @@ __all__ = [
     "SearchScope",
     "StageStatus",
     "stage_index",
+    "stage_position",
     "stages_from",
 ]
