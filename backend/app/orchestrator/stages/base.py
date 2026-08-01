@@ -211,6 +211,8 @@ _load_errors: dict[str, str] = {}
 _STAGE_MODULES: tuple[str, ...] = (
     "validation",
     "parser",
+    "docpipeline",
+    "extraction",
     "enrichment",
     "classification",
     "chunking",

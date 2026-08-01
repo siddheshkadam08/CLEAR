@@ -31,6 +31,10 @@ const enqueueSchema = z.object({
   trace: z.record(z.string()).optional(),
   continue_pipeline: z.boolean().optional(),
   options: z.record(z.unknown()).optional(),
+  // Optional so a message enqueued before this field existed still validates.
+  // Zod strips unknown keys, so this has to be declared or it never reaches
+  // the jobId and the deduplication silently reverts to the old behaviour.
+  dispatch_id: z.string().min(1).max(64).optional(),
   delay_ms: z.number().int().min(0).max(86_400_000).optional(),
 });
 
@@ -107,10 +111,19 @@ export function createServer(): express.Express {
       const job = await getQueue(stage).add(`${stage}:${message.job_id}`, message, {
         delay: delayMs ?? 0,
         priority: PRIORITY_RANK[message.priority ?? 'normal'] ?? 3,
-        // Deterministic id per (job, stage, attempt): a duplicate delivery of the
-        // same enqueue request collapses onto one queued job rather than running
-        // the stage twice.
-        jobId: `${message.job_id}:${stage}:${message.attempt ?? 1}`,
+        // Deterministic id per (job, stage, attempt, dispatch): a duplicate
+        // delivery of the same enqueue request collapses onto one queued job
+        // rather than running the stage twice.
+        //
+        // `dispatch_id` is what keeps that from over-collapsing. Completed jobs
+        // are retained (removeOnComplete keeps a count), so without it a
+        // deliberate re-run - a reprocess, or the Retry button - produced the
+        // same key as the run that had already finished, and BullMQ dropped it.
+        // The symptom was `stage_enqueued` with no `stage_dispatched` and no
+        // indication anywhere that nothing had happened.
+        // `~` not `:` - BullMQ reserves the colon as its own Redis key separator
+        // and rejects a custom id containing one ("Custom Id cannot contain :").
+        jobId: `${message.job_id}~${stage}~${message.attempt ?? 1}~${message.dispatch_id ?? 'legacy'}`,
       });
 
       logger.info(
@@ -193,7 +206,7 @@ export function createServer(): express.Express {
                   priority: PRIORITY_RANK[data.priority ?? 'normal'] ?? 3,
                   // Same deterministic id as `/enqueue`, so a retried batch
                   // collapses onto the existing jobs instead of running twice.
-                  jobId: `${data.job_id}:${stage}:${data.attempt ?? 1}`,
+                  jobId: `${data.job_id}~${stage}~${data.attempt ?? 1}~${data.dispatch_id ?? 'legacy'}`,
                 },
               };
             }),
@@ -297,7 +310,7 @@ export function createServer(): express.Express {
     const replayed = await getQueue(stage).add(
       `${stage}:${message.job_id}:replay`,
       { ...message, attempt: 1 },
-      { jobId: `${message.job_id}:${stage}:replay:${Date.now()}` },
+      { jobId: `${message.job_id}~${stage}~replay~${Date.now()}` },
     );
     await entry.remove();
 

@@ -20,6 +20,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, status
+from pydantic import ValidationError
 
 from app.core.deps import ContractContextDep, DbSession, RequestInfoDep
 from app.core.enums import AuditAction, Permission, ReviewStatus, RiskBand
@@ -395,7 +396,27 @@ async def _build_tabs(
 # Serialisation
 # =============================================================================
 def _boxes(raw: Any) -> list[BoundingBox]:
-    return [BoundingBox(**box) for box in (raw or []) if isinstance(box, dict)]
+    """Stored geometry as highlight rectangles, skipping anything unreadable.
+
+    A row written in some other shape is dropped rather than raised on. These
+    are decoration - the clause text and its page numbers are the answer, the
+    rectangle only says where to draw a box - so a bad one costs a highlight,
+    whereas letting it raise costs the caller every clause in the contract.
+
+    That is not hypothetical: the extraction stage briefly wrote the document
+    pipeline's `{page, polygon}` inches here, and since this ran inside the
+    knowledge payload, one malformed box turned the whole of Contract Detail
+    into a 500 with no clue as to which field was at fault.
+    """
+    boxes: list[BoundingBox] = []
+    for box in raw or []:
+        if not isinstance(box, dict):
+            continue
+        try:
+            boxes.append(BoundingBox(**box))
+        except ValidationError:
+            logger.warning("bounding_box_unreadable", keys=sorted(box))
+    return boxes
 
 
 def _provenance(row: Any) -> ProvenanceInfo | None:

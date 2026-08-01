@@ -68,6 +68,15 @@ class StageRunRequest(BaseSchema):
     trace: dict[str, str] = Field(default_factory=dict)
     continue_pipeline: bool = True
     options: dict[str, Any] = Field(default_factory=dict)
+    #: Echoed back by the dispatcher, which keys its deduplication on it.
+    #:
+    #: The message round-trips: this service enqueues it, the dispatcher stores
+    #: it, and the dispatcher POSTs it back here. So a field added to
+    #: `StageMessage` has to be accepted here too - this schema forbids extras,
+    #: and the 422 it returns looks to the dispatcher like a message it should
+    #: retry and then dead-letter, rather than a contract mismatch between two
+    #: halves of the same system.
+    dispatch_id: str | None = Field(default=None, max_length=64)
 
 
 class StageRunResponse(ResponseSchema):
@@ -143,6 +152,10 @@ async def run_stage_endpoint(
         trace=payload.trace,
         continue_pipeline=payload.continue_pipeline,
         options=payload.options,
+        # Carried through so a stage this one dispatches next inherits nothing
+        # from it - each onward dispatch mints its own id - while a redelivery
+        # of *this* message keeps the id it was queued under.
+        **({"dispatch_id": payload.dispatch_id} if payload.dispatch_id else {}),
     )
 
     outcome = await run_stage(message)
@@ -211,6 +224,8 @@ _ROLE_STAGES: dict[str, tuple[PipelineStage, ...]] = {
         PipelineStage.CHUNKING,
     ),
     "ai": (
+        PipelineStage.DOCPIPELINE,
+        PipelineStage.EXTRACTION,
         PipelineStage.AI_EXTRACTION,
         PipelineStage.EMBEDDING,
         PipelineStage.INDEXING,

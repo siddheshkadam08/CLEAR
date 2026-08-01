@@ -30,7 +30,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.ai.parsers.idoc_adapter import _SIGNATURE_HINTS
+from app.ai.cdm.models import Coordinates
+from app.ai.parsers.idoc_adapter import _SIGNATURE_HINTS, IDocParser
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -66,11 +67,43 @@ class Paragraph:
     role: str | None
     content: str
     polygon: tuple[float, ...]
+    #: The page's size in points and the unit its polygon arrived in.
+    #:
+    #: Carried on the paragraph rather than looked up from its page because a
+    #: polygon is not interpretable without them, and `iter_paragraphs` hands
+    #: paragraphs to callers with the page long since flattened away. Defaults
+    #: are US Letter - what the vendor omits dimensions for.
+    page_width: float = 612.0
+    page_height: float = 792.0
+    unit: str = "inch"
 
     @property
     def ref(self) -> str:
         """Stable label used in prompts and logs, e.g. ``9.3``."""
         return f"{self.page_number}.{self.index}"
+
+    @property
+    def box(self) -> Coordinates | None:
+        """This paragraph as a highlight rectangle, in points.
+
+        `None` when the vendor gave no geometry - real text worth extracting,
+        simply not pointable-at.
+
+        The conversion is `IDocParser`'s, not a second copy of it: the
+        polygon is four corners that a skewed scan leaves rotated, so the
+        rectangle is the extent of all four, and two implementations that
+        disagree on that rule would put the same clause in two different places
+        depending on which code path drew it.
+        """
+        if not self.polygon:
+            return None
+        return IDocParser._coordinates(
+            list(self.polygon),
+            self.page_number,
+            self.page_width,
+            self.page_height,
+            self.unit,
+        )
 
     @property
     def is_heading(self) -> bool:
@@ -105,6 +138,15 @@ class PageContent:
     page_number: int
     paragraphs: tuple[Paragraph, ...]
     source_file: Path
+    #: Page size in points, and the unit the vendor reported it in.
+    #:
+    #: Carried because a polygon is meaningless without the page it was measured
+    #: against: the viewer scales every highlight by ``x / page_width``, and with
+    #: no page size it silently draws nothing. Defaults are US Letter, which is
+    #: what the vendor omits the dimensions for.
+    page_width: float = 612.0
+    page_height: float = 792.0
+    unit: str = "inch"
 
     @property
     def text(self) -> str:
@@ -113,6 +155,7 @@ class PageContent:
     @property
     def char_count(self) -> int:
         return sum(len(paragraph.content) for paragraph in self.paragraphs)
+
 
 
 def load_pages(directory: Path) -> list[PageContent]:
@@ -149,6 +192,37 @@ def load_pages(directory: Path) -> list[PageContent]:
     return pages
 
 
+def pages_from_payloads(
+    payloads: Sequence[dict], *, source_dir: Path | None = None
+) -> list[PageContent]:
+    """The same pages, from payloads already in memory rather than files.
+
+    The parser stage caches the vendor's per-page JSON under
+    ``parser-cache/{parser}/{sha256}`` and hands the same list around
+    in-process, so a contract that has already parsed can go through this
+    pipeline without the JSON ever touching a disk. ``load_pages`` is the
+    file-backed door onto the same logic.
+
+    Payload order is the page order: the cache preserves the numeric sort the
+    parser applied when it unpacked the vendor's archive.
+    """
+    pages = [
+        _build_page(
+            payload,
+            fallback_number=index,
+            source=(source_dir or Path(".")) / f"page_{index}.json",
+        )
+        for index, payload in enumerate(payloads, start=1)
+    ]
+    logger.info(
+        "docpipeline_pages_from_payloads",
+        pages=len(pages),
+        paragraphs=sum(len(page.paragraphs) for page in pages),
+        headings=sum(1 for page in pages for para in page.paragraphs if para.is_heading),
+    )
+    return pages
+
+
 def iter_paragraphs(pages: list[PageContent]) -> list[Paragraph]:
     """Every paragraph across every page, flattened, still in document order."""
     return [paragraph for page in pages for paragraph in page.paragraphs]
@@ -156,7 +230,12 @@ def iter_paragraphs(pages: list[PageContent]) -> list[Paragraph]:
 
 def _read_page(path: Path, *, fallback_number: int) -> PageContent:
     payload = json.loads(path.read_text(encoding="utf-8"))
+    return _build_page(payload, fallback_number=fallback_number, source=path)
+
+
+def _build_page(payload: dict, *, fallback_number: int, source: Path) -> PageContent:
     page_number = _page_number(payload, fallback_number)
+    width, height, unit = IDocParser._page_size(_page_data(payload))
 
     paragraphs: list[Paragraph] = []
     for raw in payload.get("paragraphs") or []:
@@ -170,14 +249,28 @@ def _read_page(path: Path, *, fallback_number: int) -> PageContent:
                 role=raw.get("role"),
                 content=content,
                 polygon=_polygon_of(raw),
+                page_width=width,
+                page_height=height,
+                unit=unit,
             )
         )
 
     return PageContent(
         page_number=page_number,
         paragraphs=tuple(paragraphs),
-        source_file=path,
+        source_file=source,
+        page_width=width,
+        page_height=height,
+        unit=unit,
     )
+
+
+def _page_data(payload: dict) -> dict:
+    """The page's own entry, which carries its dimensions and unit."""
+    pages = payload.get("pages")
+    if isinstance(pages, list) and pages and isinstance(pages[0], dict):
+        return pages[0]
+    return {}
 
 
 def _page_number(payload: dict, fallback: int) -> int:

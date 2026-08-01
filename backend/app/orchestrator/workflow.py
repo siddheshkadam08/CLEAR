@@ -26,6 +26,7 @@ from app.core.enums import (
     PipelineStage,
     StageStatus,
     stage_index,
+    stage_position,
     stages_from,
 )
 from app.core.errors import InvalidStateTransitionError, PipelineError
@@ -308,7 +309,12 @@ class WorkflowEngine:
             return None
 
         for item in plan.stages:
-            if stage_index(item.stage) <= position:
+            index = stage_position(item.stage)
+            if index is None:
+                # A stage this plan was built with that is no longer in
+                # STAGE_ORDER. It cannot be dispatched, so it cannot be next.
+                continue
+            if index <= position:
                 continue
             if item.should_run:
                 return item.stage
@@ -350,11 +356,17 @@ class WorkflowEngine:
         weights: dict[PipelineStage, tuple[int, int]] = {
             PipelineStage.VALIDATION: (0, 3),
             PipelineStage.PARSER: (3, 35),
+            # Clause location, then typed extraction. Extraction owns the larger
+            # share because it makes several model calls to docpipeline's few.
+            # The bands below are for stages no longer in STAGE_ORDER, kept so a
+            # historical run still renders.
+            PipelineStage.DOCPIPELINE: (35, 50),
+            PipelineStage.EXTRACTION: (50, 90),
+            PipelineStage.EMBEDDING: (90, 100),
             PipelineStage.ENRICHMENT: (35, 45),
             PipelineStage.CLASSIFICATION: (45, 50),
             PipelineStage.CHUNKING: (50, 58),
             PipelineStage.AI_EXTRACTION: (58, 85),
-            PipelineStage.EMBEDDING: (85, 95),
             PipelineStage.INDEXING: (95, 100),
         }
         start, end = weights.get(stage, (0, 100))

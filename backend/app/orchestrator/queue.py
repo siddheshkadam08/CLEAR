@@ -60,6 +60,20 @@ class StageMessage:
     continue_pipeline: bool = True
     #: Free-form stage options (e.g. force re-extraction of one category).
     options: dict[str, Any] = field(default_factory=dict)
+    #: Identifies one *dispatch decision*, and is what makes the queue's
+    #: deduplication mean the right thing.
+    #:
+    #: BullMQ keys a job on `(job, stage, attempt)` so that a duplicate HTTP
+    #: delivery of the same enqueue collapses onto one queued job instead of
+    #: running the stage twice - which is correct. But completed jobs are
+    #: retained, so that key also collapsed a *deliberate* re-run onto the run
+    #: that already finished: a reprocess, or the Retry button, logged
+    #: `stage_enqueued` and then silently did nothing.
+    #:
+    #: Generated once per message. A driver retrying the same payload sends the
+    #: same id and still collapses; asking for the stage again builds a new
+    #: message, so it runs.
+    dispatch_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def to_payload(self) -> dict[str, Any]:
         data = asdict(self)
@@ -82,6 +96,9 @@ class StageMessage:
             trace=dict(payload.get("trace") or {}),
             continue_pipeline=bool(payload.get("continue_pipeline", True)),
             options=dict(payload.get("options") or {}),
+            # Absent on a message enqueued before this field existed; a fresh id
+            # is the safe reading, since that message is being handled once.
+            dispatch_id=str(payload.get("dispatch_id") or uuid.uuid4().hex[:12]),
         )
 
 
