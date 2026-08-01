@@ -59,6 +59,37 @@ export function humanise(value?: string | null): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
+/**
+ * Agreement types as a lawyer writes them.
+ *
+ * `humanise` only uppercases the first letter, which turns `msa` into "Msa" and
+ * `license_agreement` into "License agreement" — legible, but wrong in a column
+ * of contract types. Only the ones that need it are listed; anything else falls
+ * through to `humanise`, so a type added to the backend taxonomy still renders
+ * rather than showing a blank.
+ */
+const AGREEMENT_TYPE_LABELS: Record<string, string> = {
+  msa: 'MSA',
+  nda: 'NDA',
+  sow: 'SOW',
+  license_agreement: 'License Agreement',
+  purchase_order: 'Purchase Order',
+  service_agreement: 'Service Agreement',
+  vendor_agreement: 'Vendor Agreement',
+  employment_agreement: 'Employment Agreement',
+  consulting_agreement: 'Consulting Agreement',
+  partnership_agreement: 'Partnership Agreement',
+  research_collaboration: 'Research Collaboration',
+  government_contract: 'Government Contract',
+  healthcare_agreement: 'Healthcare Agreement',
+  insurance_policy: 'Insurance Policy',
+};
+
+export function formatAgreementType(value?: string | null): string {
+  if (!value) return '—';
+  return AGREEMENT_TYPE_LABELS[value] ?? humanise(value);
+}
+
 export function formatDuration(ms?: number | null): string {
   if (ms === null || ms === undefined) return '—';
   if (ms < 1000) return `${ms} ms`;

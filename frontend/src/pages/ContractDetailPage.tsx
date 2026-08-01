@@ -15,7 +15,7 @@
  * clauses get their own tab is configuration rather than code.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ArrowLeft, FileSearch, FileText, Layers } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -45,7 +45,7 @@ import { Card, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { PdfViewer } from '@/components/PdfViewer';
-import { daysUntil, formatDate, formatDateTime, formatMoney, humanise } from '@/lib/format';
+import { daysUntil, formatAgreementType, formatDate, formatDateTime, formatMoney, humanise } from '@/lib/format';
 
 type FixedTab = 'overview' | 'risks' | 'obligations' | 'dates' | 'parties' | 'processing';
 
@@ -96,6 +96,31 @@ export function ContractDetailPage() {
   });
 
   const knowledge = knowledgeQuery.data;
+
+  // A failed contract needs its job before it can offer a retry: the retry acts
+  // on the job, not the contract, and only a FAILED or CANCELLED job is
+  // retryable. Fetched only on failure so the happy path costs nothing.
+  const failed = contract?.status === 'failed';
+  const queryClient = useQueryClient();
+
+  const failedJobQuery = useQuery({
+    queryKey: ['contract-jobs', contractId],
+    queryFn: () => jobsApi.forContract(contractId),
+    enabled: Boolean(contractId) && failed,
+  });
+
+  // The most recent job is the one that failed; earlier ones are history.
+  const latestJob = failedJobQuery.data?.[0];
+
+  const retry = useMutation({
+    mutationFn: (jobId: string) => jobsApi.retry(jobId),
+    onSuccess: () => {
+      // Both change: the job leaves FAILED, and the contract leaves `failed`
+      // back to `processing`, which restarts the detail poll.
+      void queryClient.invalidateQueries({ queryKey: ['contract', contractId] });
+      void queryClient.invalidateQueries({ queryKey: ['contract-jobs', contractId] });
+    },
+  });
 
   function showEvidence(boxes: BoundingBox[], page?: number | null) {
     setFocus({
@@ -171,7 +196,7 @@ export function ContractDetailPage() {
             {contract.title ?? contract.original_file_name}
           </h1>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
-            <span>{humanise(contract.agreement_type)}</span>
+            <span>{formatAgreementType(contract.agreement_type)}</span>
             <span aria-hidden>·</span>
             <span>{contract.page_count ?? '—'} pages</span>
             <span aria-hidden>·</span>
@@ -232,8 +257,28 @@ export function ContractDetailPage() {
         </Card>
       ) : null}
 
-      {contract.status === 'failed' ? (
-        <ErrorBanner message="Processing failed for this contract. Open the Processing tab for the failing stage and error, and to retry." />
+      {failed ? (
+        <ErrorBanner
+          message={
+            retry.isError
+              ? `Retry failed: ${errorMessage(retry.error)}`
+              : retry.isPending
+                ? 'Retrying...'
+                : latestJob?.error?.message
+                  ? `Processing failed: ${latestJob.error.message}`
+                  : 'Processing failed for this contract. The Processing tab has the failing stage and the full error.'
+          }
+          // Offered here rather than only on the Processing tab: this is where
+          // the failure is seen, and a retry the user has to go and find is one
+          // most users will not find. Withheld while the job is still loading -
+          // a button that might do nothing is worse than one that appears a
+          // moment later.
+          onRetry={
+            latestJob && latestJob.is_retryable && !retry.isPending
+              ? () => retry.mutate(latestJob.id)
+              : undefined
+          }
+        />
       ) : null}
 
       {knowledge?.needs_review ? (

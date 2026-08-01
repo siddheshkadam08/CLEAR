@@ -35,7 +35,7 @@ import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ExportButton } from '@/components/ExportButton';
 import { useAuth } from '@/lib/auth';
-import { daysUntil, formatDate, formatMoney, humanise } from '@/lib/format';
+import { daysUntil, formatAgreementType, formatDate, formatMoney, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
 const STATUSES = ['uploaded', 'processing', 'ready', 'needs_review', 'failed', 'archived'];
@@ -461,7 +461,7 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
           </div>
         ) : null}
       </td>
-      <td className="px-5 py-3 text-slate-600">{humanise(contract.agreement_type)}</td>
+      <td className="px-5 py-3 text-slate-600">{formatAgreementType(contract.agreement_type)}</td>
       <td className="max-w-[12rem] px-5 py-3">
         <p className="truncate text-slate-700">{contract.party_a ?? '—'}</p>
         <p className="truncate text-xs text-slate-500">{contract.party_b ?? '—'}</p>
@@ -549,7 +549,7 @@ function ContractCard({
         {contract.needs_review && contract.status !== 'needs_review' ? (
           <Badge text="Review" variant="warning" />
         ) : null}
-        <span className="text-xs text-slate-500">{humanise(contract.agreement_type)}</span>
+        <span className="text-xs text-slate-500">{formatAgreementType(contract.agreement_type)}</span>
       </div>
 
       <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3 text-xs">

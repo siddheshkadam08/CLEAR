@@ -24,7 +24,7 @@ import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { formatDate, formatDuration, humanise } from '@/lib/format';
+import { formatAgreementType, formatDate, formatDuration, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
 const EXAMPLES = [
@@ -180,7 +180,7 @@ export function SearchPage() {
                               {match.title ?? 'Untitled'}
                             </p>
                             <p className="mt-0.5 text-xs text-slate-500">
-                              {humanise(match.agreement_type)} ·{' '}
+                              {formatAgreementType(match.agreement_type)} ·{' '}
                               {formatDate(match.expiration_date)}
                             </p>
                           </div>
