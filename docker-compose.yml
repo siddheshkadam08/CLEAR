@@ -59,6 +59,31 @@ x-backend-env: &backend-env
   UPLOAD_DUPLICATE_CHECK: ${UPLOAD_DUPLICATE_CHECK:-false}
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  # --- Microsoft Entra SSO ---
+  #
+  # This block is an allow-list, not a passthrough: a key absent here never
+  # reaches the container however carefully .env is edited. Turning SSO on by
+  # setting OIDC_ENABLED=true on the server therefore did nothing visible, and
+  # /auth/methods kept reporting it disabled - which reads as a code fault
+  # rather than a missing line in compose.
+  #
+  # No client secret: the registration is a public client and PKCE authenticates
+  # the code exchange. AZURE_AD_CLIENT_SECRET is still forwarded so a
+  # confidential registration works without another compose edit.
+  OIDC_ENABLED: ${OIDC_ENABLED:-false}
+  OIDC_PROVIDER: ${OIDC_PROVIDER:-microsoft}
+  AZURE_AD_TENANT_ID: ${AZURE_AD_TENANT_ID:-}
+  AZURE_AD_CLIENT_ID: ${AZURE_AD_CLIENT_ID:-}
+  AZURE_AD_CLIENT_SECRET: ${AZURE_AD_CLIENT_SECRET:-}
+  # Both must be the address a *browser* uses. Defaulting them to localhost is
+  # right for a laptop and wrong for every deployment, which is why the deploy
+  # sets them explicitly.
+  OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-http://localhost:8000/api/v1/auth/oidc/callback}
+  OIDC_POST_LOGIN_REDIRECT: ${OIDC_POST_LOGIN_REDIRECT:-http://localhost:5173/auth/callback}
+  OIDC_SILENT_FIRST: ${OIDC_SILENT_FIRST:-true}
+  OIDC_AUTO_PROVISION_USERS: ${OIDC_AUTO_PROVISION_USERS:-true}
+  OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+  OIDC_ALLOWED_EMAIL_DOMAINS: ${OIDC_ALLOWED_EMAIL_DOMAINS:-}
   STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
   STORAGE_CONTAINER: ${STORAGE_CONTAINER:-contracts}
   # Two endpoints, deliberately. The app reaches MinIO by service name on the
