@@ -81,7 +81,9 @@ logger = get_logger(__name__)
 
 class AIExtractionStage(StageHandler):
     stage = PipelineStage.AI_EXTRACTION
-    requires = (ArtifactKind.CHUNKS, ArtifactKind.CLASSIFICATION)
+    # Annotated to keep the base's arity-free type. Inferred, this would be a
+    # two-tuple, and `ExtractionStage` subclasses it with a single requirement.
+    requires: tuple[ArtifactKind, ...] = (ArtifactKind.CHUNKS, ArtifactKind.CLASSIFICATION)
     cacheable = True
     retryable = True
 

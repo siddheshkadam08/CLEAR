@@ -79,19 +79,22 @@ describe('Sidebar navigation', () => {
     for (const user of [ADMIN, MEMBER]) {
       signIn(user);
       const view = renderSidebar();
-      for (const label of [/dashboard/i, /contracts/i, /copilot/i, /alerts/i]) {
+      for (const label of [/dashboard/i, /contracts/i, /processing/i, /alerts/i]) {
         expect(screen.getByRole('link', { name: label })).toBeInTheDocument();
       }
       view.unmount();
     }
   });
 
-  // Search is commented out of NAV rather than deleted. Asserting its absence
-  // keeps that deliberate: if someone uncomments it, this fails and they have to
-  // decide whether the screen is back rather than shipping a half-restored one.
-  it('does not offer Search while the screen is disabled', () => {
+  // Search and Copilot are commented out of NAV rather than deleted - Copilot
+  // because it moved into the drawer on a contract, though the /copilot route
+  // still exists. Asserting their absence keeps that deliberate: if someone
+  // uncomments one, this fails and they have to decide whether the screen is
+  // back rather than shipping a half-restored one.
+  it('does not offer Search or Copilot while those screens are disabled', () => {
     signIn(ADMIN);
     renderSidebar();
     expect(screen.queryByRole('link', { name: /^search$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^copilot$/i })).not.toBeInTheDocument();
   });
 });

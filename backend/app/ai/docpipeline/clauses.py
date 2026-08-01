@@ -284,10 +284,13 @@ class ClauseDetector:
             valid = {spec.clause for spec in remaining}
             for assignments in samples:
                 for ref, clause in assignments:
-                    heading = heading_by_ref.get(ref)
-                    if heading is None or clause not in valid or clause in taken:
+                    # Not `heading`: that name is already bound to the loop
+                    # variable of the exact-match pass above, which is a
+                    # Paragraph rather than an optional one.
+                    matched = heading_by_ref.get(ref)
+                    if matched is None or clause not in valid or clause in taken:
                         continue
-                    taken[clause] = (heading, "heading:llm")
+                    taken[clause] = (matched, "heading:llm")
                     result.heading_llm += 1
 
         return await self._extents(taken, paragraphs)

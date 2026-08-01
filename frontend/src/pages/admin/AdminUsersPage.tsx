@@ -13,8 +13,8 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { KeyRound, Search, ShieldCheck, UserPlus, Users } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { ChevronDown, KeyRound, Search, ShieldCheck, UserPlus, Users, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { admin as adminApi, projects as projectsApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
@@ -232,6 +232,94 @@ const roleLabel = (role?: string | null) =>
   role ? (ASSIGNABLE_ROLES.find((option) => option.value === role)?.label ?? role) : null;
 
 // =============================================================================
+// Multi-select dropdown
+// =============================================================================
+function MultiSelectDropdown({
+  options,
+  selected,
+  onChange,
+  placeholder = 'Select…',
+}: {
+  options: { value: UUID; label: string }[];
+  selected: UUID[];
+  onChange: (ids: UUID[]) => void;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const toggle = (id: UUID) => {
+    onChange(
+      selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id],
+    );
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`${selectClasses} flex items-center gap-1 flex-wrap min-h-[2.5rem] text-left`}
+      >
+        {selected.length === 0 ? (
+          <span className="text-slate-400">{placeholder}</span>
+        ) : (
+          selected.map((id) => {
+            const opt = options.find((o) => o.value === id);
+            return (
+              <span
+                key={id}
+                className="inline-flex items-center gap-0.5 rounded bg-blue-100 dark:bg-blue-900 px-1.5 py-0.5 text-xs font-medium text-blue-800 dark:text-blue-200"
+              >
+                {opt?.label}
+                <X
+                  className="h-3 w-3 cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); toggle(id); }}
+                />
+              </span>
+            );
+          })
+        )}
+        <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-slate-400" />
+      </button>
+
+      {open && (
+        <ul className="absolute z-50 mt-1 max-h-48 w-full overflow-auto rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 py-1 shadow-lg">
+          {options.map((opt) => (
+            <li
+              key={opt.value}
+              onClick={() => toggle(opt.value)}
+              className={`cursor-pointer select-none px-3 py-1.5 text-sm hover:bg-blue-50 dark:hover:bg-slate-700 ${
+                selected.includes(opt.value) ? 'bg-blue-50 dark:bg-slate-700 font-medium' : ''
+              }`}
+            >
+              <input
+                type="checkbox"
+                readOnly
+                checked={selected.includes(opt.value)}
+                className="mr-2 h-3.5 w-3.5 rounded border-slate-300 text-blue-600 pointer-events-none"
+              />
+              {opt.label}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
 // Create
 // =============================================================================
 function CreateUserDialog({
@@ -246,7 +334,7 @@ function CreateUserDialog({
   const [email, setEmail] = useState('');
   const [fullName, setFullName] = useState('');
   const [jobTitle, setJobTitle] = useState('');
-  const [projectId, setProjectId] = useState<UUID | ''>('');
+  const [selectedProjects, setSelectedProjects] = useState<UUID[]>([]);
   const [role, setRole] = useState<RoleName>('project_manager');
 
   const projects = useQuery({
@@ -261,14 +349,14 @@ function CreateUserDialog({
         email: email.trim().toLowerCase(),
         full_name: fullName.trim(),
         job_title: jobTitle.trim() || undefined,
-        project_assignments: projectId ? [{ project_id: projectId as UUID, role }] : [],
+        project_assignments: selectedProjects.map((pid) => ({ project_id: pid, role })),
       }),
     onSuccess: () => {
       const created = fullName.trim();
       setEmail('');
       setFullName('');
       setJobTitle('');
-      setProjectId('');
+      setSelectedProjects([]);
       onCreated(created);
     },
   });
@@ -331,50 +419,41 @@ function CreateUserDialog({
           />
         </Field>
 
-        <Field label="Job title" hint="Optional.">
+        {/* <Field label="Job title" hint="Optional.">
           <input
             value={jobTitle}
             onChange={(event) => setJobTitle(event.target.value)}
             placeholder="Contracts Lead"
             className={inputClasses}
           />
-        </Field>
+        </Field> */}
 
         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
             <ShieldCheck className="h-4 w-4 text-blue-600" />
-            Project access
+            Business Unit
           </div>
 
           {projects.isLoading ? (
             <LoadingSpinner size="sm" label="Loading projects..." />
           ) : projectOptions.length ? (
             <div className="space-y-3">
-              <Field label="Project">
-                <div className="relative">
-                <select
-                  value={projectId}
-                  onChange={(event) => setProjectId(event.target.value as UUID)}
-                  className={selectClasses}
-                >
-                  <option value="">No project yet</option>
-                  {projectOptions.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-                <SelectChevron />
-                </div>
+              <Field label="Business Unit" hint="Select one or more projects to assign this user to.">
+                <MultiSelectDropdown
+                  options={projectOptions.map((p) => ({ value: p.id as UUID, label: p.name }))}
+                  selected={selectedProjects}
+                  onChange={setSelectedProjects}
+                  placeholder="Select projects…"
+                />
               </Field>
 
-              <Field label="Role in that project">
+              <Field label="Role in that Business Unit">
                 <div className="relative">
                 <select
                   value={role}
                   onChange={(event) => setRole(event.target.value as RoleName)}
                   className={selectClasses}
-                  disabled={!projectId}
+                  disabled={!selectedProjects.length}
                 >
                   {ASSIGNABLE_ROLES.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -386,8 +465,8 @@ function CreateUserDialog({
                 </div>
               </Field>
 
-              {!projectId ? (
-                <NoticeBanner message="Without a project this account can sign in but will see nothing. You can add them to one from the Projects screen later." />
+              {!selectedProjects.length ? (
+                <NoticeBanner message="Without a Business Unit this account can sign in but will see nothing. You can add them to one from the Projects screen later." />
               ) : null}
             </div>
           ) : (

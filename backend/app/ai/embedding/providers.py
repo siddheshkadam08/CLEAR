@@ -405,15 +405,15 @@ class OpenAIEmbeddingProvider(IEmbeddingProvider):
             else:
                 from openai import AsyncOpenAI
 
+                # `or None` rather than a conditional kwarg: the SDK treats an
+                # explicit None exactly as absence, falling back to
+                # OPENAI_BASE_URL and then its own default. A splatted dict
+                # cannot be checked against the constructor's overloads.
                 self._client = AsyncOpenAI(
                     api_key=settings.llm.openai_api_key or None,
+                    base_url=settings.llm.openai_base_url or None,
                     timeout=float(settings.embedding.timeout_seconds),
                     max_retries=settings.embedding.max_retries,
-                    **(
-                        {"base_url": settings.llm.openai_base_url}
-                        if settings.llm.openai_base_url
-                        else {}
-                    ),
                 )
         except ImportError as exc:  # pragma: no cover
             raise ProviderError(

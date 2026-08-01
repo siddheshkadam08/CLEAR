@@ -78,17 +78,15 @@ class OpenAIProvider(IInferenceProvider):
             else:
                 from openai import AsyncOpenAI
 
-                # `base_url` only when configured: passing None would override the
-                # SDK's own default and break plain OpenAI use.
+                # `or None` rather than a conditional kwarg: the SDK treats an
+                # explicit None exactly as absence, falling back to
+                # OPENAI_BASE_URL and then its own default. A splatted dict
+                # cannot be checked against the constructor's overloads.
                 self._client = AsyncOpenAI(
                     api_key=self.settings.llm.openai_api_key or None,
+                    base_url=self.settings.llm.openai_base_url or None,
                     timeout=float(self.settings.llm.timeout_seconds),
                     max_retries=self.settings.llm.max_retries,
-                    **(
-                        {"base_url": self.settings.llm.openai_base_url}
-                        if self.settings.llm.openai_base_url
-                        else {}
-                    ),
                 )
         except ImportError as exc:  # pragma: no cover
             raise ProviderError(
