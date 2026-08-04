@@ -590,6 +590,17 @@ class ParserSettings(BaseSettings):
     # dependency set is large and partly non-Python (Tesseract and poppler are OS
     # packages), and pulling that into this service to run one CLI would make every
     # deployment carry an OCR stack it may never use.
+    #: The same extractor, reached over HTTP instead of spawned.
+    #:
+    #: When it runs as a service, `POST /extract?format=adi` returns the identical
+    #: payload the CLI writes with `--adi` - so this changes only *how* the
+    #: extractor is invoked, not what comes back, and every downstream stage is
+    #: untouched. Set this and the subprocess path is not used; leave it empty and
+    #: `PDFEXTRACT_PATH` behaves exactly as before.
+    #:
+    #: Preferred in a container: no checkout to mount, and no virtualenv that has
+    #: to match the image's platform.
+    pdfextract_url: Annotated[str, Field(validation_alias="PDFEXTRACT_URL")] = ""
     pdfextract_path: Annotated[str, Field(validation_alias="PDFEXTRACT_PATH")] = ""
     #: ``baseline`` is pdfplumber + Tesseract and needs no models. ``docling`` is
     #: more accurate on complex layouts and much heavier; it must be installed in

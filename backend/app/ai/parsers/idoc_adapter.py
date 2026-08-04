@@ -258,12 +258,27 @@ class IDocParser(IDocumentParser):
     # =========================================================================
     # Transport
     # =========================================================================
+    def _upload_target(self) -> tuple[str, int]:
+        """Where to POST the document, and how long to wait.
+
+        A seam, not indirection for its own sake: the upload, the ADI unpacking,
+        page building and coordinate handling are all worth sharing, and the only
+        thing that differs between the layout service and a self-hosted extractor
+        is the URL and its timeout.
+        """
+        settings = get_settings().parser
+        return settings.idoc_endpoint, settings.idoc_timeout_seconds
+
     async def _analyse(self, request: ParseRequest) -> list[dict[str, Any]]:
         """Upload the PDF and return the per-page payloads, ordered by page number."""
         import httpx
 
         settings = get_settings().parser
-        endpoint = settings.idoc_endpoint
+        # Resolved through a method so a subclass can point the same upload at a
+        # different service. `PdfTextExtractorParser` uses this to reach the
+        # extractor over HTTP, which returns a byte-identical payload to the
+        # `--adi` export its CLI writes - so only the transport differs.
+        endpoint, timeout_seconds = self._upload_target()
         if not endpoint:
             raise ParserError(
                 "IDOC_ENDPOINT is not configured, so the iDoc parser cannot run.",
@@ -276,7 +291,7 @@ class IDocParser(IDocumentParser):
 
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(float(settings.idoc_timeout_seconds), connect=15.0),
+                timeout=httpx.Timeout(float(timeout_seconds), connect=15.0),
                 verify=settings.idoc_verify_tls,
                 headers=headers,
                 follow_redirects=True,
@@ -294,7 +309,7 @@ class IDocParser(IDocumentParser):
         except httpx.TimeoutException as exc:
             # Retryable: a timeout on a long document says nothing about the document.
             raise ParserError(
-                f"The iDoc service did not respond within {settings.idoc_timeout_seconds}s.",
+                f"The layout service did not respond within {timeout_seconds}s.",
                 retryable=True,
                 details={"endpoint": endpoint},
             ) from exc

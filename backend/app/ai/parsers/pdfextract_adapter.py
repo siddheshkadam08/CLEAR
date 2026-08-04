@@ -105,10 +105,21 @@ class PdfTextExtractorParser(IDocParser):
             # scanned one goes through Tesseract.
             supports_ocr=True,
             supports_signatures=True,
-            # The distinction that matters here: no network call, no metered
-            # service, and nothing outside this machine has to be up.
-            is_remote=False,
+            # True only in subprocess mode. Pointed at a URL the extractor is a
+            # network dependency like any other, and reporting otherwise would
+            # misdescribe what has to be up for parsing to work.
+            is_remote=bool(get_settings().parser.pdfextract_url),
         )
+
+    def _upload_target(self) -> tuple[str, int]:
+        """The extractor's own URL when it runs as a service.
+
+        `?format=adi` is the extractor's ADI *output shape* - the same payload its
+        CLI writes with `--adi`, which is what every downstream stage is written
+        against. Nothing is routed to Azure; only the transport changes.
+        """
+        settings = get_settings().parser
+        return settings.pdfextract_url, settings.pdfextract_timeout_seconds
 
     async def health(self) -> bool:
         """Is a usable checkout configured?
@@ -119,6 +130,10 @@ class PdfTextExtractorParser(IDocParser):
         is visible from the filesystem alone.
         """
         settings = get_settings().parser
+        if settings.pdfextract_url:
+            # Service mode: the URL being set is the configuration check. Probing
+            # it here would put a network round trip on every readiness poll.
+            return True
         if not settings.pdfextract_python:
             return False
         return (Path(settings.pdfextract_path) / "run_cli.py").is_file()
@@ -126,6 +141,23 @@ class PdfTextExtractorParser(IDocParser):
     async def _analyse(self, request: ParseRequest) -> list[dict[str, Any]]:
         """Run the extractor over the PDF and return the per-page payloads."""
         settings = get_settings().parser
+        if settings.pdfextract_url:
+            # Service mode. `IDocParser._analyse` does the multipart upload and the
+            # ADI unpacking, and `_upload_target` above has already pointed it at
+            # the extractor - so this is the same parser, reached differently.
+            payloads = await super()._analyse(request)
+            # ...but not the same *shape*. iDoc returns a ZIP of per-page files;
+            # the extractor returns one whole-document envelope
+            # (`{schemaVersion, status, analyzeResult:{pages, paragraphs}}`) which
+            # `_unpack` hands back as a single-element list. Left alone every page
+            # collapses into payload one and each clause cites page 1.
+            #
+            # Measured against the live service: a 27-page agreement comes back as
+            # one payload with 424 paragraphs. `split_pages` unwraps `analyzeResult`
+            # itself, so it is applied to the envelope as-is - and it is the same
+            # division the subprocess path performs.
+            return split_pages(payloads[0]) if len(payloads) == 1 else payloads
+
         python = settings.pdfextract_python
         root = Path(settings.pdfextract_path) if settings.pdfextract_path else None
 

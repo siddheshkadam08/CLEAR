@@ -167,7 +167,23 @@ def upgrade() -> None:
     op.execute(CHUNK_SEARCH_VECTOR_FUNCTION)
     op.execute(PROJECT_SCOPE_GUARD_FUNCTION)
 
+    # Only for tables `create_all` actually produced.
+    #
+    # The table list above is hardcoded while the tables themselves come from
+    # `Base.metadata`, so deleting a model silently desynchronises the two: the
+    # table stops being created and this loop then fails on `CREATE TRIGGER ...
+    # ON <missing>`. That is what removing `models/graph.py` did - `graph_nodes`
+    # and `graph_edges` stayed in the list, and this baseline could no longer run
+    # against an empty database at all. It kept working everywhere it had already
+    # been applied, so nothing surfaced until the first fresh deployment.
+    #
+    # Filtering against the live catalogue rather than editing the tuple keeps
+    # this correct for the next model that is retired, and `0009` drops the graph
+    # tables later anyway with `DROP TABLE IF EXISTS`.
+    present = set(sa.inspect(bind).get_table_names(schema=bind.dialect.default_schema_name))
     for table in TIMESTAMPED_TABLES:
+        if table not in present:
+            continue
         op.execute(
             f"""
             CREATE TRIGGER trg_{table}_updated_at
@@ -184,7 +200,11 @@ def upgrade() -> None:
         """
     )
 
+    # Same guard, same reason: this list is hardcoded against metadata-driven
+    # tables, so a retired model would break it identically.
     for table in PROJECT_SCOPED_TABLES:
+        if table not in present:
+            continue
         op.execute(
             f"""
             CREATE TRIGGER trg_{table}_project_scope

@@ -68,7 +68,16 @@ const ACCEPTED = [
 const ACCEPT_ATTR = '.pdf,.doc,.docx,.zip';
 /** Extensions are the reliable signal; MIME type is advisory. */
 const ACCEPTED_EXTENSIONS = ['pdf', 'doc', 'docx', 'zip'];
-const MAX_BYTES = 100 * 1024 * 1024;
+/**
+ * The smallest ceiling in the chain, which is the only one a user experiences.
+ *
+ * Three limits disagreed: this said 100MB, `MAX_UPLOAD_SIZE_MB` said 200, and the
+ * layout extractor reports `maxUploadMB: 50`. A 60MB scan therefore passed both of
+ * our checks, was stored, queued, and only failed once the parser rejected it - by
+ * which point the user had watched a progress bar run to completion. The limit
+ * that stops an upload should be the one that will actually stop it.
+ */
+const MAX_BYTES = 50 * 1024 * 1024;
 
 export function UploadPage() {
   const { projects, projectId: scopedProject } = useProjectScope();
