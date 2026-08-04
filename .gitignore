@@ -67,6 +67,13 @@ storage-local/
 tmp/
 scratch/
 
+# Recorded parser output, written by PARSER_MODE=fixture. Machine-regenerable,
+# and it holds the full extracted text of whatever was uploaded - real
+# counterparty agreements on any working install. 15MB of it accumulated here
+# untracked, and a single `git add -A` would have put every word of those
+# contracts into history permanently.
+backend/storage/fixtures/
+
 # ---- Build artifacts ----
 *.log
 *.tsbuildinfo
