@@ -86,15 +86,21 @@ describe('Sidebar navigation', () => {
     }
   });
 
-  // Search and Copilot are commented out of NAV rather than deleted - Copilot
-  // because it moved into the drawer on a contract, though the /copilot route
-  // still exists. Asserting their absence keeps that deliberate: if someone
-  // uncomments one, this fails and they have to decide whether the screen is
-  // back rather than shipping a half-restored one.
-  it('does not offer Search or Copilot while those screens are disabled', () => {
+  it('offers Search, which is a live screen', () => {
+    // SearchPage was routable but had no way in: its nav entry was commented out
+    // with no reason given, so the screen shipped unreachable.
     signIn(ADMIN);
     renderSidebar();
-    expect(screen.queryByRole('link', { name: /^search$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /^search$/i })).toBeInTheDocument();
+  });
+
+  // Copilot stays out of NAV deliberately - it moved into the drawer on a
+  // contract, though the /copilot route still exists. Asserting its absence
+  // keeps that a decision: if someone re-adds it, this fails and they have to
+  // choose rather than ship two entry points to the same feature.
+  it('does not offer Copilot, which moved into the contract drawer', () => {
+    signIn(ADMIN);
+    renderSidebar();
     expect(screen.queryByRole('link', { name: /^copilot$/i })).not.toBeInTheDocument();
   });
 });

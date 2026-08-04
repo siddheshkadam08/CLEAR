@@ -8,16 +8,26 @@
 
 import { api, apiStream, apiUpload } from './client';
 import type {
-  DocPipelineDocument,
   DocPipelineInsights,
   Alert,
+  AgreementClause,
+  AgreementClauseUpsert,
+  AgreementTypeClauses,
+  AuditEntry,
+  AuditFilters,
+  AlertRule,
+  AlertRuleInput,
   AlertStatus,
   AnswerResponse,
   AuthMethods,
   ChatSession,
   ClauseCategory,
+  ClauseDefinitionUpsert,
+  ClauseImportResult,
+  ClauseImportRow,
   Clause,
   ContractDetail,
+  ContractGraph,
   ContractKnowledge,
   ContractListItem,
   CopilotQueryResponse,
@@ -31,6 +41,14 @@ import type {
   ExportEntity,
   ExportFormat,
   ExportJob,
+  ExportStatus,
+  DateType,
+  ObligationStatus,
+  PartyDirectoryEntry,
+  PortfolioKeyDate,
+  PortfolioObligation,
+  PortfolioRisk,
+  RiskSeverity,
   FileAccess,
   Job,
   JobListItem,
@@ -40,6 +58,7 @@ import type {
   ProjectDetail,
   ProjectListItem,
   ProjectMember,
+  ResponseFormat,
   RiskAssessment,
   Role,
   RoleName,
@@ -144,7 +163,13 @@ export const admin = {
 export interface ContractFilters {
   page?: number;
   size?: number;
-  q?: string;
+  /** Free text over title, party and summary.
+   *
+   * Named `search` because that is what the endpoint calls it. It was `q`, which
+   * FastAPI simply ignores as an unknown query parameter - so the Contracts
+   * search box issued a request, got the full unfiltered list back, and rendered
+   * it without any sign that the term had been dropped. */
+  search?: string;
   status?: string[];
   agreement_type?: string[];
   risk_band?: string[];
@@ -189,6 +214,15 @@ export const contracts = {
 
   /** Short-lived URL for the source document, for the viewer. */
   fileAccess: (id: UUID) => api.get<FileAccess>(`/contracts/${id}/file`),
+  /**
+   * Where to fetch the document from, for a download rather than a view.
+   *
+   * `download=true` is not just a Content-Disposition hint: for a converted Word
+   * upload it selects the *original* file, while the view path returns the PDF
+   * the pipeline read. Two different objects, one endpoint.
+   */
+  fileAccessForDownload: (id: UUID) =>
+    api.get<FileAccess>(`/contracts/${id}/file?download=true`),
 };
 
 // =============================================================================
@@ -204,6 +238,16 @@ export const knowledge = {
     }),
 
   risks: (contractId: UUID) => api.get<RiskAssessment>(`/contracts/${contractId}/risks`),
+
+  /**
+   * Nodes and edges, built on request.
+   *
+   * Nodes are not stored anywhere — only the derived edges are, as
+   * `knowledge_relationships` rows with string references and no labels. So the
+   * graph is rebuilt from the extracted rows each time, which also means it
+   * reflects the contract as it stands rather than as indexing last left it.
+   */
+  graph: (contractId: UUID) => api.get<ContractGraph>(`/contracts/${contractId}/graph`),
 
   /** Resolve a citation to its page, coordinates and a document URL. */
   evidence: (contractId: UUID, chunkId: UUID) =>
@@ -246,7 +290,7 @@ export const copilot = {
     project_id?: UUID | null;
     contract_ids?: UUID[];
     session_id?: UUID | null;
-    response_format?: string | null;
+    response_format?: ResponseFormat | null;
     scope?: string;
   }) => api.post<AnswerResponse>('/copilot/ask', body),
 
@@ -278,7 +322,7 @@ export const copilot = {
       project_id?: UUID | null;
       contract_ids?: UUID[];
       session_id?: UUID | null;
-      response_format?: string | null;
+      response_format?: ResponseFormat | null;
       scope?: string;
       mode?: string;
     },
@@ -354,12 +398,70 @@ export const dashboard = {
  * because the two count different things - see DocPipelinePage.
  */
 export const docpipeline = {
+  // `document(docid)` used to sit here, calling GET /docpipeline/documents/{docid}.
+  // The API registers no such route - the only docpipeline endpoint is this one -
+  // so it could only ever have 404'd. Nothing called it.
   insights: (limit = 50) =>
     api.get<DocPipelineInsights>('/docpipeline', { query: { limit } }),
-  document: (docid: string) => api.get<DocPipelineDocument>(`/docpipeline/documents/${docid}`),
 };
 
+/**
+ * The Clause Master, grouped by agreement type.
+ *
+ * Two things behind one screen: a **clause** is a row in the global taxonomy, a
+ * **mapping** is "this agreement type is checked for that clause, and right now
+ * that check is on". Every call below is one or the other.
+ *
+ * Reading is open to any authenticated user — "why was my contract checked for
+ * this?" is a fair question. Writing is system-admin only, enforced server-side.
+ */
 export const clauseMaster = {
+  /** The whole screen in one call, including clauses not yet attached to a type. */
+  byAgreementType: (includeUnmapped = true) =>
+    api.get<AgreementTypeClauses[]>('/clause-master/by-agreement-type', {
+      query: { include_unmapped: includeUnmapped },
+    }),
+
+  /** The taxonomy itself, independent of any agreement type. */
+  clauses: () => api.get<AgreementClause[]>('/clause-master/clauses'),
+
+  createClause: (body: ClauseDefinitionUpsert) =>
+    api.post<AgreementClause>('/clause-master/clauses', body),
+
+  updateClause: (clauseKey: string, body: ClauseDefinitionUpsert) =>
+    api.patch<AgreementClause>(`/clause-master/clauses/${clauseKey}`, body),
+
+  /** Soft delete. Historical extractions keep rendering; new ones skip it. */
+  deleteClause: (clauseKey: string) =>
+    api.delete<MessageResponse>(`/clause-master/clauses/${clauseKey}`),
+
+  /** Attach, toggle active, mark mandatory or reorder — one idempotent upsert. */
+  setMapping: (agreementType: string, body: AgreementClauseUpsert) =>
+    api.put<AgreementClause>(
+      `/clause-master/by-agreement-type/${agreementType}/clauses`,
+      body,
+    ),
+
+  /** Detach from this type only. The clause stays in the taxonomy. */
+  removeMapping: (agreementType: string, clauseKey: string) =>
+    api.delete<MessageResponse>(
+      `/clause-master/by-agreement-type/${agreementType}/clauses/${clauseKey}`,
+    ),
+
+  /** Flat rows, rendered to CSV or XLSX in the browser. */
+  exportRows: () => api.get<ClauseImportRow[]>('/clause-master/export'),
+
+  importRows: (
+    rows: ClauseImportRow[],
+    options: { deactivate_missing?: boolean; create_missing_clauses?: boolean } = {},
+  ) =>
+    api.post<ClauseImportResult>('/clause-master/import', {
+      rows,
+      deactivate_missing: options.deactivate_missing ?? false,
+      create_missing_clauses: options.create_missing_clauses ?? true,
+    }),
+
+  // --- the legacy per-category endpoints, still used by nothing on screen ---
   list: (includeInactive = false) =>
     api.get<ClauseCategory[]>('/clause-master', {
       query: { include_inactive: includeInactive },
@@ -375,7 +477,18 @@ export const clauseMaster = {
 export const exports = {
   capabilities: () => api.get<ExportCapabilities>('/exports/capabilities'),
 
-  list: (page = 1) => api.get<Paginated<ExportJob>>('/exports', { query: { page, size: 20 } }),
+  /**
+   * Exports *this user* requested - the server scopes to the requester, not to
+   * the project, because an export is a copy of data taken by a named person.
+   */
+  list: (filters: { page?: number; size?: number; status?: ExportStatus[] } = {}) =>
+    api.get<Paginated<ExportJob>>('/exports', {
+      query: {
+        page: filters.page ?? 1,
+        size: filters.size ?? 20,
+        status: filters.status?.length ? filters.status : undefined,
+      },
+    }),
 
   get: (id: UUID) => api.get<ExportJob>(`/exports/${id}`),
 
@@ -399,6 +512,83 @@ export const exports = {
   download: (id: UUID) => api.get<ExportDownload>(`/exports/${id}/download`),
 };
 
+// =============================================================================
+// Portfolio - cross-contract registers
+// =============================================================================
+/**
+ * Reads across every contract the caller can see, narrowed by `project_id`.
+ *
+ * The per-contract equivalents live under `/contracts/{id}/...` and answer "what
+ * is in this agreement?". These answer what falls due, who carries exposure and
+ * where the risk sits - none of which can be asked of one document.
+ */
+export const portfolio = {
+  obligations: (filters: {
+    page?: number;
+    size?: number;
+    project_id?: UUID | null;
+    status?: ObligationStatus[];
+    responsible_party?: string;
+    due_from?: string;
+    due_to?: string;
+    undated?: boolean;
+    q?: string;
+  } = {}) =>
+    api.get<Paginated<PortfolioObligation>>('/obligations', {
+      query: cleaned(filters),
+    }),
+
+  keyDates: (filters: {
+    page?: number;
+    size?: number;
+    project_id?: UUID | null;
+    date_type?: DateType[];
+    date_from?: string;
+    date_to?: string;
+    unresolved?: boolean;
+  } = {}) => api.get<Paginated<PortfolioKeyDate>>('/key-dates', { query: cleaned(filters) }),
+
+  risks: (filters: {
+    page?: number;
+    size?: number;
+    project_id?: UUID | null;
+    severity?: RiskSeverity[];
+    risk_type?: string;
+    category?: string;
+    omissions?: boolean;
+    q?: string;
+  } = {}) => api.get<Paginated<PortfolioRisk>>('/risks', { query: cleaned(filters) }),
+
+  parties: (filters: {
+    page?: number;
+    size?: number;
+    project_id?: UUID | null;
+    q?: string;
+    primary_only?: boolean;
+  } = {}) => api.get<Paginated<PartyDirectoryEntry>>('/parties', { query: cleaned(filters) }),
+};
+
+/**
+ * Drops empty values before they reach the query string.
+ *
+ * `project_id: null` means "every project I can see", which the server expresses
+ * by the parameter being *absent*. Sending `project_id=` would be a validation
+ * error, and sending `status=` an empty repeated parameter - both turn "no filter"
+ * into a 422.
+ */
+function cleaned(filters: Record<string, unknown>): Record<string, string | number | string[] | undefined> {
+  const out: Record<string, string | number | string[] | undefined> = {};
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === null || value === undefined || value === '') continue;
+    if (Array.isArray(value)) {
+      if (value.length) out[key] = value as string[];
+      continue;
+    }
+    out[key] = typeof value === 'boolean' ? String(value) : (value as string | number);
+  }
+  return out;
+}
+
 export const alerts = {
   list: (filters: { project_id?: UUID; status?: string[]; page?: number } = {}) =>
     api.get<Paginated<Alert>>('/alerts', {
@@ -407,4 +597,39 @@ export const alerts = {
 
   update: (id: UUID, status: AlertStatus, note?: string) =>
     api.patch<Alert>(`/alerts/${id}`, { status, note }),
+
+  /**
+   * The thresholds the evaluator reads.
+   *
+   * Listing is open to any member - "why did this alert fire?" is a fair
+   * question from whoever received it. Writing is system-admin only, enforced
+   * server-side; the screen mirrors that by rendering the controls read-only.
+   */
+  rules: {
+    list: (projectId?: UUID | null) =>
+      api.get<AlertRule[]>('/alerts/rules', {
+        query: { project_id: projectId ?? undefined },
+      }),
+
+    create: (body: AlertRuleInput) => api.post<AlertRule>('/alerts/rules', body),
+
+    update: (id: UUID, body: Partial<AlertRuleInput>) =>
+      api.patch<AlertRule>(`/alerts/rules/${id}`, body),
+
+    remove: (id: UUID) => api.delete<MessageResponse>(`/alerts/rules/${id}`),
+  },
+};
+
+/**
+ * The compliance trail.
+ *
+ * Rows are scoped server-side to the caller's projects, plus the platform-level
+ * ones that carry no project at all - a login, a user being provisioned - which
+ * are usually where an investigation starts.
+ */
+export const audit = {
+  list: (filters: AuditFilters = {}) =>
+    api.get<Paginated<AuditEntry>>('/audit', {
+      query: filters as Record<string, string | number | boolean | undefined>,
+    }),
 };

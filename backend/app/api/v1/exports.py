@@ -166,7 +166,10 @@ async def list_exports(
     db: DbSession,
     page: Annotated[int, Query(ge=1)] = 1,
     size: Annotated[int, Query(ge=1, le=100)] = 25,
-    export_status: Annotated[list[str] | None, Query(alias="status")] = None,
+    # Typed as the enum rather than coerced in the body: `ExportStatus(value)` on an
+    # unknown string raises ValueError, which leaves the handler as a 500. Declaring
+    # it here makes a bad filter a 422 that names the offending field.
+    export_status: Annotated[list[ExportStatus] | None, Query(alias="status")] = None,
 ) -> Paginated[ExportResponse]:
     """Exports this user requested.
 
@@ -180,7 +183,7 @@ async def list_exports(
 
     conditions = [ExportJob.requested_by == user.id]
     if export_status:
-        conditions.append(ExportJob.status.in_([ExportStatus(value) for value in export_status]))
+        conditions.append(ExportJob.status.in_(export_status))
 
     total = (
         await db.execute(select(func.count()).select_from(ExportJob).where(*conditions))

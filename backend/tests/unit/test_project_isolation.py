@@ -41,10 +41,12 @@ _EXEMPT_TABLES = frozenset(
         # member of is precisely what an investigation needs to read.
         "audit_log",
         "retrieval_audit",
-        # History tables, written by triggers and read by the version viewer, which
-        # resolves access through the parent contract.
+        # History table, written by triggers and read by the version viewer, which
+        # resolves access through the parent contract. (`clause_history` used to
+        # sit beside it; it was dropped, having never had a writer or a reader -
+        # the clause review endpoint records to `audit_log` and
+        # `clauses.evidence` instead.)
         "contract_history",
-        "clause_history",
         # Scoped by requester or membership in their own service layer rather than
         # through a repository - see app/export/service.py and the alerts API.
         "alerts",

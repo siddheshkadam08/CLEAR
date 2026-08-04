@@ -25,7 +25,6 @@ from app.ai.docpipeline.clauses import (
     DetectedClause,
 )
 from app.ai.docpipeline.mapping import ClauseSpec, load_clauses, load_doc_types
-from app.ai.docpipeline.persistence import persist_document
 from app.ai.docpipeline.runner import PipelineOutcome, run_document_pipeline, summarise
 from app.ai.docpipeline.source import PageContent, Paragraph, load_pages
 from app.ai.docpipeline.vectors import embed_texts
@@ -47,7 +46,6 @@ __all__ = [
     "load_clauses",
     "load_doc_types",
     "load_pages",
-    "persist_document",
     "run_document_pipeline",
     "summarise",
 ]

@@ -110,6 +110,19 @@ x-backend-env: &backend-env
   PARSER_FIXTURE_DIR: ${PARSER_FIXTURE_DIR:-/app/storage/fixtures/parser}
   IDOC_ENDPOINT: ${IDOC_ENDPOINT:-https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json}
 
+  # `ACTIVE_PARSER=pdfextract` runs a local pdf_text_extractor checkout instead of
+  # the layout service. It emits the same Azure prebuilt-layout payloads, so the
+  # document pipeline is unaffected by the swap.
+  #
+  # In a container the path must be a *mounted* checkout with its virtualenv built
+  # for this image's platform - a .venv created on a Windows host will not run
+  # here. Left empty by default, which makes the parser refuse with an actionable
+  # error rather than appear to work.
+  PDFEXTRACT_PATH: ${PDFEXTRACT_PATH:-}
+  PDFEXTRACT_BACKEND: ${PDFEXTRACT_BACKEND:-baseline}
+  PDFEXTRACT_DPI: ${PDFEXTRACT_DPI:-300}
+  PDFEXTRACT_TIMEOUT_SECONDS: ${PDFEXTRACT_TIMEOUT_SECONDS:-1800}
+
   # --- inference and embeddings ---
   # This stack runs end to end with no LLM vendor account and no API key: both
   # providers default to `mock`, and neither the `anthropic` nor the `openai`
@@ -140,6 +153,12 @@ x-backend-env: &backend-env
   # Empty falls back to LLM_MODEL_COMPLEX - see ModelRouter._model_for_tier.
   LLM_MODEL_REASONING: ${LLM_MODEL_REASONING:-}
   LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-4096}
+  # The streaming ceiling was missing here, so setting it in .env did nothing in a
+  # container - the same allow-list trap as the QUEUE_* and RETRIEVAL_* blocks. It
+  # matters because a ceiling above the model's limit fails every streamed Copilot
+  # answer while non-streaming keeps working. No `:-` default: empty means "not
+  # configured", so the built-in applies.
+  LLM_MAX_OUTPUT_TOKENS_STREAMING: ${LLM_MAX_OUTPUT_TOKENS_STREAMING:-}
   # Per-tier deadlines: a simple-tier call that has not answered inside its
   # window is not going to, and holding a worker slot for the reasoning-tier
   # timeout starves the pool behind it.
@@ -186,6 +205,77 @@ x-backend-env: &backend-env
   # every request then goes to api.openai.com and fails with "Incorrect API key
   # provided", which reads like a bad key rather than a missing base URL.
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+
+  # --- Queue ---
+  #
+  # None of this reached the backend before: the whole QUEUE_* group was set on
+  # the `queue` service only, so `QUEUE_DRIVER` in .env chose nothing and the
+  # backend always built the BullMQ driver whatever the file said. Same failure
+  # shape as the OIDC block below - an allow-list that silently drops a key reads
+  # as a code fault, not a missing compose line.
+  #
+  # `postgres` needs neither Redis nor the `queue` service; run the stage worker
+  # instead: `python -m app.cli worker`.
+  QUEUE_DRIVER: ${QUEUE_DRIVER:-bullmq}
+  QUEUE_PREFIX: ${QUEUE_PREFIX:-cip}
+  QUEUE_DISPATCHER_URL: ${QUEUE_DISPATCHER_URL:-http://queue:9100}
+  QUEUE_STAGE_TIMEOUT_MS: ${QUEUE_STAGE_TIMEOUT_MS:-1800000}
+  QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-3}
+  QUEUE_BACKOFF_MS: ${QUEUE_BACKOFF_MS:-5000}
+  QUEUE_DLQ_NAME: ${QUEUE_DLQ_NAME:-dead-letter}
+
+  # One per stage in STAGE_ORDER. The two AI stages are capped at 4 because each
+  # makes a dozen or more model calls per document; more parallel documents just
+  # queue behind the same gateway. These were the Node dispatcher's built-in
+  # defaults, and the Python worker has to carry them or the caps are lost.
+  WORKER_CONCURRENCY_VALIDATION: ${WORKER_CONCURRENCY_VALIDATION:-10}
+  WORKER_CONCURRENCY_PARSER: ${WORKER_CONCURRENCY_PARSER:-20}
+  WORKER_CONCURRENCY_DOCPIPELINE: ${WORKER_CONCURRENCY_DOCPIPELINE:-4}
+  WORKER_CONCURRENCY_EXTRACTION: ${WORKER_CONCURRENCY_EXTRACTION:-4}
+  WORKER_CONCURRENCY_EMBEDDING: ${WORKER_CONCURRENCY_EMBEDDING:-15}
+  WORKER_CONCURRENCY_INDEXING: ${WORKER_CONCURRENCY_INDEXING:-5}
+  WORKER_CONCURRENCY_EXPORT: ${WORKER_CONCURRENCY_EXPORT:-4}
+
+  # --- Retrieval tuning ---
+  #
+  # None of this group reached the backend before, so every RETRIEVAL_* line in
+  # .env was inert in a container - the same allow-list trap as the QUEUE_* and
+  # OIDC blocks above.
+  #
+  # Deliberately no `:-` defaults on the similarity floors. Compose interpolates
+  # an unset variable to the empty string rather than omitting it, and the
+  # backend now reads a blank as "not configured" (see
+  # RetrievalSettings._blank_means_unset), so these forward an operator's value
+  # when there is one and otherwise leave the tuned per-level defaults
+  # (0.35 document / 0.45 clause / 0.40 chunk) untouched. Giving the base a
+  # literal default here would be worse than omitting it: a value counts as
+  # explicitly set, which flattens all three levels onto it.
+  RETRIEVAL_MIN_SIMILARITY: ${RETRIEVAL_MIN_SIMILARITY:-}
+  RETRIEVAL_MIN_SIMILARITY_DOCUMENT: ${RETRIEVAL_MIN_SIMILARITY_DOCUMENT:-}
+  RETRIEVAL_MIN_SIMILARITY_CLAUSE: ${RETRIEVAL_MIN_SIMILARITY_CLAUSE:-}
+  RETRIEVAL_MIN_SIMILARITY_CHUNK: ${RETRIEVAL_MIN_SIMILARITY_CHUNK:-}
+  # The rest of the group, each defaulted to its current Pydantic value so that
+  # adding them here changes nothing on its own.
+  RETRIEVAL_MAX_DOCUMENTS: ${RETRIEVAL_MAX_DOCUMENTS:-25}
+  RETRIEVAL_MAX_CLAUSES: ${RETRIEVAL_MAX_CLAUSES:-40}
+  RETRIEVAL_MAX_CHUNKS: ${RETRIEVAL_MAX_CHUNKS:-20}
+  RETRIEVAL_TIMEOUT_SECONDS: ${RETRIEVAL_TIMEOUT_SECONDS:-20}
+  RERANK_TOP_K: ${RERANK_TOP_K:-20}
+  CONTEXT_TOKEN_BUDGET: ${CONTEXT_TOKEN_BUDGET:-24000}
+  COPILOT_SIMILARITY_THRESHOLD: ${COPILOT_SIMILARITY_THRESHOLD:-0.45}
+  COPILOT_DOCTYPE_CONFIDENCE_THRESHOLD: ${COPILOT_DOCTYPE_CONFIDENCE_THRESHOLD:-0.75}
+
+  # --- Uploads: Word and archive support ---
+  #
+  # LibreOffice must be present in the image for DOC/DOCX uploads to convert.
+  # Left empty the adapter searches PATH and the usual install locations, so an
+  # image that installs libreoffice needs nothing set here.
+  ALLOWED_FILE_TYPES: ${ALLOWED_FILE_TYPES:-pdf,doc,docx,zip}
+  LIBREOFFICE_PATH: ${LIBREOFFICE_PATH:-}
+  CONVERSION_TIMEOUT_SECONDS: ${CONVERSION_TIMEOUT_SECONDS:-180}
+  MAX_ARCHIVE_MEMBERS: ${MAX_ARCHIVE_MEMBERS:-500}
+  MAX_ARCHIVE_UNCOMPRESSED_MB: ${MAX_ARCHIVE_UNCOMPRESSED_MB:-2048}
+
   INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me-internal-token}
   OTEL_ENABLED: ${OTEL_ENABLED:-true}
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
@@ -355,12 +445,13 @@ services:
       QUEUE_STAGE_TIMEOUT_MS: ${QUEUE_STAGE_TIMEOUT_MS:-1800000}
       QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-3}
       QUEUE_BACKOFF_MS: ${QUEUE_BACKOFF_MS:-5000}
+      # The Node dispatcher reads these as WORKER_CONCURRENCY_<STAGE>. Only the
+      # stages in STAGE_ORDER are listed; the retired ones took knobs that
+      # tuned queues nothing dispatches.
       WORKER_CONCURRENCY_VALIDATION: ${WORKER_CONCURRENCY_VALIDATION:-10}
       WORKER_CONCURRENCY_PARSER: ${WORKER_CONCURRENCY_PARSER:-20}
-      WORKER_CONCURRENCY_ENRICHMENT: ${WORKER_CONCURRENCY_ENRICHMENT:-10}
-      WORKER_CONCURRENCY_CLASSIFICATION: ${WORKER_CONCURRENCY_CLASSIFICATION:-10}
-      WORKER_CONCURRENCY_CHUNKING: ${WORKER_CONCURRENCY_CHUNKING:-20}
-      WORKER_CONCURRENCY_AI_EXTRACTION: ${WORKER_CONCURRENCY_AI_EXTRACTION:-10}
+      WORKER_CONCURRENCY_DOCPIPELINE: ${WORKER_CONCURRENCY_DOCPIPELINE:-4}
+      WORKER_CONCURRENCY_EXTRACTION: ${WORKER_CONCURRENCY_EXTRACTION:-4}
       WORKER_CONCURRENCY_EMBEDDING: ${WORKER_CONCURRENCY_EMBEDDING:-15}
       WORKER_CONCURRENCY_INDEXING: ${WORKER_CONCURRENCY_INDEXING:-5}
       WORKER_CONCURRENCY_EXPORT: ${WORKER_CONCURRENCY_EXPORT:-4}

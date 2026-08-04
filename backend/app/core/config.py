@@ -11,11 +11,14 @@ environment exactly once.
 
 from __future__ import annotations
 
+import os
 import uuid
 from functools import lru_cache
-from typing import Annotated, Literal
+from pathlib import Path
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
+    AliasChoices,
     Field,
     PostgresDsn,
     RedisDsn,
@@ -30,7 +33,14 @@ Environment = Literal["development", "test", "staging", "production"]
 #:
 #: * ``idoc`` - the in-house layout service (see ``ParserSettings.idoc_endpoint``),
 #:   which wraps the Azure Document Intelligence layout model. The default.
+#: * ``pdfextract`` - a local checkout of pdf_text_extractor, run as a subprocess.
+#:   Produces the *same* Azure ``prebuilt-layout`` payloads as ``idoc`` via its
+#:   ``--adi`` export, so it is a drop-in for the whole pipeline rather than a
+#:   degraded fallback: the document pipeline reads those raw payloads directly
+#:   and cannot tell the two apart. Requires ``PDFEXTRACT_PATH``.
 #: * ``pymupdf`` - local, dependency-light fallback when the service is unreachable.
+#:   Unlike the two above it does *not* produce layout JSON, so the document
+#:   pipeline cannot run on it.
 #: * ``adi``, ``textract``, ``googledocai`` - reserved names, so a future deployment
 #:   can add one without changing this contract. Selecting one raises an actionable
 #:   error rather than failing obscurely.
@@ -38,7 +48,7 @@ Environment = Literal["development", "test", "staging", "production"]
 #: Docling is deliberately absent: it is not used by this deployment, and listing a
 #: name the registry cannot build turns a configuration typo into a runtime parse
 #: failure instead of a startup error naming the valid options.
-ParserName = Literal["idoc", "adi", "pymupdf", "textract", "googledocai"]
+ParserName = Literal["idoc", "pdfextract", "adi", "pymupdf", "textract", "googledocai"]
 
 #: How a parser adapter obtains its response.
 #:
@@ -64,7 +74,7 @@ EmbeddingProvider = Literal["nvidia", "openai", "azure_openai", "sentence_transf
 #: on L2-normalised embeddings the fp16 rounding is far below the margin that
 #: separates a relevant hit from an irrelevant one.
 VectorStorage = Literal["vector", "halfvec"]
-QueueDriver = Literal["bullmq", "arq"]
+QueueDriver = Literal["bullmq", "arq", "postgres"]
 
 
 def _csv_list(value: str | list[str] | None) -> list[str]:
@@ -79,10 +89,45 @@ def _csv_list(value: str | list[str] | None) -> list[str]:
 # =============================================================================
 # Nested configuration groups
 # =============================================================================
+def _group_config(*, allow_model_prefix: bool = False) -> SettingsConfigDict:
+    """Config for a nested settings group. Every group must use this.
+
+    Pydantic does not pass the root model's ``env_file`` down to nested models:
+    each one loads its own sources, and a group without ``env_file`` therefore
+    reads real environment variables only. Under compose that is invisible,
+    because the allow-list exports the file's contents as real variables before
+    the process starts. Run the same code locally and the file is simply not
+    read - the setting keeps its default, and nothing anywhere reports that a
+    value was present and ignored.
+
+    ``COPILOT_SIMILARITY_THRESHOLD`` sat in ``.env`` unread for exactly this
+    reason: the guardrail kept gating at its 0.45 default while the file said
+    0.35. Real environment variables still take precedence over the file, so
+    compose and the deployment scripts keep overriding it as before.
+
+    ``CIP_DISABLE_DOTENV`` turns the file off. The test suite sets it, because a
+    suite that reads ``.env`` asserts against whatever the developer last put in
+    it: these groups pin the embedding shape the migrations were written for, and
+    a local file running a different provider fails them for no reason connected
+    to the change under test.
+    """
+    config = SettingsConfigDict(
+        env_prefix="",
+        extra="ignore",
+        env_file=None if os.getenv("CIP_DISABLE_DOTENV") else (".env", "../.env"),
+        env_file_encoding="utf-8",
+    )
+    if allow_model_prefix:
+        # Groups holding fields like `embedding_model` and `rerank_model`, which
+        # collide with the `model_` namespace pydantic reserves for itself.
+        config["protected_namespaces"] = ()
+    return config
+
+
 class DatabaseSettings(BaseSettings):
     """PostgreSQL connection and pool tuning."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     url: Annotated[
         PostgresDsn,
@@ -174,7 +219,7 @@ class DatabaseSettings(BaseSettings):
 class RedisSettings(BaseSettings):
     """Redis: cache, sessions, rate limiting and the queue backend."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     url: Annotated[RedisDsn, Field(validation_alias="REDIS_URL")] = "redis://localhost:6379/0"  # type: ignore[assignment]
     cache_db: Annotated[int, Field(validation_alias="REDIS_CACHE_DB", ge=0, le=15)] = 1
@@ -193,7 +238,7 @@ class RedisSettings(BaseSettings):
 class SecuritySettings(BaseSettings):
     """JWT, password hashing, rate limits and the seeded admin account."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     # refuses to boot when it is still set, which is stronger than omitting a default.
     jwt_secret: Annotated[str, Field(validation_alias="JWT_SECRET", min_length=16)] = (
@@ -244,7 +289,7 @@ class SecuritySettings(BaseSettings):
 class OIDCSettings(BaseSettings):
     """Microsoft / Azure AD OIDC single sign-on ("Sign in with Microsoft")."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     enabled: Annotated[bool, Field(validation_alias="OIDC_ENABLED")] = False
     provider: Annotated[str, Field(validation_alias="OIDC_PROVIDER")] = "microsoft"
@@ -338,7 +383,7 @@ class OIDCSettings(BaseSettings):
 class StorageSettings(BaseSettings):
     """Object storage behind ``IObjectStorage`` - swap provider, change no logic."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     provider: Annotated[StorageProvider, Field(validation_alias="STORAGE_PROVIDER")] = "local"
     container: Annotated[str, Field(validation_alias="STORAGE_CONTAINER")] = "contracts"
@@ -399,7 +444,7 @@ class StorageSettings(BaseSettings):
 class UploadSettings(BaseSettings):
     """Upload limits and file validation."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     max_upload_size_mb: Annotated[int, Field(validation_alias="MAX_UPLOAD_SIZE_MB", ge=1)] = 200
     max_files_per_upload: Annotated[
@@ -413,7 +458,32 @@ class UploadSettings(BaseSettings):
     # only a local run that reads .env hit it.
     allowed_file_types: Annotated[
         list[str], NoDecode, Field(validation_alias="ALLOWED_FILE_TYPES")
-    ] = ["pdf", "docx"]
+    ] = ["pdf", "doc", "docx", "zip"]
+    #: Absolute path to the LibreOffice binary, for converting DOC and DOCX to
+    #: PDF. Empty means "find it": `PATH` first, then the standard install
+    #: locations on each platform - LibreOffice does not add itself to `PATH` on
+    #: Windows, so a working install looks missing without that search.
+    #:
+    #: Only Word uploads depend on this. PDF and ZIP-of-PDFs are unaffected, which
+    #: is why a missing binary is a per-document rejection rather than a refusal
+    #: to start.
+    libreoffice_path: Annotated[str, Field(validation_alias="LIBREOFFICE_PATH")] = ""
+    #: Ceiling on one conversion. Generous because LibreOffice's first run on a
+    #: cold profile is much slower than its steady state, and a large document
+    #: with many embedded images is legitimately slow.
+    conversion_timeout_seconds: Annotated[
+        int, Field(validation_alias="CONVERSION_TIMEOUT_SECONDS", ge=10, le=1800)
+    ] = 180
+    #: Ceiling on the *uncompressed* size of one archive member, and on the number
+    #: of members. Both are zip-bomb guards: a few hundred kilobytes of archive can
+    #: expand to gigabytes, and the extraction happens before any size check the
+    #: per-file path would apply.
+    max_archive_members: Annotated[
+        int, Field(validation_alias="MAX_ARCHIVE_MEMBERS", ge=1, le=5000)
+    ] = 500
+    max_archive_uncompressed_mb: Annotated[
+        int, Field(validation_alias="MAX_ARCHIVE_UNCOMPRESSED_MB", ge=1, le=20_000)
+    ] = 2048
     virus_scan_enabled: Annotated[bool, Field(validation_alias="VIRUS_SCAN_ENABLED")] = False
     clamav_host: Annotated[str, Field(validation_alias="CLAMAV_HOST")] = "clamav"
     clamav_port: Annotated[int, Field(validation_alias="CLAMAV_PORT")] = 3310
@@ -446,7 +516,7 @@ class UploadSettings(BaseSettings):
 class ParserSettings(BaseSettings):
     """Parser selection, OCR and per-parser credentials."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     #: Defaults to the iDoc layout service: it returns real layout roles and
     #: coordinates, so section structure comes from the service rather than from
@@ -508,11 +578,88 @@ class ParserSettings(BaseSettings):
     #: production guard refuses to boot when it is off.
     idoc_verify_tls: Annotated[bool, Field(validation_alias="IDOC_VERIFY_TLS")] = True
 
+    # --- pdf_text_extractor (local layout, no service) ------------------------
+    #
+    # A local checkout that produces the same Azure ``prebuilt-layout`` shape iDoc
+    # returns, via its ``--adi`` export. Selecting ``ACTIVE_PARSER=pdfextract``
+    # therefore changes only where the layout JSON comes from - every downstream
+    # stage, including the document pipeline that reads the raw per-page payloads,
+    # is unaffected.
+    #
+    # Invoked as a subprocess against its own virtualenv rather than imported. Its
+    # dependency set is large and partly non-Python (Tesseract and poppler are OS
+    # packages), and pulling that into this service to run one CLI would make every
+    # deployment carry an OCR stack it may never use.
+    pdfextract_path: Annotated[str, Field(validation_alias="PDFEXTRACT_PATH")] = ""
+    #: ``baseline`` is pdfplumber + Tesseract and needs no models. ``docling`` is
+    #: more accurate on complex layouts and much heavier; it must be installed in
+    #: the extractor's own environment.
+    pdfextract_backend: Annotated[str, Field(validation_alias="PDFEXTRACT_BACKEND")] = "baseline"
+    #: OCR render resolution. The extractor's own default is 400, which is slow on a
+    #: long scanned agreement; 300 is the usual accuracy/time trade.
+    pdfextract_dpi: Annotated[
+        int, Field(validation_alias="PDFEXTRACT_DPI", ge=72, le=600)
+    ] = 300
+    #: Local, but not fast: OCR over a 100-page scan is minutes of CPU.
+    pdfextract_timeout_seconds: Annotated[
+        int, Field(validation_alias="PDFEXTRACT_TIMEOUT_SECONDS", ge=30, le=7200)
+    ] = 1800
 
-class LLMSettings(BaseSettings):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pdfextract_python(self) -> str:
+        """The extractor's own interpreter, or "" when the path is unset.
+
+        Its virtualenv is used deliberately: the point of the subprocess boundary
+        is that the extractor's dependencies stay out of this service.
+        """
+        if not self.pdfextract_path:
+            return ""
+        root = Path(self.pdfextract_path)
+        for candidate in (
+            root / ".venv" / "Scripts" / "python.exe",  # Windows
+            root / ".venv" / "bin" / "python",  # POSIX
+        ):
+            if candidate.is_file():
+                return str(candidate)
+        return ""
+
+
+class BlankIsUnsetMixin:
+    """An empty value means "not configured", not "configure it to nothing".
+
+    Two callers make this necessary rather than tidy. Compose interpolates an
+    unset variable to the empty string - `FOO: ${FOO:-}` forwards `FOO=`, not
+    nothing - and a `.env` line of `SOME_SETTING=` is how people write "leave the
+    default alone". Both otherwise abort startup on a parse of ''.
+
+    It also matters wherever "was this supplied?" is asked rather than "what is
+    its value?" - see ``RetrievalSettings.similarity_floor``. A blank that
+    survived to validation would land in ``model_fields_set`` and read as an
+    explicit setting. Dropping the key here keeps it out of that set, so blank
+    and absent behave identically.
+
+    A mixin rather than a copy per group: the trap is a property of how compose
+    and dotenv files pass values, so it applies to every settings group that has
+    an optional key, not just the first one that hit it.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_means_unset(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return {
+            key: value
+            for key, value in data.items()
+            if not (isinstance(value, str) and not value.strip())
+        }
+
+
+class LLMSettings(BlankIsUnsetMixin, BaseSettings):
     """Inference provider configuration with cost-aware model routing."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore", protected_namespaces=())
+    model_config = _group_config(allow_model_prefix=True)
 
     #: Gemini Flash by default. The choice is configuration, not architecture:
     #: every provider below sits behind ``IInferenceProvider`` and switching is one
@@ -584,6 +731,22 @@ class LLMSettings(BaseSettings):
     timeout_seconds_complex: Annotated[
         int, Field(validation_alias="LLM_TIMEOUT_SECONDS_COMPLEX", ge=0)
     ] = 300
+    #: Sampling temperature for the **extraction** purpose only. Answering and
+    #: summarisation are untouched.
+    #:
+    #: Defaults to 1.0, which is what the provider has always used - no
+    #: temperature has ever been sent, and Azure's default for chat completions
+    #: is 1.0. Declaring it changes nothing until it is set.
+    #:
+    #: Why it exists: extraction was measured disagreeing with *itself* on 16.9%
+    #: of fields across two runs over byte-identical prompts and evidence. Both
+    #: upstream stages were proven deterministic over 180 comparisons, so
+    #: sampling is the only remaining source. Structured extraction against a
+    #: strict schema has no obvious need for sampling diversity - but that is a
+    #: hypothesis, and this setting exists to test it rather than assume it.
+    extraction_temperature: Annotated[
+        float, Field(validation_alias="AI_EXTRACTION_TEMPERATURE", ge=0.0, le=2.0)
+    ] = 1.0
     max_retries: Annotated[int, Field(validation_alias="LLM_MAX_RETRIES", ge=0, le=10)] = 3
     #: Base delay for exponential backoff between provider retries, in seconds.
     #: Doubles per attempt with jitter; see app.ai.rag.providers.
@@ -667,7 +830,7 @@ _NATIVE_DIMS: dict[str, int] = {
 class EmbeddingSettings(BaseSettings):
     """Embedding provider, dimensionality and index tuning."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore", protected_namespaces=())
+    model_config = _group_config(allow_model_prefix=True)
 
     provider: Annotated[EmbeddingProvider, Field(validation_alias="EMBEDDING_PROVIDER")] = "mock"
     model: Annotated[str, Field(validation_alias="EMBEDDING_MODEL")] = "nvidia/nemotron-3-embed-1b"
@@ -740,6 +903,14 @@ class EmbeddingSettings(BaseSettings):
     hnsw_ef_construction: Annotated[
         int, Field(validation_alias="HNSW_EF_CONSTRUCTION", ge=16, le=1000)
     ] = 64
+    #: Candidate list size for an HNSW *query* - the only knob that trades recall
+    #: for latency at query time, as opposed to `m`/`ef_construction`, which shape
+    #: the graph when it is built.
+    #:
+    #: Declared here since the vector schema was introduced, and until now never
+    #: applied: nothing issued the `SET hnsw.ef_search`, so every search ran at
+    #: pgvector's default of 40 regardless of this value. See
+    #: `RetrievalEngine._vector_search`, which now sets it per transaction.
     hnsw_ef_search: Annotated[int, Field(validation_alias="HNSW_EF_SEARCH", ge=16, le=1000)] = 80
     #: ``off`` | ``relaxed_order`` | ``strict_order`` (pgvector 0.8+).
     #:
@@ -760,10 +931,24 @@ class EmbeddingSettings(BaseSettings):
     ] = 20_000
 
 
-class RetrievalSettings(BaseSettings):
+#: Per-level similarity floors used when nothing is configured at all.
+#:
+#: Deliberately not equal: the floor has to suit the unit of text being matched.
+#: These were field defaults on ``RetrievalSettings`` until 2026-08-03, where they
+#: shadowed the base setting - see ``RetrievalSettings.similarity_floor``. Keeping
+#: them as the no-configuration fallback is what makes that fix behaviour-preserving
+#: for every deployment that sets none of these variables.
+_LEVEL_SIMILARITY_DEFAULTS: Final[dict[str, float]] = {
+    "document_summary": 0.35,
+    "clause": 0.45,
+    "chunk": 0.40,
+}
+
+
+class RetrievalSettings(BlankIsUnsetMixin, BaseSettings):
     """Retrieval planner, re-ranking and context assembly budgets."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore", protected_namespaces=())
+    model_config = _group_config(allow_model_prefix=True)
 
     max_documents: Annotated[int, Field(validation_alias="RETRIEVAL_MAX_DOCUMENTS", ge=1)] = 25
     max_clauses: Annotated[int, Field(validation_alias="RETRIEVAL_MAX_CLAUSES", ge=1)] = 40
@@ -784,15 +969,46 @@ class RetrievalSettings(BaseSettings):
     #: A document summary is long and topical, so near-neighbours cluster high; a
     #: clause is short and formulaic, so boilerplate scores high against everything
     #: and needs a stricter floor to stay useful.
+    #:
+    #: ``None`` means "not configured", which is what lets ``similarity_floor``
+    #: inherit. These carried eager defaults of 0.35/0.45/0.40 until 2026-08-03,
+    #: which made ``RETRIEVAL_MIN_SIMILARITY`` unreachable - see that method.
+    #: The defaults still apply; they live in ``_LEVEL_SIMILARITY_DEFAULTS`` now.
+    #:
+    #: Both spellings are accepted. ``RETRIEVAL_MIN_SIMILARITY_DOCUMENT`` is what
+    #: the deployed configuration and docs use; ``RETRIEVAL_DOCUMENT_MIN_SIMILARITY``
+    #: reads more naturally and is what people reach for first. Silently ignoring
+    #: the other one is the exact failure this change exists to remove.
     min_similarity_document: Annotated[
-        float | None, Field(validation_alias="RETRIEVAL_MIN_SIMILARITY_DOCUMENT", ge=0.0, le=1.0)
-    ] = 0.35
+        float | None,
+        Field(
+            validation_alias=AliasChoices(
+                "RETRIEVAL_MIN_SIMILARITY_DOCUMENT", "RETRIEVAL_DOCUMENT_MIN_SIMILARITY"
+            ),
+            ge=0.0,
+            le=1.0,
+        ),
+    ] = None
     min_similarity_clause: Annotated[
-        float | None, Field(validation_alias="RETRIEVAL_MIN_SIMILARITY_CLAUSE", ge=0.0, le=1.0)
-    ] = 0.45
+        float | None,
+        Field(
+            validation_alias=AliasChoices(
+                "RETRIEVAL_MIN_SIMILARITY_CLAUSE", "RETRIEVAL_CLAUSE_MIN_SIMILARITY"
+            ),
+            ge=0.0,
+            le=1.0,
+        ),
+    ] = None
     min_similarity_chunk: Annotated[
-        float | None, Field(validation_alias="RETRIEVAL_MIN_SIMILARITY_CHUNK", ge=0.0, le=1.0)
-    ] = 0.40
+        float | None,
+        Field(
+            validation_alias=AliasChoices(
+                "RETRIEVAL_MIN_SIMILARITY_CHUNK", "RETRIEVAL_CHUNK_MIN_SIMILARITY"
+            ),
+            ge=0.0,
+            le=1.0,
+        ),
+    ] = None
 
     #: Hybrid fusion weights. Vector leads because the questions this platform
     #: answers are paraphrases far more often than they are exact phrases, but
@@ -807,13 +1023,50 @@ class RetrievalSettings(BaseSettings):
     ] = 0.35
 
     def similarity_floor(self, level: str) -> float:
-        """The floor for one embedding level, falling back to the global value."""
+        """The floor for one embedding level, most specific setting wins.
+
+        Three tiers, in order:
+
+        1. the level's own variable, e.g. ``RETRIEVAL_MIN_SIMILARITY_CLAUSE``;
+        2. ``RETRIEVAL_MIN_SIMILARITY``, when it was actually supplied;
+        3. the per-level default in ``_LEVEL_SIMILARITY_DEFAULTS``.
+
+        Tier 2 is the whole point, and it did not work. The per-level fields were
+        typed ``float | None`` - the ``None`` being the "inherit from the base"
+        sentinel - but were *declared* with eager defaults of 0.35/0.45/0.40. So
+        the sentinel never occurred, tier 2 was unreachable, and setting
+        ``RETRIEVAL_MIN_SIMILARITY`` changed a number that nothing read. It looked
+        configurable at every layer: the variable is documented, it parses, it
+        validates, ``settings.retrieval.min_similarity`` reports the new value, and
+        the seed even writes it into ``profile.thresholds``. Only retrieval itself
+        ignored it, which is the one place with no way to see it.
+
+        Tier 3 is a deliberate asymmetry rather than "default to the base". The
+        floors differ per level because the *unit of text* differs - a formulaic
+        clause scores high against everything, so it needs a stricter floor than a
+        long topical summary - and that relationship should survive an operator
+        who never sets anything. But once they do set a base explicitly, they have
+        stated an intent, and silently keeping three unrelated numbers over it is
+        how this bug read from the outside.
+        """
         override = {
             "document_summary": self.min_similarity_document,
             "clause": self.min_similarity_clause,
             "chunk": self.min_similarity_chunk,
         }.get(level)
-        return self.min_similarity if override is None else override
+        if override is not None:
+            return override
+        if "min_similarity" in self.model_fields_set:
+            return self.min_similarity
+        return _LEVEL_SIMILARITY_DEFAULTS.get(level, self.min_similarity)
+
+    def effective_similarity_floors(self) -> dict[str, float]:
+        """What retrieval will actually use, per level.
+
+        For diagnostics and the benchmark snapshot, which otherwise record the
+        *fields* - now mostly ``None`` - rather than the numbers in force.
+        """
+        return {level: self.similarity_floor(level) for level in _LEVEL_SIMILARITY_DEFAULTS}
 
     timeout_seconds: Annotated[int, Field(validation_alias="RETRIEVAL_TIMEOUT_SECONDS", ge=1)] = 20
     graph_max_depth: Annotated[int, Field(validation_alias="RETRIEVAL_GRAPH_MAX_DEPTH", ge=1)] = 3
@@ -874,7 +1127,7 @@ class RetrievalSettings(BaseSettings):
 class QueueSettings(BaseSettings):
     """Queue/dispatch layer. BullMQ by default; ``arq`` keeps the same contract."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     driver: Annotated[QueueDriver, Field(validation_alias="QUEUE_DRIVER")] = "bullmq"
     prefix: Annotated[str, Field(validation_alias="QUEUE_PREFIX")] = "cip"
@@ -894,10 +1147,34 @@ class QueueSettings(BaseSettings):
     backoff_ms: Annotated[int, Field(validation_alias="QUEUE_BACKOFF_MS", ge=100)] = 5000
     dlq_name: Annotated[str, Field(validation_alias="QUEUE_DLQ_NAME")] = "dead-letter"
 
+    #: How many documents one worker runs through a given stage at once.
+    #:
+    #: The two AI stages are capped far below the others deliberately. Each makes
+    #: a dozen or more model calls per document, so running several documents in
+    #: parallel does not go faster - it just queues them behind the same provider
+    #: gateway, and makes rate limiting more likely.
+    #:
+    #: These values were the Node dispatcher's built-in defaults
+    #: (``queue/src/config.ts``). They live here now because the Postgres driver's
+    #: worker is Python, and losing them would have quietly uncapped the AI stages.
     concurrency_validation: Annotated[
         int, Field(validation_alias="WORKER_CONCURRENCY_VALIDATION")
     ] = 10
     concurrency_parser: Annotated[int, Field(validation_alias="WORKER_CONCURRENCY_PARSER")] = 20
+    concurrency_docpipeline: Annotated[
+        int, Field(validation_alias="WORKER_CONCURRENCY_DOCPIPELINE")
+    ] = 4
+    concurrency_extraction: Annotated[
+        int, Field(validation_alias="WORKER_CONCURRENCY_EXTRACTION")
+    ] = 4
+    concurrency_embedding: Annotated[
+        int, Field(validation_alias="WORKER_CONCURRENCY_EMBEDDING")
+    ] = 15
+    concurrency_indexing: Annotated[int, Field(validation_alias="WORKER_CONCURRENCY_INDEXING")] = 5
+    concurrency_export: Annotated[int, Field(validation_alias="WORKER_CONCURRENCY_EXPORT")] = 4
+
+    #: Retired stages, kept so a deployment that still sets them does not trip
+    #: pydantic's ``extra`` handling. Nothing dispatches these - see STAGE_ORDER.
     concurrency_enrichment: Annotated[
         int, Field(validation_alias="WORKER_CONCURRENCY_ENRICHMENT")
     ] = 10
@@ -908,11 +1185,14 @@ class QueueSettings(BaseSettings):
     concurrency_ai_extraction: Annotated[
         int, Field(validation_alias="WORKER_CONCURRENCY_AI_EXTRACTION")
     ] = 10
-    concurrency_embedding: Annotated[
-        int, Field(validation_alias="WORKER_CONCURRENCY_EMBEDDING")
-    ] = 15
-    concurrency_indexing: Annotated[int, Field(validation_alias="WORKER_CONCURRENCY_INDEXING")] = 5
-    concurrency_export: Annotated[int, Field(validation_alias="WORKER_CONCURRENCY_EXPORT")] = 4
+
+    def concurrency_for(self, stage: str) -> int:
+        """Worker concurrency for a stage, falling back to a conservative default.
+
+        Looked up by name so adding a stage to ``STAGE_ORDER`` does not require a
+        branch here - only a field, if the default is wrong for it.
+        """
+        return int(getattr(self, f"concurrency_{stage}", 4))
 
 
 class AlertSettings(BaseSettings):
@@ -928,7 +1208,7 @@ class AlertSettings(BaseSettings):
     naming the provider and supplying its endpoint.
     """
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     expiry_window_days: Annotated[
         int, Field(validation_alias="ALERT_EXPIRY_WINDOW_DAYS", ge=1, le=730)
@@ -1014,7 +1294,7 @@ class AlertSettings(BaseSettings):
 class ObservabilitySettings(BaseSettings):
     """OpenTelemetry + Prometheus."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = _group_config()
 
     otel_enabled: Annotated[bool, Field(validation_alias="OTEL_ENABLED")] = True
     service_name: Annotated[str, Field(validation_alias="OTEL_SERVICE_NAME")] = "cip-backend"

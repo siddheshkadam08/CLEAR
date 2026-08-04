@@ -37,14 +37,15 @@ COLUMN = "needs_review"
 
 
 def upgrade() -> None:
-    op.add_column(
-        TABLE,
-        sa.Column(
-            COLUMN,
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.text("false"),
-        ),
+    # Guarded, because revision 0001 builds the schema with
+    # ``Base.metadata.create_all`` against *live* model metadata. On a database
+    # created from scratch today that already includes this column, and an
+    # unguarded ADD COLUMN aborted the whole upgrade before it could reach any
+    # later revision. Every other migration in this directory is written the same
+    # way for the same reason - see 0003's note about being a no-op.
+    op.execute(
+        f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS {COLUMN} "
+        f"BOOLEAN NOT NULL DEFAULT false"
     )
     # Partial: the flagged answers are the minority and the only ones anyone
     # queries for. A full index would be almost entirely `false` entries nobody

@@ -178,7 +178,17 @@ class PromptOrchestrator:
         response_format: ResponseFormat | None = None,
         schema: dict[str, Any] | None = None,
     ) -> GenerationPrompt:
-        fmt = response_format or _INTENT_FORMAT.get(package.intent, ResponseFormat.NATURAL_LANGUAGE)
+        # Normalised, not just defaulted. The request schemas set
+        # `use_enum_values=True`, so a supplied `response_format` arrives as a bare
+        # `str` however it is annotated - and `GenerationPrompt.as_dict` and the
+        # RAG engine's metrics both read `.value` off this. Passing the string
+        # straight through raised `AttributeError: 'str' object has no attribute
+        # 'value'` and turned every formatted answer into a 500, while the
+        # unsupplied case worked because the fallback comes from `_INTENT_FORMAT`
+        # and is already an enum member.
+        fmt = ResponseFormat(
+            response_format or _INTENT_FORMAT.get(package.intent, ResponseFormat.NATURAL_LANGUAGE)
+        )
         prompt_id = _INTENT_PROMPT.get(package.intent, "rag.qa")
 
         return GenerationPrompt(

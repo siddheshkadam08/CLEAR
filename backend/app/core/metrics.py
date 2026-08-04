@@ -359,6 +359,52 @@ rerank_duration_seconds = Histogram(
     registry=REGISTRY,
 )
 
+# --- retrieval, split by leg -------------------------------------------------
+#
+# `retrieval_duration_seconds` is the total, which cannot answer the only
+# question worth asking when retrieval is slow: *which leg*. A hybrid search runs
+# a vector query, a keyword query and a fusion per level, and their costs scale
+# with different things - HNSW with graph size and `ef_search`, `ts_rank` with
+# corpus size and term frequency, fusion with candidate count alone. One number
+# hides all three.
+#
+# Labelled by level as well as leg because the levels have very different
+# cardinality: one summary per document against many chunks, so a chunk-level
+# vector query is not comparable to a summary-level one.
+retrieval_leg_duration_seconds = Histogram(
+    "cip_retrieval_leg_duration_seconds",
+    "Retrieval latency for one leg of one level.",
+    ["leg", "level"],  # leg: vector|keyword|fusion
+    buckets=_AI_BUCKETS,
+    registry=REGISTRY,
+)
+
+# --- per-clause extraction ---------------------------------------------------
+#
+# `CategoryOutcome` already records tokens, latency and evidence per clause, but
+# only into the stage artifact - so the numbers exist per document and cannot be
+# aggregated across a corpus without reading every artifact back. These export
+# the same values, changing nothing about how they are produced.
+#
+# This is the pipeline's dominant cost: one structured call per clause category
+# per document. Sizing any change to it - batching, prompt reordering, caching -
+# requires knowing the split between evidence tokens (which vary per document)
+# and scaffolding (which repeats identically on every call).
+clause_extraction_tokens = Histogram(
+    "cip_clause_extraction_tokens",
+    "Tokens for one clause-category extraction call.",
+    ["kind"],  # input|output|cache_read|evidence|repeated
+    buckets=(0, 100, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000),
+    registry=REGISTRY,
+)
+
+clause_extraction_duration_seconds = Histogram(
+    "cip_clause_extraction_duration_seconds",
+    "Latency of one clause-category extraction call.",
+    buckets=_AI_BUCKETS,
+    registry=REGISTRY,
+)
+
 # =============================================================================
 # Copilot and evaluation
 # =============================================================================

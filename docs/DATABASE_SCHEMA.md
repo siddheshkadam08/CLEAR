@@ -1111,7 +1111,7 @@ Cross-references, definition links and dependencies found during extraction.
 | `ix_knowledge_relationships_project_relation` | `project_id`, `relation` | |
 
 > **Why both this table and the graph tables exist:** this is the relational record of
-> what the *extraction* saw. Indexing projects it into `graph_nodes`/`graph_edges` for
+> what the *extraction* saw. Indexing resolves it into further rows in this same table
 > traversal. Keeping both means a graph rebuild never needs the LLM again.
 
 ---
@@ -1148,6 +1148,14 @@ Stored as a property graph **in Postgres** rather than a separate graph database
 traversals here are shallow (2–3 hops, bounded by `RETRIEVAL_GRAPH_MAX_DEPTH`) and
 must join against project-scoped relational filters in the same query — which a
 recursive CTE does well and a cross-database hop does not.
+
+> **Dropped (revision 0009).** `graph_nodes`, `graph_edges` and `clause_history`
+> were created by the initial migration and never written to by anything. The
+> knowledge graph lives in `knowledge_relationships` (§7), which is what
+> `RetrievalEngine._expand_graph` traverses; clause review decisions are recorded
+> in `audit_log` with the model's original output under `clauses.evidence`.
+>
+> The sections below are retained as a record of what the schema used to hold.
 
 ## 8.1 `graph_nodes`
 
@@ -1553,6 +1561,14 @@ Field-level change trail for a contract.
 
 ---
 
+> **Dropped (revision 0009).** `graph_nodes`, `graph_edges` and `clause_history`
+> were created by the initial migration and never written to by anything. The
+> knowledge graph lives in `knowledge_relationships` (§7), which is what
+> `RetrievalEngine._expand_graph` traverses; clause review decisions are recorded
+> in `audit_log` with the model's original output under `clauses.evidence`.
+>
+> The sections below are retained as a record of what the schema used to hold.
+
 ## 9.11 `clause_history`
 
 Change trail for an extracted clause, **including human review decisions** — the
@@ -1896,7 +1912,7 @@ python -m app.cli current                 # show the applied revision
 | A generated Excel file | `export_jobs.storage_path` |
 | A Copilot answer's citations | `chat_messages.citations` |
 | Who did what, when | `audit_log` |
-| Who approved an AI extraction | `clause_history.review_decision` |
+| Who approved an AI extraction | `audit_log` (action `review_decision`), with the model's original output kept under `clauses.evidence["original"]` |
 | What a search actually retrieved | `retrieval_audit.evidence_refs` |
 
 # Appendix B — Cheat sheet

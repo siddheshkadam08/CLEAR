@@ -29,7 +29,6 @@ export const getStatusVariant = (status: string): BadgeVariant => {
     retrying: 'warning',
     needs_review: 'warning',
     paused: 'warning',
-    escalated: 'warning',
     open: 'warning',
     failed: 'danger',
     cancelled: 'neutral',

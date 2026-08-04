@@ -294,6 +294,9 @@ class EmbeddingReindexer:
         )
         await self.db.flush()
 
+        # `db=` so a database-backed driver enqueues inside this transaction. The
+        # job above is flushed, not committed, so its own session would not see it
+        # and the insert would fail on the foreign key. Broker drivers ignore it.
         await get_queue_client().enqueue(
             StageMessage(
                 job_id=job.id,
@@ -302,7 +305,8 @@ class EmbeddingReindexer:
                 stage=PipelineStage.EMBEDDING,
                 priority=JobPriority.LOW,
                 options={"reason": "embedding_model_change", "target_model": self._settings.model},
-            )
+            ),
+            db=self.db,
         )
         return 0, int(stale)
 

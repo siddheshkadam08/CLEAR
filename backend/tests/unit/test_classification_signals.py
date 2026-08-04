@@ -32,8 +32,8 @@ class _Profile:
         self.key = key
         self.name = over.get("name", key.replace("_", " ").title())
         self.version = "1.0.0"
-        self.contract_type = over.get("contract_type", key)
-        self.contract_subtype = None
+        self.agreement_type = over.get("agreement_type", key)
+        self.agreement_subtype = None
         self.classification_hints = hints or {}
         self.is_default = over.get("is_default", False)
         self.priority = over.get("priority", 10)
@@ -112,7 +112,7 @@ class TestResultShape:
             ClassificationSignal(
                 profile_key="msa",
                 profile_id=str(winner.id),
-                contract_type="msa",
+                agreement_type="msa",
                 score=0.91,
                 matched_keywords=["statement of work"],
                 matched_rules=["required_phrases"],
@@ -120,7 +120,7 @@ class TestResultShape:
             ClassificationSignal(
                 profile_key="nda",
                 profile_id=str(uuid.uuid4()),
-                contract_type="nda",
+                agreement_type="nda",
                 score=0.22,
             ),
         ]

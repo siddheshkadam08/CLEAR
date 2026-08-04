@@ -20,7 +20,7 @@ import { Badge } from '@/components/common/Badge';
 import { getRiskVariant } from '@/lib/badges';
 import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card, SectionHeader } from '@/components/common/Card';
+import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -57,10 +57,10 @@ export function SearchPage() {
 
   return (
     <div className="space-y-5">
-      {/* <PageHeader
+      <PageHeader
         title="Search"
         subtitle="Ask in plain language, or search for exact wording. Results are scoped to the projects you belong to."
-      /> */}
+      />
 
       <Card>
         <form
@@ -179,7 +179,7 @@ export function SearchPage() {
                           className="flex w-full flex-col gap-2 py-3 text-left transition hover:bg-slate-50 sm:flex-row sm:items-center sm:justify-between"
                         >
                           <div className="min-w-0">
-                            <p className="truncate text-sm font-medium text-slate-900">
+                            <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
                               {match.title ?? 'Untitled'}
                             </p>
                             <p className="mt-0.5 text-xs text-slate-500">
@@ -209,11 +209,11 @@ export function SearchPage() {
                     key={`${hit.level}:${hit.ref_id}`}
                     type="button"
                     onClick={() => navigate(`/contracts/${hit.contract_id}`)}
-                    className="block w-full rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:border-blue-200 hover:shadow-md sm:p-5"
+                    className="block w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 text-left shadow-sm transition hover:border-blue-200 hover:shadow-md sm:p-5"
                   >
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div className="flex min-w-0 flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-semibold text-slate-900">
+                        <span className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
                           {hit.contract_title ?? 'Untitled'}
                         </span>
                         {hit.clause_number ? (
@@ -273,7 +273,7 @@ function PlanCard({ plan }: { plan: PlanExplanation }) {
             <dt className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               {label}
             </dt>
-            <dd className="mt-1 text-sm font-medium text-slate-900">{humanise(value)}</dd>
+            <dd className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{humanise(value)}</dd>
           </div>
         ))}
       </dl>

@@ -42,9 +42,27 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONFAULTHANDLER=1 \
     PATH="/opt/venv/bin:$PATH" \
-    TESSERACT_CMD=/usr/bin/tesseract
+    TESSERACT_CMD=/usr/bin/tesseract \
+    # Where LibreOffice writes its per-user profile. It must be a directory the
+    # runtime user owns: the default is $HOME/.config, and a soffice that cannot
+    # create its profile exits 0 having produced nothing - the single most
+    # confusing way a conversion can fail.
+    HOME=/home/cip
 
 # Runtime OS deps: libpq for psycopg, tesseract+poppler for OCR/PDF rasterising.
+#
+# LibreOffice converts DOC and DOCX uploads to PDF - the pipeline is PDF-only, so
+# without it every Word upload is rejected (cleanly, with an actionable message,
+# but rejected). `libreoffice-writer` rather than the full suite: it is the only
+# component that reads word-processing formats, and it is roughly a third of the
+# size. `--no-install-recommends` keeps out the Java runtime, sample documents and
+# desktop integration, none of which a headless converter uses.
+#
+# `fonts-liberation` is not optional dressing. Without a metric-compatible
+# substitute for Arial/Times New Roman, LibreOffice silently falls back to
+# whatever it can find and reflows the document - so the converted PDF's page
+# breaks stop matching the Word original, and every evidence highlight computed
+# against it lands on the wrong page.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         tesseract-ocr \
@@ -53,15 +71,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         curl \
-    && rm -rf /var/lib/apt/lists/*
+        libreoffice-writer \
+        libreoffice-core \
+        fonts-liberation \
+        fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && soffice --version
 
 COPY --from=builder /opt/venv /opt/venv
 
 # Non-root runtime user; storage mount point is writable for the local adapter.
 RUN groupadd --gid 10001 cip \
     && useradd --uid 10001 --gid cip --create-home --shell /usr/sbin/nologin cip \
-    && mkdir -p /var/lib/cip/storage /app \
-    && chown -R cip:cip /var/lib/cip /app
+    && mkdir -p /var/lib/cip/storage /app /home/cip/.config \
+    && chown -R cip:cip /var/lib/cip /app /home/cip
 
 WORKDIR /app
 

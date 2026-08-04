@@ -1,9 +1,9 @@
 ﻿/**
  * Processing.
  *
- * The pipeline is eight isolated stages, each emitting an artifact that doubles as
- * a checkpoint, so a failure is always attributable to one stage and a retry does
- * not repeat the seven that succeeded. This screen exposes that: which stage failed,
+ * The pipeline is six isolated stages, each emitting an artifact that doubles as a
+ * checkpoint, so a failure is always attributable to one stage and a retry does not
+ * repeat the ones that succeeded. This screen exposes that: which stage failed,
  * why, whether a retry can help, and reprocessing from any chosen stage.
  *
  * Health is here too, including stages that failed to import. A stage that is not
@@ -12,33 +12,61 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, ChevronUp, ListChecks, RotateCcw, X } from 'lucide-react';
+import {
+  Activity,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  FileArchive,
+  Layers,
+  ListChecks,
+  RotateCcw,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { jobs as jobsApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
-import type { JobListItem } from '@/api/types';
+import type { JobListItem, JobState } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card } from '@/components/common/Card';
+import { ACCENTS, Card, MetricCard, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
+import { FilterChip } from '@/components/common/FilterChip';
 import { selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { formatDateTime, formatDateTimeFull, formatDuration, humanise } from '@/lib/format';
+import { groupByArchive } from '@/lib/job-grouping';
 import { useProjectScope } from '@/lib/scope';
 
-const STATES = ['queued', 'ready', 'failed', 'retrying', 'cancelled', 'paused'];
+/** The values the API accepts, exactly as `JobState` spells them.
+ *
+ * These were lowercase, and `JobState` is an uppercase `StrEnum` - so every chip
+ * sent `state=ready`, FastAPI rejected it against the enum, and the request came
+ * back 422. The list simply stopped filtering, and because the page still
+ * rendered the unfiltered rows it looked like a filter with nothing to match
+ * rather than a request that failed. Sent verbatim, humanised only for display.
+ */
+const STATES: JobState[] = ['QUEUED', 'READY', 'FAILED', 'RETRYING', 'CANCELLED', 'PAUSED'];
 
+/** States from which a job will not move again. */
+const TERMINAL_STATES: JobState[] = ['READY', 'FAILED', 'CANCELLED'];
+
+/** The dispatched pipeline, in order. Mirrors STAGE_ORDER on the backend.
+ *
+ * This listed the original eight, four of which are retired and no longer
+ * registered - so the "Stages registered" tile compared 6 against 8 and showed a
+ * permanent alarm for a healthy deployment.
+ */
 const STAGES = [
   'validation',
   'parser',
-  'enrichment',
-  'classification',
-  'chunking',
-  'ai_extraction',
+  'docpipeline',
+  'extraction',
   'embedding',
   'indexing',
 ];
@@ -57,9 +85,7 @@ export function JobsPage() {
         size: 50,
       }),
     refetchInterval: (query) =>
-      query.state.data?.items.some(
-        (job) => !['ready', 'failed', 'cancelled'].includes(job.state),
-      )
+      query.state.data?.items.some((job) => !TERMINAL_STATES.includes(job.state))
         ? 4000
         : 15000,
   });
@@ -75,10 +101,10 @@ export function JobsPage() {
 
   return (
     <div className="space-y-5">
-      {/* <PageHeader
+      <PageHeader
         title="Processing"
-        subtitle="Eight stages per contract. Each stage checkpoints, so a retry resumes rather than restarts."
-      /> */}
+        subtitle="Six stages per contract. Each stage checkpoints, so a retry resumes rather than restarts."
+      />
 
       {health && health.unavailable_stages.length ? (
         <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
@@ -99,42 +125,58 @@ export function JobsPage() {
       ) : null}
 
       {health ? (
-        <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
-          <HealthTile label="In flight" value={health.in_flight} />
-          <HealthTile label="Stalled" value={health.stalled} alarm={health.stalled > 0} />
-          <HealthTile
+        <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+          <MetricCard
+            label="In flight"
+            value={health.in_flight}
+            icon={Activity}
+            accent={ACCENTS[0]}
+            hint="running now"
+          />
+          <MetricCard
+            label="Stalled"
+            value={health.stalled}
+            icon={AlertTriangle}
+            accent={ACCENTS[3]}
+            alarm={health.stalled > 0}
+            hint="lease expired, awaiting reclaim"
+          />
+          <MetricCard
             label="Dead letter"
             value={health.dead_letter_count}
+            icon={XCircle}
+            accent={ACCENTS[8]}
             alarm={health.dead_letter_count > 0}
+            hint="exhausted every retry"
           />
-          <HealthTile
+          <MetricCard
             label="Stages registered"
-            value={health.registered_stages.length}
+            value={`${health.registered_stages.length} / ${STAGES.length}`}
+            icon={Layers}
+            accent={ACCENTS[4]}
             alarm={health.registered_stages.length < STAGES.length}
+            hint="worker has handlers for these"
           />
         </div>
       ) : null}
 
-      {/* Disabled, not deleted. Restoring the queue-depth table also needs the
-      `SectionHeader` import, removed because this was its only use and the
-      production typecheck rejects unused declarations.
       {health && health.queues.length ? (
         <Card className="overflow-hidden">
           <SectionHeader
             title="Queues"
-            subtitle="Depth per queue, straight from the broker."
+            subtitle="Depth per stage. Delayed rows are waiting out a retry backoff, not stuck."
             icon={ListChecks}
           />
           <div className="-mx-6 overflow-x-auto px-6">
             <table className="w-full min-w-[34rem] text-left text-sm">
-              <thead className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
+              <thead className="border-b border-slate-200 dark:border-slate-700 text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
-                  <th className="py-2 pr-4 font-semibold">Queue</th>
-                  <th className="py-2 pr-4 text-right font-semibold">Waiting</th>
-                  <th className="py-2 pr-4 text-right font-semibold">Active</th>
-                  <th className="py-2 pr-4 text-right font-semibold">Delayed</th>
-                  <th className="py-2 pr-4 text-right font-semibold">Failed</th>
-                  <th className="py-2 text-right font-semibold">Completed</th>
+                  <th scope="col" className="py-2 pr-4 font-semibold">Queue</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Waiting</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Active</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Delayed</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Failed</th>
+                  <th scope="col" className="py-2 text-right font-semibold">Completed</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -160,17 +202,20 @@ export function JobsPage() {
             </table>
           </div>
         </Card>
-      ) : null} */}
+      ) : null}
 
       <Card dense>
         <div className="flex flex-wrap gap-2">
           {STATES.map((state) => {
             const active = selectedStates.includes(state);
             return (
-              <button
+              <FilterChip
                 key={state}
-                type="button"
-                aria-pressed={active}
+                // Lower-cased first: the value is an uppercase enum member, and
+                // both `humanise` and `formatStatusLabel` only touch the first
+                // letter - so "QUEUED" would stay shouting.
+                label={formatStatusLabel(state.toLowerCase())}
+                active={active}
                 onClick={() => {
                   const next = new URLSearchParams(params);
                   const current = next.getAll('state');
@@ -181,15 +226,7 @@ export function JobsPage() {
                   if (!current.includes(state)) next.append('state', state);
                   setParams(next, { replace: true });
                 }}
-                className={[
-                  'rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition',
-                  active
-                    ? 'bg-blue-600 text-white ring-blue-600'
-                    : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
-                ].join(' ')}
-              >
-                {humanise(state)}
-              </button>
+              />
             );
           })}
         </div>
@@ -208,9 +245,20 @@ export function JobsPage() {
         </Card>
       ) : jobsQuery.data?.items.length ? (
         <div className="space-y-3">
-          {jobsQuery.data.items.map((job) => (
-            <JobCard key={job.id} job={job} defaultOpen={job.id === focusJob} />
-          ))}
+          {groupByArchive(jobsQuery.data.items).map((group) =>
+            group.archive ? (
+              <ArchiveGroup
+                key={group.key}
+                name={group.archive}
+                jobs={group.jobs}
+                focusJob={focusJob}
+              />
+            ) : (
+              group.jobs.map((job) => (
+                <JobCard key={job.id} job={job} defaultOpen={job.id === focusJob} />
+              ))
+            ),
+          )}
         </div>
       ) : (
         <EmptyState
@@ -223,33 +271,46 @@ export function JobsPage() {
   );
 }
 
-function HealthTile({
-  label,
-  value,
-  alarm = false,
-}: {
-  label: string;
-  value: number;
-  alarm?: boolean;
-}) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-      <p className="truncate text-xs font-medium text-slate-500 sm:text-sm">{label}</p>
-      <p
-        className={[
-          'mt-2 text-2xl font-semibold tabular-nums sm:text-3xl',
-          alarm ? 'text-rose-600' : 'text-slate-900',
-        ].join(' ')}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
-
 // =============================================================================
 // Job
 // =============================================================================
+// =============================================================================
+// Archive grouping
+// =============================================================================
+function ArchiveGroup({
+  name,
+  jobs,
+  focusJob,
+}: {
+  name: string;
+  jobs: JobListItem[];
+  focusJob?: string | null;
+}) {
+  const done = jobs.filter((job) => job.state === 'READY').length;
+  const failed = jobs.filter((job) => job.state === 'FAILED').length;
+
+  return (
+    <section className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40 p-3 sm:p-4">
+      <header className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <FileArchive className="h-4 w-4 shrink-0 text-slate-500" aria-hidden />
+        <span className="font-medium text-slate-800">{name}</span>
+        <span className="text-xs text-slate-500">
+          {jobs.length} documents · {done} finished
+          {failed ? ` · ${failed} failed` : ''}
+        </span>
+      </header>
+      {/* Each document keeps its own card: its own state, progress, retry and
+          logs. The group is presentation - it never merges their fates, and one
+          failing here must not read as the archive failing. */}
+      <div className="space-y-3">
+        {jobs.map((job) => (
+          <JobCard key={job.id} job={job} defaultOpen={job.id === focusJob} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(Boolean(defaultOpen));
@@ -290,7 +351,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
     onError: (caught) => setActionError(errorMessage(caught)),
   });
 
-  const terminal = ['ready', 'failed', 'cancelled'].includes(job.state);
+  const terminal = TERMINAL_STATES.includes(job.state);
   const failedStage = detail?.stages.find((stage) => stage.status === 'failed');
   // Until the detail has loaded, retryability is unknown. Offering the button
   // optimistically would produce a request the server rejects; withholding it
@@ -311,9 +372,17 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
             ) : null}
             <span className="font-mono text-xs text-slate-400">{job.id.slice(0, 8)}</span>
           </div>
-          {job.contract_title ? (
-            <p className="mt-1.5 truncate text-sm font-medium text-slate-900">
-              {job.contract_title}
+          {job.contract_title || job.original_file_name ? (
+            <p className="mt-1.5 truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+              {job.contract_title ?? job.original_file_name}
+              {/* A Word upload processes a PDF, so without this the row gives no
+                  sign the source was a .docx - and the user is left wondering
+                  whether their document arrived at all. */}
+              {job.original_file_type && job.original_file_type !== 'pdf' ? (
+                <span className="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-normal uppercase tracking-wide text-slate-500">
+                  from {job.original_file_type}
+                </span>
+              ) : null}
             </p>
           ) : null}
           <Link
@@ -325,7 +394,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
         </div>
 
         <div className="flex flex-wrap gap-2 lg:shrink-0">
-          {job.state === 'failed' ? (
+          {job.state === 'FAILED' ? (
             // Offered only when the backend says a retry could plausibly help.
             // Re-running a deterministic validation failure just burns a queue slot
             // and tells the user nothing new.
@@ -419,13 +488,13 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
           ) : (
             <div className="-mx-5 overflow-x-auto px-5">
               <table className="w-full min-w-[32rem] text-left text-sm">
-                <thead className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
+                <thead className="border-b border-slate-200 dark:border-slate-700 text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   <tr>
-                    <th className="py-2 pr-4 font-semibold">Stage</th>
-                    <th className="py-2 pr-4 font-semibold">Status</th>
-                    <th className="py-2 pr-4 text-right font-semibold">Attempt</th>
-                    <th className="py-2 pr-4 text-right font-semibold">Duration</th>
-                    <th className="py-2 font-semibold">Notes</th>
+                    <th scope="col" className="py-2 pr-4 font-semibold">Stage</th>
+                    <th scope="col" className="py-2 pr-4 font-semibold">Status</th>
+                    <th scope="col" className="py-2 pr-4 text-right font-semibold">Attempt</th>
+                    <th scope="col" className="py-2 pr-4 text-right font-semibold">Duration</th>
+                    <th scope="col" className="py-2 font-semibold">Notes</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">

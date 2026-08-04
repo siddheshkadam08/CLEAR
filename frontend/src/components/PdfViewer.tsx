@@ -20,12 +20,19 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { getAccessToken } from '@/api/client';
 import type { BoundingBox } from '@/api/types';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
 export interface PdfViewerProps {
-  /** Signed, expiring URL from `GET /contracts/{id}/file`. */
+  /**
+   * Document URL from `GET /contracts/{id}/file`.
+   *
+   * Either a pre-signed object-storage URL, or - when the backend cannot sign,
+   * which is every local-storage deployment - an API path that carries the
+   * bearer token instead. The loader below tells them apart.
+   */
   url: string;
   /** Boxes to outline. Pages are derived from the boxes themselves. */
   highlights?: BoundingBox[];
@@ -41,6 +48,8 @@ const MAX_ZOOM = 3;
 export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  //: The first highlight drawn on the current page - the scroll target.
+  const firstHighlight = useRef<HTMLSpanElement>(null);
   const docRef = useRef<PDFDocumentProxy | null>(null);
   // pdf.js rejects a second render on the same canvas while one is in flight, so
   // the previous task is cancelled rather than left to collide.
@@ -59,9 +68,26 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
     setLoading(true);
     setError(null);
 
-    // `withCredentials` is off deliberately: the document URL is pre-signed, so
-    // it carries its own authorisation and must not also ride the session cookie.
-    const task = pdfjs.getDocument({ url, withCredentials: false });
+    // Two kinds of URL arrive here, and they authorise in opposite ways.
+    //
+    // A real object-storage URL is pre-signed: the signature *is* the
+    // authorisation, and attaching our own credentials to a cross-origin request
+    // would break the CORS preflight for no gain.
+    //
+    // A local or otherwise unsignable backend cannot do that, so `file_access`
+    // returns an API path instead (`is_proxied`). That route is behind the normal
+    // session guard, so it needs the bearer token - and without it pdf.js gets a
+    // 401, which this component's own error mapping reports as "the document link
+    // has expired". Which is doubly misleading: nothing was signed, so nothing
+    // could expire, and reloading the page - what the message tells you to do -
+    // produces another 401.
+    const proxied = url.startsWith('/api/');
+    const token = proxied ? getAccessToken() : null;
+    const task = pdfjs.getDocument({
+      url,
+      withCredentials: proxied,
+      ...(token ? { httpHeaders: { Authorization: `Bearer ${token}` } } : {}),
+    });
 
     task.promise.then(
       (doc) => {
@@ -76,10 +102,16 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
       (caught: unknown) => {
         if (cancelled) return;
         setLoading(false);
+        // "Expired" is only true of a signed URL. On the proxied route the same
+        // 401 means the session lapsed, and telling the reader to reload would
+        // send them round the loop again.
+        const denied = caught instanceof Error && /expired|403|401/i.test(caught.message);
         setError(
-          caught instanceof Error && /expired|403|401/i.test(caught.message)
-            ? 'The document link has expired. Reload the page to get a fresh one.'
-            : 'This document could not be displayed.',
+          !denied
+            ? 'This document could not be displayed.'
+            : proxied
+              ? 'Your session has expired. Sign in again to view this document.'
+              : 'The document link has expired. Reload the page to get a fresh one.',
         );
       },
     );
@@ -97,6 +129,24 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
     // `focusToken` is in the dependency list so clicking the same citation twice
     // still brings the viewer back to it.
   }, [page, focusToken]);
+
+  // --------------------------------------------------------------- centring
+  //
+  // Changing the page is not the same as showing the highlight. The canvas sits
+  // in a `max-h-[70vh] overflow-auto` box, so a clause near the top of page 9 is
+  // drawn correctly and then left off-screen if the reader was scrolled down.
+  // The prop above promised this ("re-centres the viewer") and only ever paged.
+  //
+  // Deferred to the next frame because the page render is async: at the moment
+  // `current` changes the highlight for the new page does not exist yet, and
+  // scrolling to a stale node would be worse than not scrolling at all.
+  useEffect(() => {
+    if (!highlights.length) return;
+    const frame = requestAnimationFrame(() => {
+      firstHighlight.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [current, focusToken, size, highlights.length]);
 
   // ----------------------------------------------------------------- render
   const renderPage = useCallback(async () => {
@@ -183,12 +233,12 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
   return (
     <div
       ref={containerRef}
-      className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
+      className="overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-sm"
     >
       {/* The toolbar wraps rather than scrolls: on a phone the page controls end up
           on one line and the zoom controls on the next, which is fine - both stay
           reachable. A horizontally scrolling toolbar hides its right-hand end. */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-3 py-2">
         <div className="flex items-center gap-1">
           <ViewerButton
             label="Previous page"
@@ -222,7 +272,7 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
                   'rounded-full px-2 py-1 text-xs font-medium ring-1 ring-inset transition',
                   pageNumber === current
                     ? 'bg-blue-600 text-white ring-blue-600'
-                    : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-100',
+                    : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 ring-slate-200 hover:bg-slate-100',
                 ].join(' ')}
               >
                 p{pageNumber}
@@ -253,7 +303,7 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
       <div className="max-h-[70vh] overflow-auto bg-slate-100 p-3 xl:max-h-[calc(100vh-14rem)]">
         {loading ? <div className="h-96 animate-pulse rounded-xl bg-slate-200" /> : null}
         <div
-          className="relative mx-auto bg-white shadow-md"
+          className="relative mx-auto bg-white dark:bg-slate-800 shadow-md"
           style={size ? { width: size.width, height: size.height } : undefined}
         >
           <canvas ref={canvasRef} className="block" />
@@ -263,6 +313,11 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
               if (!style) return null;
               return (
                 <span
+                  // The first highlight on the page is the scroll target. Without
+                  // a ref here the viewer changed page and left the box wherever
+                  // the previous scroll position happened to be - which, for a
+                  // clause near the top of a long page, is off-screen.
+                  ref={index === 0 ? firstHighlight : undefined}
                   key={index}
                   className="pointer-events-none absolute rounded-sm bg-amber-300/35 ring-2 ring-amber-500"
                   style={style}
@@ -292,7 +347,7 @@ const ViewerButton = ({
     title={label}
     disabled={disabled}
     onClick={onClick}
-    className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+    className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1.5 text-slate-600 dark:text-slate-300 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
   >
     {children}
   </button>

@@ -81,6 +81,18 @@ class JobListItem(ResponseSchema):
     finished_at: datetime | None = None
     error_message: str | None = None
 
+    # --- provenance ----------------------------------------------------------
+    #: The archive this document was extracted from, when it was. Every document
+    #: in a ZIP is an independent job - its own state, progress, retry and logs -
+    #: and these only let the list *group* them, so a fifty-file archive reads as
+    #: one upload rather than fifty unrelated rows.
+    source_archive_id: uuid.UUID | None = None
+    source_archive_name: str | None = None
+    #: What the user uploaded, before any conversion. The job processes a PDF
+    #: either way; this is how the row can say the source was a Word document.
+    original_file_type: str | None = None
+    original_file_name: str | None = None
+
 
 class ReprocessRequest(BaseSchema):
     """Re-run a contract from a stage."""

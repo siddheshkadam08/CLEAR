@@ -53,8 +53,15 @@ class DocumentProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     category: Mapped[str] = mapped_column(String(100), nullable=False)
-    contract_type: Mapped[str] = mapped_column(extensible_enum(64), nullable=False, index=True)
-    contract_subtype: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: The document type this profile governs. Holds ``AgreementType`` values -
+    #: exactly what ``contracts.agreement_type`` holds.
+    #:
+    #: This column was called ``contract_type``, which made one concept read as two
+    #: and cost a translation layer to bridge: the same vocabulary was
+    #: ``agreement_type`` on the contract, ``contract_type`` here and ``docType`` in
+    #: the retired vendor taxonomy. It is one name now.
+    agreement_type: Mapped[str] = mapped_column(extensible_enum(64), nullable=False, index=True)
+    agreement_subtype: Mapped[str | None] = mapped_column(String(64), nullable=True)
     supported_languages: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=lambda: ["en"], server_default=text("'[\"en\"]'::jsonb")
     )
@@ -188,7 +195,7 @@ class DocumentProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
             unique=True,
             postgresql_where=text("is_active = true AND project_id IS NULL AND deleted_at IS NULL"),
         ),
-        Index("ix_document_profiles_type_active", "contract_type", "is_active"),
+        Index("ix_document_profiles_type_active", "agreement_type", "is_active"),
         Index(
             "uq_document_profiles_default",
             "is_default",

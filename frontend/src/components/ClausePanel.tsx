@@ -17,30 +17,29 @@
  *   sees what the model said and what it was changed to.
  */
 
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { FileSearch, FileWarning, ShieldAlert } from 'lucide-react';
 import { useState } from 'react';
 
+import { knowledge as knowledgeApi } from '@/api/endpoints';
+import { errorMessage } from '@/api/errors';
 import type { BoundingBox, Clause, ClauseTab, UUID } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
-import { NoticeBanner } from '@/components/common/Banner';
+import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { selectClasses, SelectChevron } from '@/components/common/Field';
+import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { formatPercent, humanise } from '@/lib/format';
 
 export interface ClausePanelProps {
-  /**
-   * Still required of callers, and currently unread: its only consumer was the
-   * clause review mutation that is commented out further down. Kept so the
-   * prop chain does not have to be rebuilt when that block comes back.
-   */
+  /** The contract these clauses belong to; the review mutation posts against it. */
   contractId: UUID;
   tab: ClauseTab;
   onShowEvidence: (boxes: BoundingBox[], page?: number | null) => void;
 }
 
-export function ClausePanel({ tab, onShowEvidence }: ClausePanelProps) {
+export function ClausePanel({ contractId, tab, onShowEvidence }: ClausePanelProps) {
   if (tab.is_missing || tab.clauses.length === 0) {
     return (
       <EmptyState
@@ -64,6 +63,7 @@ export function ClausePanel({ tab, onShowEvidence }: ClausePanelProps) {
       {tab.clauses.map((clause) => (
         <ClauseCard
           key={clause.id}
+          contractId={contractId}
           clause={clause}
           tab={tab}
           onShowEvidence={onShowEvidence}
@@ -74,20 +74,47 @@ export function ClausePanel({ tab, onShowEvidence }: ClausePanelProps) {
 }
 
 function ClauseCard({
+  contractId,
   clause,
   tab,
   onShowEvidence,
 }: {
+  contractId: UUID;
   clause: Clause;
   tab: ClauseTab;
   onShowEvidence: (boxes: BoundingBox[], page?: number | null) => void;
 }) {
+  const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
+  const [note, setNote] = useState('');
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const review = useMutation({
+    mutationFn: (status: string) =>
+      knowledgeApi.reviewClause(contractId, clause.id, {
+        review_status: status,
+        attributes: Object.keys(draft).length ? { ...clause.attributes, ...draft } : undefined,
+        note: note.trim() || undefined,
+      }),
+    onSuccess: async () => {
+      setDraft({});
+      setNote('');
+      setSaveError(null);
+      // Both caches: the clause list the panel renders, and the contract row,
+      // whose needs-review flag the decision may have just cleared.
+      await queryClient.invalidateQueries({ queryKey: ['knowledge', contractId] });
+      await queryClient.invalidateQueries({ queryKey: ['contract', contractId] });
+    },
+    onError: (caught) => setSaveError(errorMessage(caught)),
+  });
 
   const attributes = { ...clause.attributes, ...draft };
   const flagged = isHighlighted(attributes, tab.highlight_when);
   const confidence = clause.provenance?.confidence;
+  // An edited attribute or a note turns "Approve" into "Save correction": the
+  // reviewer has changed something, so recording a plain approval would lose it.
+  const dirty = Object.keys(draft).length > 0 || note.trim().length > 0;
 
   const primary = tab.primary_fields.length
     ? tab.primary_fields
@@ -104,7 +131,7 @@ function ClauseCard({
                 {clause.clause_number}
               </span>
             ) : null}
-            <span className="font-semibold text-slate-900">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">
               {clause.title ?? clause.section_title ?? tab.label}
             </span>
           </div>
@@ -247,14 +274,6 @@ function ClauseCard({
             {clause.text}
           </blockquote>
 
-          {/* Disabled, not deleted. This block and the one below are the whole
-          clause review write path - approve, reject and correct. Restoring them
-          also needs the `review` mutation over `knowledgeApi.reviewClause`, the
-          `note` and `saveError` state, `dirty`, and the `ErrorBanner` and
-          `inputClasses` imports; all were removed because nothing referenced
-          them once this was commented out and the production typecheck rejects
-          unused declarations. They are in the commit that disabled this block.
-          The backend endpoint is untouched and still works.
           <label className="block space-y-1.5">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Review note (optional)
@@ -268,9 +287,9 @@ function ClauseCard({
             />
           </label>
 
-          {saveError ? <ErrorBanner message={saveError} /> : null} */}
+          {saveError ? <ErrorBanner message={saveError} /> : null}
 
-          {/* <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               busy={review.isPending}
@@ -298,7 +317,7 @@ function ClauseCard({
                 Discard changes
               </Button>
             ) : null}
-          </div> */}
+          </div>
         </div>
       ) : null}
     </Card>
@@ -321,7 +340,7 @@ function AttributeValue({
       <dt className="text-xs font-semibold uppercase tracking-wider text-slate-400">
         {humanise(field)}
       </dt>
-      <dd className="mt-1 text-sm text-slate-900">
+      <dd className="mt-1 text-sm text-slate-900 dark:text-slate-100">
         {onToggle ? (
           <label className="inline-flex items-center gap-2">
             <input
@@ -355,7 +374,7 @@ function renderValue(value: unknown) {
         {value.map((entry, index) => (
           <span
             key={index}
-            className="rounded-full bg-white px-2.5 py-0.5 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-200"
+            className="rounded-full bg-white dark:bg-slate-800 px-2.5 py-0.5 text-xs font-medium text-slate-600 dark:text-slate-300 ring-1 ring-inset ring-slate-200"
           >
             {typeof entry === 'string' ? humanise(entry) : JSON.stringify(entry)}
           </span>

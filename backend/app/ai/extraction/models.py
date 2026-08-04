@@ -326,6 +326,19 @@ class CategoryOutcome:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    #: Tokens of retrieved evidence in this call's prompt - the part that is
+    #: genuinely about *this* document. `evidence_chunks` counts passages; this
+    #: sizes them.
+    evidence_tokens: int = 0
+    #: `input_tokens - evidence_tokens`: system prompt, schema, synonyms,
+    #: standard text and party context. Identical on every clause call for a
+    #: given agreement type, so it is re-sent once per category per document.
+    #:
+    #: Measured, not assumed. This is the number that decides whether batching
+    #: clause calls is worth doing: if scaffolding is a small fraction of the
+    #: prompt there is nothing to win, and if it dominates, N calls are paying
+    #: for the same tokens N times.
+    repeated_tokens: int = 0
     cost_usd: float = 0.0
     latency_ms: int = 0
     model: str | None = None
@@ -343,6 +356,8 @@ class CategoryOutcome:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
+            "evidence_tokens": self.evidence_tokens,
+            "repeated_tokens": self.repeated_tokens,
             "cost_usd": round(self.cost_usd, 6),
             "latency_ms": self.latency_ms,
             "model": self.model,

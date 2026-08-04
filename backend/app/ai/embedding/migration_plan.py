@@ -329,7 +329,12 @@ def downgrade() -> None:
 
 
 def versions_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "migrations" / "versions"
+    # parents[3] is the backend root: this file is app/ai/embedding/…, so
+    # parents[2] lands on `app/` and pointed at `app/migrations/versions`, which
+    # does not exist. The failure was doubly confusing - the missing directory
+    # made `current_head()` glob nothing and fall back to "0001", so the
+    # generator both numbered the revision wrong and then crashed writing it.
+    return Path(__file__).resolve().parents[3] / "migrations" / "versions"
 
 
 def current_head() -> str:

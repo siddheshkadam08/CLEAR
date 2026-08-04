@@ -18,8 +18,12 @@ import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom';
 
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Layout } from '@/components/layout/Layout';
-import { useAuth } from '@/lib/auth';
+import { useAuth, useHasPermissionAnywhere } from '@/lib/auth';
 import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
+// Static, like the two above: this is the only screen a user with
+// `must_change_password` can reach, so a failed lazy chunk would strand them with
+// no way to clear the flag and no way to use anything else.
+import { ChangePasswordPage } from '@/pages/ChangePasswordPage';
 import { LoginPage } from '@/pages/LoginPage';
 
 const AdminProjectsPage = lazy(() =>
@@ -27,6 +31,9 @@ const AdminProjectsPage = lazy(() =>
 );
 const EvaluationPage = lazy(() =>
   import('@/pages/admin/EvaluationPage').then((m) => ({ default: m.EvaluationPage })),
+);
+const AuditPage = lazy(() =>
+  import('@/pages/admin/AuditPage').then((m) => ({ default: m.AuditPage })),
 );
 const AdminUsersPage = lazy(() =>
   import('@/pages/admin/AdminUsersPage').then((m) => ({ default: m.AdminUsersPage })),
@@ -49,9 +56,15 @@ const CopilotPage = lazy(() =>
 const DashboardPage = lazy(() =>
   import('@/pages/DashboardPage').then((m) => ({ default: m.DashboardPage })),
 );
+const ExportsPage = lazy(() =>
+  import('@/pages/ExportsPage').then((m) => ({ default: m.ExportsPage })),
+);
 const JobsPage = lazy(() => import('@/pages/JobsPage').then((m) => ({ default: m.JobsPage })));
 const DocPipelinePage = lazy(() =>
   import('@/pages/DocPipelinePage').then((m) => ({ default: m.DocPipelinePage })),
+);
+const PortfolioPage = lazy(() =>
+  import('@/pages/PortfolioPage').then((m) => ({ default: m.PortfolioPage })),
 );
 const SearchPage = lazy(() =>
   import('@/pages/SearchPage').then((m) => ({ default: m.SearchPage })),
@@ -111,7 +124,22 @@ const ProtectedRoute = () => {
     );
   }
   if (!user) return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+
+  // A forced password change is a hard gate, mirroring the server's.
+  // `require_password_current` rejects every endpoint except change-password and
+  // logout, so without this redirect a provisioned user signs in successfully and
+  // then meets a 403 on whatever screen they land on - which reads as a broken
+  // deployment rather than an action they need to take.
+  if (user.must_change_password && location.pathname !== '/change-password') {
+    return <Navigate to="/change-password" replace />;
+  }
   return <Outlet />;
+};
+
+/** Anyone holding `audit:read` on a project, plus administrators. */
+const AuditRoute = () => {
+  const allowed = useHasPermissionAnywhere('audit:read');
+  return allowed ? <Outlet /> : <Navigate to="/" replace />;
 };
 
 const AdminRoute = () => {
@@ -157,6 +185,10 @@ export default function App() {
           in a loop. */}
       <Route path="/auth/callback" element={<AuthCallbackPage />} />
       <Route element={<ProtectedRoute />}>
+        {/* Outside AppShell: a user who must change their password cannot use the
+            navigation the shell renders, and showing it would offer links that
+            all answer 403. */}
+        <Route path="change-password" element={<ChangePasswordPage />} />
         <Route element={<AppShell />}>
           <Route index element={<DashboardPage />} />
           <Route element={<MemberRoute />}>
@@ -164,11 +196,21 @@ export default function App() {
           </Route>
           <Route path="contracts" element={<ContractsPage />} />
           <Route path="contracts/:contractId" element={<ContractDetailPage />} />
+          <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="copilot" element={<CopilotPage />} />
           <Route path="jobs" element={<JobsPage />} />
+          {/* Not admin-gated: the endpoint scopes rows to the requester, so this
+              screen only ever shows the caller their own exports. */}
+          <Route path="exports" element={<ExportsPage />} />
           <Route path="doc-pipeline" element={<DocPipelinePage />} />
           <Route path="alerts" element={<AlertsPage />} />
+          {/* Not under AdminRoute: AUDIT_READ belongs to Project Manager as
+              well, so admin-only here would withdraw a permission the seeded
+              roles grant. The endpoint enforces it and scopes the rows. */}
+          <Route element={<AuditRoute />}>
+            <Route path="admin/audit" element={<AuditPage />} />
+          </Route>
           <Route element={<AdminRoute />}>
             <Route path="clause-master" element={<ClauseMasterPage />} />
             <Route path="admin/projects" element={<AdminProjectsPage />} />

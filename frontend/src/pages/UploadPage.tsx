@@ -35,7 +35,8 @@ import { Field, selectClasses, SelectChevron } from '@/components/common/Field';
 import { formatBytes } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
-type ItemState = 'pending' | 'uploading' | 'done' | 'duplicate' | 'error';
+/** `expanded` is a ZIP that became several contracts rather than one. */
+type ItemState = 'pending' | 'uploading' | 'done' | 'duplicate' | 'error' | 'expanded';
 
 interface UploadItem {
   id: string;
@@ -47,8 +48,26 @@ interface UploadItem {
   message?: string;
 }
 
-const ACCEPTED = ['application/pdf', 'image/png', 'image/jpeg', 'image/tiff'];
-const ACCEPT_ATTR = '.pdf,.png,.jpg,.jpeg,.tif,.tiff';
+/**
+ * What the backend accepts. Kept in step with `ALLOWED_FILE_TYPES`.
+ *
+ * Browsers are inconsistent about the MIME type they report for these - a .doc
+ * can arrive as `application/msword`, `application/octet-stream`, or an empty
+ * string depending on the OS and how the file was created - so the check below
+ * treats an unrecognised-but-present type as "let the server decide" rather than
+ * rejecting client-side. The server sniffs magic bytes and is the authority.
+ */
+const ACCEPTED = [
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/octet-stream',
+];
+const ACCEPT_ATTR = '.pdf,.doc,.docx,.zip';
+/** Extensions are the reliable signal; MIME type is advisory. */
+const ACCEPTED_EXTENSIONS = ['pdf', 'doc', 'docx', 'zip'];
 const MAX_BYTES = 100 * 1024 * 1024;
 
 export function UploadPage() {
@@ -68,7 +87,15 @@ export function UploadPage() {
     const next: UploadItem[] = [];
     for (const file of Array.from(files)) {
       const tooBig = file.size > MAX_BYTES;
-      const wrongType = file.type ? !ACCEPTED.includes(file.type) : false;
+      // Extension first: it is what the user controls and what the server keys
+      // off. The MIME check only rejects a type we positively recognise as
+      // something else, so a .docx reported as `application/octet-stream` - which
+      // happens routinely - still reaches the server.
+      const extension = file.name.includes('.')
+        ? file.name.split('.').pop()!.toLowerCase()
+        : '';
+      const wrongType =
+        !ACCEPTED_EXTENSIONS.includes(extension) || (file.type ? !ACCEPTED.includes(file.type) : false);
       next.push({
         // Name plus size plus index: two files can share a name, and React needs
         // a stable key that survives the list being rewritten mid-upload.
@@ -78,7 +105,7 @@ export function UploadPage() {
         message: tooBig
           ? `Too large (${formatBytes(file.size)}). The limit is ${formatBytes(MAX_BYTES)}.`
           : wrongType
-            ? 'Unsupported file type. Upload a PDF or a scanned image.'
+            ? 'Unsupported file type. Upload a PDF, Word document (.doc, .docx) or a .zip of them.'
             : undefined,
       });
     }
@@ -97,6 +124,12 @@ export function UploadPage() {
       current.map((row) => (row.state === 'pending' ? { ...row, state: 'uploading' } : row)),
     );
 
+    // Set from the upload outcome below and read after the mutation settles.
+    // `items` is stale inside this closure - the setItems calls are queued, not
+    // applied - so deciding whether to navigate from it would read the state as
+    // it was before the upload.
+    let allSucceeded = false;
+
     try {
       // One request for the whole batch: the endpoint takes repeated `files` parts
       // and reports a per-file outcome, so a duplicate in the middle does not
@@ -108,6 +141,15 @@ export function UploadPage() {
       );
 
       const byName = new Map(result.files.map((entry) => [entry.file_name, entry]));
+      // "Nothing was refused", not "accepted === files sent". One ZIP can produce
+      // five documents, so `accepted` counts documents while `queue.length`
+      // counts uploads and the two legitimately differ. Comparing them would
+      // silently never navigate after an archive upload.
+      //
+      // Duplicates block navigation too: the duplicate notice and its link to the
+      // existing contract live only on this screen.
+      allSucceeded = result.rejected === 0 && result.duplicates === 0 && result.accepted > 0;
+
       setItems((current) =>
         current.map((row) => {
           if (row.state !== 'uploading') return row;
@@ -124,6 +166,11 @@ export function UploadPage() {
                 outcome.message ??
                 'This document is already in the project. It was not uploaded again.',
             };
+          }
+          // An archive has no contract of its own - it became several. Its row
+          // reports how many, and which members were left out.
+          if (outcome.status === 'expanded') {
+            return { ...row, state: 'expanded', message: outcome.message ?? undefined };
           }
           if (outcome.contract_id) {
             return { ...row, state: 'done', contractId: outcome.contract_id };
@@ -150,6 +197,24 @@ export function UploadPage() {
     await queryClient.invalidateQueries({ queryKey: ['contracts'] });
     await queryClient.invalidateQueries({ queryKey: ['jobs'] });
     await queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+
+    // Go to the processing screen once the upload is genuinely clean. Processing
+    // begins immediately, so leaving the user on a form whose work is finished
+    // means the run they just started is happening on a page they are not
+    // looking at.
+    //
+    // Only when *everything* succeeded. This screen is the sole report of what
+    // went wrong - a rejection reason, or which file was a duplicate of an
+    // existing contract - and none of it exists on /jobs, because a file that
+    // was refused never became a job. Navigating on a partial batch would
+    // discard that. The "Watch processing" button stays for exactly that case,
+    // so the mixed outcome is a choice rather than a dead end.
+    //
+    // After the invalidations, so /jobs renders the new rows instead of a
+    // cached list that predates them.
+    if (allSucceeded) {
+      navigate('/jobs');
+    }
   }
 
   const uploaded = items.filter((item) => item.state === 'done');
@@ -159,7 +224,7 @@ export function UploadPage() {
   if (projects.length === 0) {
     return (
       <div className="space-y-5">
-        {/* <PageHeader title="Upload contracts" subtitle="Add documents to a project." /> */}
+        <PageHeader title="Upload contracts" subtitle="Add documents to a project." />
         <EmptyState
           icon={FolderOpen}
           title="You are not a member of any project"
@@ -188,7 +253,7 @@ export function UploadPage() {
           <Card>
             <SectionHeader
               title="Files"
-              subtitle="PDF or scanned image. Several at once is fine."
+              subtitle="PDF, Word (.doc, .docx) or a .zip of them. Several at once is fine."
               icon={UploadCloud}
             />
 
@@ -219,11 +284,11 @@ export function UploadPage() {
               <div className="rounded-2xl bg-blue-100 p-4 text-blue-600">
                 <CloudUpload className="h-8 w-8" />
               </div>
-              <p className="mt-4 text-base font-semibold text-slate-900">
+              <p className="mt-4 text-base font-semibold text-slate-900 dark:text-slate-100">
                 Drop contracts here, or tap to browse
               </p>
               <p className="mt-1 text-sm text-slate-500">
-                PDF or scanned image, up to {formatBytes(MAX_BYTES)} each
+                PDF, Word or ZIP, up to {formatBytes(MAX_BYTES)} each
               </p>
               <input
                 ref={inputRef}
@@ -341,10 +406,13 @@ export function UploadPage() {
 // Row
 // =============================================================================
 const STATE_STYLES: Record<ItemState, { ring: string; note: string }> = {
-  pending: { ring: 'border-slate-200', note: 'text-slate-500' },
+  pending: { ring: 'border-slate-200 dark:border-slate-700', note: 'text-slate-500' },
   uploading: { ring: 'border-blue-200 bg-blue-50/40', note: 'text-blue-600' },
   done: { ring: 'border-emerald-200 bg-emerald-50/40', note: 'text-emerald-700' },
   duplicate: { ring: 'border-amber-200 bg-amber-50/40', note: 'text-amber-700' },
+  // Successful, but not a contract of its own - the documents it produced are
+  // the outcome, so it reads as informational rather than as a green tick.
+  expanded: { ring: 'border-blue-200 bg-blue-50/40', note: 'text-blue-700' },
   error: { ring: 'border-rose-200 bg-rose-50/40', note: 'text-rose-700' },
 };
 
@@ -378,7 +446,7 @@ function UploadRow({
 
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-3">
-          <p className="truncate text-sm font-medium text-slate-900">{item.file.name}</p>
+          <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">{item.file.name}</p>
           <span className="shrink-0 text-xs text-slate-500">{formatBytes(item.file.size)}</span>
         </div>
         {/* A duplicate is a normal outcome, not a failure: the same contract

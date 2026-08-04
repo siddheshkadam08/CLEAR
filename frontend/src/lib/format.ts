@@ -5,52 +5,66 @@
  * as sloppiness in a product whose whole claim is precision.
  */
 
-import { differenceInDays, format, fromUnixTime, parseISO } from 'date-fns';
+import { differenceInDays, format, fromUnixTime, isValid, parseISO } from 'date-fns';
 
-export function formatDate(value?: string | number | null): string {
-  if (value === null || value === undefined || value === '') return '—';
-  try {
-    const num = Number(value);
-    const date = Number.isFinite(num) && String(value).match(/^\d+$/)
-      ? fromUnixTime(num)
-      : parseISO(String(value));
-    return format(date, 'dd-MM-yyyy');
-  } catch {
-    return String(value);
-  }
-}
+/** A timestamp as it can arrive from the API. */
+export type DateInput = string | number | null | undefined;
 
-export function formatDateTime(value?: string | null): string {
-  if (!value) return '—';
-  try {
-    return format(parseISO(value), 'd MMM yyyy, HH:mm');
-  } catch {
-    return value;
-  }
-}
-
-export function formatDateTimeFull(value?: string | number | null): string {
-  if (value === null || value === undefined || value === '') return '—';
-  try {
-    const num = Number(value);
-    const date = Number.isFinite(num) ? fromUnixTime(num) : parseISO(String(value));
-    return format(date, 'dd-MM-yyyy hh:mm:ss a');
-  } catch {
-    return String(value);
-  }
-}
-
-export function daysUntil(value?: string | number | null): number | null {
+/**
+ * Parse a timestamp in either shape the API sends, or return null.
+ *
+ * The API is not consistent, and cannot easily be made so: Pydantic serialises
+ * some `datetime` fields as ISO strings and others as **fractional** Unix
+ * seconds - `1785762288.750538` - depending on the schema they pass through.
+ * A single job row carries both.
+ *
+ * Every date helper below shares this, because the previous per-function
+ * attempts disagreed in ways that only showed up on certain fields:
+ *
+ * - `formatDateTime` handled ISO only, so an epoch fell to its catch and the
+ *   raw number was printed. That is the "started 1785762288.750538" on /jobs -
+ *   and the same row's "finished" looked right, because it happened to be
+ *   rendered by a different helper.
+ * - `formatDate` and `daysUntil` tested `/^\d+$/`, which rejects the fractional
+ *   part, so those same epochs fell through to `parseISO` and failed too.
+ *
+ * Returning null rather than throwing lets each caller choose its own fallback,
+ * and `isValid` is checked here so a malformed value cannot reach `format()`,
+ * which throws on an invalid date rather than returning a marker.
+ */
+function toDate(value: DateInput): Date | null {
   if (value === null || value === undefined || value === '') return null;
-  try {
-    const num = Number(value);
-    const date = Number.isFinite(num) && String(value).match(/^\d+$/)
-      ? fromUnixTime(num)
+  // A number, or a string that is entirely numeric - `Number('')` is 0 and
+  // `Number('2026-01-02')` is NaN, so both are excluded by construction.
+  const numeric = typeof value === 'number' ? value : Number(value);
+  const date =
+    Number.isFinite(numeric) && String(value).trim() !== ''
+      ? fromUnixTime(numeric)
       : parseISO(String(value));
-    return differenceInDays(date, new Date());
-  } catch {
-    return null;
-  }
+  return isValid(date) ? date : null;
+}
+
+export function formatDate(value?: DateInput): string {
+  const date = toDate(value);
+  if (!date) return value === null || value === undefined || value === '' ? '—' : String(value);
+  return format(date, 'dd-MM-yyyy');
+}
+
+export function formatDateTime(value?: DateInput): string {
+  const date = toDate(value);
+  if (!date) return value === null || value === undefined || value === '' ? '—' : String(value);
+  return format(date, 'd MMM yyyy, HH:mm');
+}
+
+export function formatDateTimeFull(value?: DateInput): string {
+  const date = toDate(value);
+  if (!date) return value === null || value === undefined || value === '' ? '—' : String(value);
+  return format(date, 'dd-MM-yyyy hh:mm:ss a');
+}
+
+export function daysUntil(value?: DateInput): number | null {
+  const date = toDate(value);
+  return date ? differenceInDays(date, new Date()) : null;
 }
 
 export function formatMoney(value?: number | null, currency?: string | null): string {

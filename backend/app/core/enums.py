@@ -90,8 +90,32 @@ class ProjectStatus(StrEnum):
 # Documents & processing
 # =============================================================================
 class FileType(StrEnum):
+    """What the user uploaded.
+
+    ``ZIP`` is deliberately absent: an archive is a delivery mechanism, not a
+    document. It never becomes a contract - it is unpacked into one contract per
+    supported member - so a contract row can never carry it. Accepting it at the
+    upload boundary is handled separately, in ``ArchiveType``.
+    """
+
     PDF = "pdf"
+    DOC = "doc"
     DOCX = "docx"
+
+    @property
+    def needs_pdf_conversion(self) -> bool:
+        """Word documents are converted before the pipeline sees them.
+
+        The pipeline is PDF-only by design: evidence highlighting positions a box
+        against a rendered page, and a page only exists once there is a PDF.
+        """
+        return self in {FileType.DOC, FileType.DOCX}
+
+
+class ArchiveType(StrEnum):
+    """Container formats accepted at upload but never stored as a contract."""
+
+    ZIP = "zip"
 
 
 class ContractStatus(StrEnum):
@@ -103,6 +127,10 @@ class ContractStatus(StrEnum):
     FAILED = "failed"
     NEEDS_REVIEW = "needs_review"
     ARCHIVED = "archived"
+    #: The original was stored but could not be turned into a PDF, so the pipeline
+    #: never started. Distinct from FAILED, which means processing ran and broke:
+    #: the remedy here is a different source file, not a retry.
+    CONVERSION_FAILED = "conversion_failed"
 
 
 class JobState(StrEnum):
@@ -194,6 +222,13 @@ STAGE_ORDER: tuple[PipelineStage, ...] = (
     PipelineStage.DOCPIPELINE,
     PipelineStage.EXTRACTION,
     PipelineStage.EMBEDDING,
+    # Reinstated. It was dropped with the rest of the old pipeline, but unlike
+    # those it had not been replaced: the derived graph edges it writes into
+    # `knowledge_relationships` are what `RetrievalEngine._expand_graph`
+    # traverses, and nothing else produces them. Retrieval went on working and
+    # quietly saw a thinner graph, which is the kind of regression that shows up
+    # as slightly worse answers rather than an error.
+    PipelineStage.INDEXING,
 )
 
 #: Stage → the job state held while that stage runs.
@@ -275,6 +310,10 @@ class StageStatus(StrEnum):
 
 
 class JobPriority(StrEnum):
+    #: Declaration order is load-bearing. A native Postgres enum sorts by the order
+    #: its labels were declared, not alphabetically, so ``ORDER BY priority`` on the
+    #: stage-queue table yields high → normal → low with no CASE expression and no
+    #: separate rank column. Reordering these members reorders the queue.
     HIGH = "high"
     NORMAL = "normal"
     LOW = "low"
@@ -283,6 +322,21 @@ class JobPriority(StrEnum):
     def queue_weight(self) -> int:
         """BullMQ priority: lower number = higher priority."""
         return {JobPriority.HIGH: 1, JobPriority.NORMAL: 5, JobPriority.LOW: 10}[self]
+
+
+class StageQueueState(StrEnum):
+    """Lifecycle of one row in the Postgres-backed stage queue.
+
+    ``claimed`` is a lease, not a lock: the claiming transaction commits
+    immediately so the row is not holding a connection while the stage runs, which
+    can take minutes. Recovery is therefore by timeout - the scheduler returns rows
+    whose ``claimed_at`` has aged past the lease to ``pending``.
+    """
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    DONE = "done"
+    DEAD = "dead"
 
 
 class ArtifactKind(StrEnum):

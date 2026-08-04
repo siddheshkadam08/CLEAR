@@ -399,6 +399,9 @@ async def _enqueue_reprocess(
 
     queue = get_queue_client()
     try:
+        # `db=` so a database-backed driver enqueues inside this transaction. The
+        # job above is flushed, not committed, and its own session would not see
+        # it - the insert would fail on the foreign key. Broker drivers ignore it.
         await queue.enqueue(
             StageMessage(
                 job_id=job.id,
@@ -407,7 +410,8 @@ async def _enqueue_reprocess(
                 stage=from_stage,
                 priority=priority,
                 options=options,
-            )
+            ),
+            db=db,
         )
     finally:
         await queue.close()
@@ -441,10 +445,15 @@ def _job_response(job: Any, *, stages: list[Any] | None = None) -> JobResponse:
 
 def _job_list_item(job: Any) -> JobListItem:
     error = job.error if isinstance(job.error, dict) else {}
+    # Already eager-loaded by `filtered_query`, so reading more of it here costs
+    # no extra query - and a lazy load would raise `MissingGreenlet` on an async
+    # session rather than merely being slow.
+    contract = getattr(job, "contract", None)
+    original_type = getattr(contract, "original_file_type", None)
     return JobListItem(
         id=job.id,
         contract_id=job.contract_id,
-        contract_title=getattr(getattr(job, "contract", None), "title", None),
+        contract_title=getattr(contract, "title", None),
         project_id=job.project_id,
         state=job.state,
         current_stage=job.current_stage,
@@ -454,6 +463,10 @@ def _job_list_item(job: Any) -> JobListItem:
         created_at=job.created_at,
         finished_at=getattr(job, "finished_at", None),
         error_message=error.get("message"),
+        source_archive_id=getattr(contract, "source_archive_id", None),
+        source_archive_name=getattr(contract, "source_archive_name", None),
+        original_file_type=str(original_type) if original_type is not None else None,
+        original_file_name=getattr(contract, "original_file_name", None),
     )
 
 

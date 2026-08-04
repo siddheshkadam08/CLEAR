@@ -57,7 +57,20 @@ _LIST_MARKERS = ("•", "◦", "▪", "-", "–", "*")
 
 @dataclass(slots=True)
 class _Line:
-    """One text line with its geometry - the unit this adapter reasons about."""
+    """One text line with its geometry - the unit this adapter reasons about.
+
+    ``page_width`` / ``page_height`` travel with every line, and must. The viewer
+    scales a highlight by ``x / page_width``, so a box without them cannot be
+    drawn - and because ``Coordinates.to_dict`` serialises with
+    ``exclude_none=True``, the keys do not arrive as null, they are absent
+    entirely. The box then validates as a ``BoundingBox`` (both fields are
+    optional there), reaches the browser intact, and silently renders nothing.
+
+    That was the bug: for a PyMuPDF-parsed document the Evidence button appeared,
+    the pane switched, the viewer jumped to the right page, and no highlight was
+    drawn. Carrying the dimensions on the line is what makes it structural rather
+    than something each call site has to remember.
+    """
 
     text: str
     size: float
@@ -65,6 +78,8 @@ class _Line:
     bbox: tuple[float, float, float, float]
     page: int
     order: int
+    page_width: float | None = None
+    page_height: float | None = None
 
 
 class PyMuPdfParser(IDocumentParser):
@@ -339,6 +354,8 @@ class PyMuPdfParser(IDocumentParser):
                         bbox=bbox,  # type: ignore[arg-type]
                         page=page_number,
                         order=order,
+                        page_width=page_width,
+                        page_height=page_height,
                     )
                 )
                 blocks.append(
@@ -483,6 +500,8 @@ class PyMuPdfParser(IDocumentParser):
                 ),
                 page=page_number,
                 order=existing_lines + index,
+                page_width=page_width,
+                page_height=page_height,
             )
             for index, item in enumerate(results)
         ]
@@ -639,12 +658,27 @@ class PyMuPdfParser(IDocumentParser):
         return None
 
     def _coords_from_line(self, line: _Line) -> Coordinates | None:
+        """The line's box, *with* its page dimensions.
+
+        The dimensions are what makes the box drawable: `PdfViewer` scales a
+        highlight by ``x / page_width``, and returns null rather than guessing when
+        that is missing. This method used to omit them - and because
+        ``Coordinates.to_dict`` serialises with ``exclude_none=True``, they were not
+        even present as nulls to notice. The box validated as a `BoundingBox`
+        (both fields optional there), travelled through chunking into every clause,
+        risk and date, reached the browser, and drew nothing.
+
+        Its sibling `_coords` always passed them; this path is every paragraph,
+        list item, heading and signature, so it is the one that mattered.
+        """
         return Coordinates(
             page_number=line.page,
             x=line.bbox[0],
             y=line.bbox[1],
             width=max(line.bbox[2] - line.bbox[0], 0),
             height=max(line.bbox[3] - line.bbox[1], 0),
+            page_width=line.page_width,
+            page_height=line.page_height,
         )
 
     @staticmethod

@@ -385,6 +385,10 @@ def _snapshot_configuration() -> dict[str, Any]:
         "min_similarity_document": retrieval.min_similarity_document,
         "min_similarity_clause": retrieval.min_similarity_clause,
         "min_similarity_chunk": retrieval.min_similarity_chunk,
+        # The fields above are `None` unless that level was explicitly configured,
+        # so on their own they no longer say what the run actually used. These are
+        # the resolved floors - the numbers retrieval filtered on.
+        "effective_min_similarity": retrieval.effective_similarity_floors(),
         "answer_similarity_threshold": retrieval.answer_similarity_threshold,
         "document_type_confidence_threshold": retrieval.document_type_confidence_threshold,
         "copilot_top_k": retrieval.copilot_top_k,

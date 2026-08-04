@@ -20,7 +20,11 @@ in a hundred-file upload should not fail the other ninety-seven.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import io
 import uuid
+import zipfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics
 from app.core.config import get_settings
 from app.core.enums import (
+    ArchiveType,
     AuditAction,
     ContractStatus,
     FileType,
@@ -37,6 +42,8 @@ from app.core.enums import (
     PipelineStage,
 )
 from app.core.errors import (
+    ArchiveError,
+    ConversionError,
     ErrorCode,
     FileTooLargeError,
     UnsupportedFileTypeError,
@@ -52,25 +59,67 @@ from app.repositories.contract import ContractRepository, ContractVersionReposit
 from app.repositories.processing import ProcessingJobRepository
 from app.repositories.project import ProjectActivityRepository, ProjectRepository
 from app.schemas.contract import UploadedFileResult, UploadOptions, UploadResponse
+from app.services import archive as archive_service
 from app.services.audit import AuditService
+from app.services.conversion import DocumentConverter, pdf_name_for
 from app.storage import StorageKey, get_storage
 
 logger = get_logger(__name__)
 
 #: Magic-byte signatures. Extension and client-supplied content type are both
 #: attacker-controlled, so the file's own header is what decides its type.
+_ZIP_HEADERS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 _SIGNATURES: dict[FileType, tuple[bytes, ...]] = {
     FileType.PDF: (b"%PDF-",),
     # DOCX is a ZIP container; the local file header is the only reliable marker.
-    FileType.DOCX: (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
+    FileType.DOCX: _ZIP_HEADERS,
+    # Legacy .doc is an OLE2 compound file. Its magic is shared with .xls and
+    # .ppt, so this proves "an Office binary", not "a Word document" - the
+    # conversion step is what finally rejects a spreadsheet renamed to .doc.
+    FileType.DOC: (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",),
 }
 
 _CONTENT_TYPES: dict[FileType, str] = {
     FileType.PDF: "application/pdf",
+    FileType.DOC: "application/msword",
     FileType.DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
 _HASH_CHUNK = 1024 * 1024
+
+
+def _is_archive(file_name: str) -> bool:
+    extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    return extension in {member.value for member in ArchiveType}
+
+
+def _upload_from_bytes(content: bytes, file_name: str) -> UploadFile:
+    """Wrap in-memory bytes as an `UploadFile`.
+
+    Archive members and converted PDFs arrive as bytes, but everything after this
+    point - validation, hashing, storage - is written against `UploadFile`. Making
+    them look the same is what keeps a document extracted from a ZIP on exactly
+    the same code path as one uploaded directly, rather than a parallel
+    implementation that drifts.
+    """
+    return UploadFile(file=io.BytesIO(content), filename=file_name, size=len(content))
+
+
+@dataclass(slots=True)
+class _ArchiveRef:
+    """The archive a document came out of, carried onto its contract row."""
+
+    id: uuid.UUID
+    name: str
+
+
+@dataclass(slots=True)
+class _PendingUpload:
+    """One document to process, whether uploaded directly or unpacked."""
+
+    file_name: str
+    upload: UploadFile
+    archive: _ArchiveRef | None = None
 
 
 @dataclass(slots=True)
@@ -125,15 +174,40 @@ class UploadService:
         # a stage running minutes later still joins this upload's trace.
         trace = inject_context({})
 
-        for upload in files:
-            with span("upload.file", **{"cip.file_name": upload.filename or "unknown"}):
+        # An archive is expanded before the per-file loop, so each document inside
+        # it takes exactly the same route as a directly uploaded one - its own
+        # hash, duplicate check, contract, job and failure mode. The archive
+        # itself never becomes a contract.
+        expanded, archive_results = await self._expand_archives(files)
+        results.extend(archive_results)
+
+        # Content hashes accepted so far *in this batch*.
+        #
+        # `_process_one` checks for a duplicate against the database, but nothing
+        # in this batch is committed yet - so two byte-identical files arriving
+        # together both pass that check, and the second then violates
+        # `uq_contracts_project_id_sha256_hash` when the session flushes. That
+        # surfaces as a 409 for the *whole* upload: every other document in it is
+        # lost too.
+        #
+        # Rare when a person picks files by hand; routine in a ZIP, where the same
+        # contract filed under two counterparties is an ordinary way to organise
+        # an archive. Tracking them here makes the in-batch case behave exactly
+        # like the cross-batch one - reported as a duplicate, everything else
+        # unaffected.
+        seen_hashes: dict[str, uuid.UUID] = {}
+
+        for item in expanded:
+            with span("upload.file", **{"cip.file_name": item.file_name}):
                 result, message = await self._process_one(
                     project=project,
-                    upload=upload,
+                    upload=item.upload,
                     options=options,
                     actor=actor,
                     ip=ip,
                     trace=trace,
+                    archive=item.archive,
+                    seen_hashes=seen_hashes,
                 )
             results.append(result)
             if message is not None:
@@ -141,12 +215,20 @@ class UploadService:
 
         # Enqueue after every row is persisted. If a worker picked up a job before
         # its contract row was committed it would find nothing to process.
+        #
+        # `db=` hands the driver this transaction. A database-backed queue must
+        # have it: the rows above are flushed, not committed, so a driver opening
+        # its own session cannot see the job and its insert dies on the foreign
+        # key - the file is stored and the upload is rejected. Passing it also
+        # makes the queue row and the job row commit together, so a rollback here
+        # cannot leave work queued for a contract that never existed. Broker
+        # drivers ignore it.
         job_ids: list[uuid.UUID] = []
         if queued:
             await self.db.flush()
             client = get_queue_client()
             try:
-                await client.enqueue_many(queued)
+                await client.enqueue_many(queued, db=self.db)
                 job_ids = [message.job_id for message in queued]
             except Exception as exc:  # noqa: BLE001
                 # Enqueue failure must be visible: mark the jobs FAILED rather than
@@ -207,6 +289,106 @@ class UploadService:
             message=self._summary_message(accepted, duplicates, rejected),
         )
 
+    # =========================================================================
+    # Archives
+    # =========================================================================
+    async def _expand_archives(
+        self, files: list[UploadFile]
+    ) -> tuple[list[_PendingUpload], list[UploadedFileResult]]:
+        """Replace each archive in the batch with the documents inside it.
+
+        Returns the flattened work list plus a result row for every archive that
+        could not contribute anything - a corrupt ZIP, or one holding no supported
+        documents. Those are the only two archive-level outcomes; once a member is
+        extracted its fate is its own.
+        """
+        pending: list[_PendingUpload] = []
+        failures: list[UploadedFileResult] = []
+
+        for upload in files:
+            name = upload.filename or "unnamed"
+            if not _is_archive(name):
+                pending.append(_PendingUpload(file_name=name, upload=upload))
+                continue
+
+            await upload.seek(0)
+            raw = await upload.read()
+            await upload.seek(0)
+
+            # One id per archive, shared by everything inside it, so the UI can
+            # group the batch. There is no archive table - the archive is not an
+            # entity, just a provenance label the contracts carry.
+            archive = _ArchiveRef(id=uuid.uuid4(), name=name)
+
+            try:
+                contents = await asyncio.to_thread(archive_service.extract, raw, archive_name=name)
+            except ArchiveError as exc:
+                logger.info("archive_rejected", file_name=name, reason=exc.code)
+                failures.append(
+                    UploadedFileResult(
+                        file_name=name,
+                        status="rejected",
+                        error_code=exc.code,
+                        message=exc.message,
+                    )
+                )
+                continue
+
+            for member in contents.members:
+                pending.append(
+                    _PendingUpload(
+                        file_name=member.file_name,
+                        upload=_upload_from_bytes(member.content, member.file_name),
+                        archive=archive,
+                    )
+                )
+
+            # The archive always gets a row of its own, even when everything in it
+            # succeeded. The client matches results to the files it sent by name,
+            # and the names it sent are archive names - omitting this leaves it
+            # with an unmatched file it can only report as "no result returned".
+            skipped = ", ".join(f"{n} ({why})" for n, why in contents.ignored[:5])
+            more = "" if len(contents.ignored) <= 5 else f" and {len(contents.ignored) - 5} more"
+            if contents.ignored:
+                logger.info("archive_members_ignored", archive=name, count=len(contents.ignored))
+
+            if not contents.members:
+                # Nothing usable. The reason has to name the files, or the user is
+                # told "no supported documents" about a ZIP they can see has files
+                # in it.
+                failures.append(
+                    UploadedFileResult(
+                        file_name=name,
+                        status="rejected",
+                        error_code=ErrorCode.UNSUPPORTED_FILE_TYPE,
+                        message=(
+                            f"No supported documents in this archive. Skipped: {skipped}{more}."
+                            if contents.ignored
+                            else "This archive is empty."
+                        ),
+                    )
+                )
+            else:
+                count = len(contents.members)
+                note = f"{count} document(s) extracted and queued."
+                if contents.ignored:
+                    note += f" {len(contents.ignored)} ignored: {skipped}{more}."
+                failures.append(
+                    UploadedFileResult(
+                        file_name=name,
+                        status="expanded",
+                        message=note,
+                        # Only when something was left out - the client shows a
+                        # warning on this code, and a clean archive is not a
+                        # warning.
+                        error_code=(
+                            ErrorCode.UNSUPPORTED_FILE_TYPE if contents.ignored else None
+                        ),
+                    )
+                )
+
+        return pending, failures
+
     @staticmethod
     def _summary_message(accepted: int, duplicates: int, rejected: int) -> str:
         parts = []
@@ -230,6 +412,8 @@ class UploadService:
         actor: User,
         ip: str | None,
         trace: dict[str, str],
+        archive: _ArchiveRef | None = None,
+        seen_hashes: dict[str, uuid.UUID] | None = None,
     ) -> tuple[UploadedFileResult, StageMessage | None]:
         file_name = upload.filename or "unnamed"
 
@@ -256,6 +440,34 @@ class UploadService:
         # rejection is skipped - so turning it back on needs no backfill.
         existing = await self.contracts.get_by_hash(project.id, validated.sha256)
         duplicate_check = self.settings.upload.duplicate_check
+
+        # A file identical to one earlier in this same batch. The row above is not
+        # committed yet, so `get_by_hash` cannot see it, and letting this through
+        # breaks the unique constraint at flush - taking the whole upload with it.
+        #
+        # Refused even when `duplicate_check` is off. That switch decides whether a
+        # re-upload is *policy*-acceptable; this is a constraint that will be
+        # violated either way, and "store it anyway" is not an available outcome.
+        if seen_hashes is not None and validated.sha256 in seen_hashes:
+            metrics.uploads_total.labels(
+                file_type=validated.file_type.value, outcome="duplicate"
+            ).inc()
+            return (
+                UploadedFileResult(
+                    file_name=file_name,
+                    status="duplicate",
+                    size=validated.size,
+                    sha256=validated.sha256,
+                    existing_contract_id=seen_hashes[validated.sha256],
+                    error_code=ErrorCode.DUPLICATE_DOCUMENT,
+                    message=(
+                        "An identical document was already included in this upload. "
+                        "It was stored once."
+                    ),
+                ),
+                None,
+            )
+
         if existing is not None and duplicate_check and not options.replace_existing:
             metrics.uploads_total.labels(
                 file_type=validated.file_type.value, outcome="duplicate"
@@ -273,12 +485,51 @@ class UploadService:
                 None,
             )
 
+        # --- convert Word to PDF ----------------------------------------------
+        #
+        # Before anything is stored, so a document that cannot be converted leaves
+        # no half-built contract behind. The pipeline is PDF-only; this is the one
+        # place that is true, and everything downstream is unchanged because of it.
+        converted: UploadFile | None = None
+        converted_validated: ValidatedFile | None = None
+        if validated.file_type.needs_pdf_conversion:
+            try:
+                converted, converted_validated = await self._convert_to_pdf(upload, validated)
+            except ConversionError as exc:
+                metrics.uploads_total.labels(
+                    file_type=validated.file_type.value, outcome="conversion_failed"
+                ).inc()
+                logger.warning(
+                    "upload_conversion_failed",
+                    file_name=file_name,
+                    file_type=validated.file_type.value,
+                    reason=exc.message,
+                )
+                return (
+                    UploadedFileResult(
+                        file_name=file_name,
+                        status="rejected",
+                        size=validated.size,
+                        sha256=validated.sha256,
+                        error_code=exc.code,
+                        message=exc.message,
+                    ),
+                    None,
+                )
+
         # --- persist ----------------------------------------------------------
         if existing is not None and options.replace_existing:
             contract, version = await self._add_version(existing, validated, upload, actor=actor)
         else:
             contract, version = await self._create_contract(
-                project=project, validated=validated, upload=upload, options=options, actor=actor
+                project=project,
+                validated=validated,
+                upload=upload,
+                options=options,
+                actor=actor,
+                converted=converted,
+                converted_validated=converted_validated,
+                archive=archive,
             )
 
         # --- create the job ---------------------------------------------------
@@ -309,6 +560,11 @@ class UploadService:
             },
             ip=ip,
         )
+
+        # Recorded only once the contract exists, so a rejected file does not
+        # shadow a later identical one that would have succeeded.
+        if seen_hashes is not None:
+            seen_hashes[validated.sha256] = contract.id
 
         metrics.uploads_total.labels(file_type=validated.file_type.value, outcome="accepted").inc()
         metrics.jobs_created_total.labels(priority=priority.value).inc()
@@ -355,7 +611,13 @@ class UploadService:
         try:
             file_type = FileType(extension)
         except ValueError as exc:
-            raise UnsupportedFileTypeError(details={"extension": extension}) from exc
+            # An archive reaching here means `_expand_archives` did not unpack it,
+            # which would be a bug rather than bad input - a ZIP is never a
+            # document and must never become a contract.
+            raise UnsupportedFileTypeError(
+                f"'{extension}' cannot be stored as a document.",
+                details={"extension": extension, "file_name": file_name},
+            ) from exc
 
         await upload.seek(0)
 
@@ -391,6 +653,16 @@ class UploadService:
                 "contents do not match its extension.",
                 details={"file_name": file_name, "declared_type": file_type.value},
             )
+        # A `.docx` is a ZIP, so the header check above cannot tell one from a
+        # plain archive that was renamed. Catching it here rather than letting it
+        # reach LibreOffice turns a confusing conversion failure into a precise
+        # rejection at the point the user can act on it.
+        if file_type is FileType.DOCX and not await self._looks_like_docx(upload):
+            raise UnsupportedFileTypeError(
+                f"'{file_name}' is a ZIP archive but not a Word document. "
+                "Rename it to .zip to upload it as an archive.",
+                details={"file_name": file_name, "declared_type": file_type.value},
+            )
 
         return ValidatedFile(
             file_name=file_name,
@@ -398,6 +670,55 @@ class UploadService:
             size=size,
             sha256=digest_source.hexdigest(),
             content_type=_CONTENT_TYPES[file_type],
+        )
+
+    @staticmethod
+    async def _looks_like_docx(upload: UploadFile) -> bool:
+        """Does this ZIP contain the part every Word document has?
+
+        `word/document.xml` is present in every OOXML word-processing file and in
+        no other archive by accident. Read from the central directory, so nothing
+        is decompressed to answer the question.
+        """
+        await upload.seek(0)
+        raw = await upload.read()
+        await upload.seek(0)
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                return any(name.startswith("word/") for name in archive.namelist())
+        except (zipfile.BadZipFile, OSError):
+            return False
+
+    # =========================================================================
+    # Conversion
+    # =========================================================================
+    async def _convert_to_pdf(
+        self, upload: UploadFile, validated: ValidatedFile
+    ) -> tuple[UploadFile, ValidatedFile]:
+        """Turn a Word upload into the PDF the pipeline will read.
+
+        Returns the PDF as an `UploadFile` plus its own `ValidatedFile`, because
+        the converted file needs its own size, hash and content type - the
+        original's describe different bytes.
+
+        The hash deliberately stays the *original's* on the contract row: that is
+        what duplicate detection compares, and two uploads of the same DOCX must
+        collide even though LibreOffice does not produce byte-identical PDFs from
+        one run to the next.
+        """
+        await upload.seek(0)
+        source = await upload.read()
+        await upload.seek(0)
+
+        result = await DocumentConverter().to_pdf(source, validated.file_name, validated.file_type)
+        pdf = _upload_from_bytes(result.content, result.file_name)
+
+        return pdf, ValidatedFile(
+            file_name=result.file_name,
+            file_type=FileType.PDF,
+            size=len(result.content),
+            sha256=hashlib.sha256(result.content).hexdigest(),
+            content_type=_CONTENT_TYPES[FileType.PDF],
         )
 
     # =========================================================================
@@ -411,13 +732,33 @@ class UploadService:
         upload: UploadFile,
         options: UploadOptions,
         actor: User,
+        converted: UploadFile | None = None,
+        converted_validated: ValidatedFile | None = None,
+        archive: _ArchiveRef | None = None,
     ) -> tuple[Contract, int]:
-        """Store the file and create the contract plus its first version row."""
+        """Store the file and create the contract plus its first version row.
+
+        For a Word upload both files are stored: the original, so it stays
+        downloadable, and the converted PDF, which is what the pipeline and the
+        evidence viewer use. `storage_path` points at whichever of the two is the
+        PDF, so nothing downstream had to learn about the distinction.
+        """
         contract_id = uuid.uuid4()
-        key = StorageKey.contract_file(project.id, contract_id, 1, validated.file_name)
+        original_key = StorageKey.contract_file(project.id, contract_id, 1, validated.file_name)
 
         with log_context(contract_id=str(contract_id), project_id=str(project.id)):
-            await self._store(key, upload, validated)
+            await self._store(original_key, upload, validated)
+
+            converted_key: str | None = None
+            if converted is not None and converted_validated is not None:
+                converted_key = StorageKey.contract_file(
+                    project.id, contract_id, 1, pdf_name_for(validated.file_name)
+                )
+                await self._store(converted_key, converted, converted_validated)
+
+            # The PDF, always. For a PDF upload that is the original.
+            key = converted_key or original_key
+            processed = converted_validated or validated
 
             contract = await self.contracts.create(
                 id=contract_id,
@@ -425,10 +766,25 @@ class UploadService:
                 uploaded_by=actor.id,
                 original_file_name=validated.file_name,
                 storage_path=key,
-                file_type=validated.file_type,
-                file_size=validated.size,
+                original_file_path=original_key,
+                converted_file_path=converted_key,
+                processing_file_path=key,
+                original_file_type=validated.file_type,
+                source_archive_id=archive.id if archive else None,
+                source_archive_name=archive.name if archive else None,
+                # `file_type` describes the file being *processed*, so it is PDF
+                # for a converted document. Parser selection and every existing
+                # type filter read this, and they must keep seeing a PDF.
+                file_type=processed.file_type,
+                file_size=processed.size,
+                # The *original's* hash: this is what duplicate detection compares,
+                # and LibreOffice does not produce identical bytes twice, so
+                # hashing the PDF would let the same DOCX in repeatedly.
                 sha256_hash=validated.sha256,
-                mime_type=validated.content_type,
+                # The processed file's hash, which validation re-computes to prove
+                # storage has not corrupted it. Equal to the above for a PDF.
+                processing_sha256=processed.sha256,
+                mime_type=processed.content_type,
                 # Title starts as the filename and is replaced by the extracted
                 # title once processing completes.
                 title=None,
@@ -446,9 +802,13 @@ class UploadService:
                 contract_id=contract.id,
                 project_id=project.id,
                 version=1,
+                # Same file `storage_path` names, so the size describes the same
+                # bytes. `sha256_hash` stays the original's, matching the contract
+                # row - it is the identity of what the user uploaded, and the
+                # version history is a record of uploads, not of conversions.
                 storage_path=key,
                 sha256_hash=validated.sha256,
-                file_size=validated.size,
+                file_size=processed.size,
                 original_file_name=validated.file_name,
                 uploaded_by=actor.id,
                 change_note="Initial upload.",
@@ -578,7 +938,9 @@ class UploadService:
             trace=inject_context({}),
             options=options or {},
         )
-        return await get_queue_client().enqueue(message)
+        # Same reasoning as `upload` above: a reprocess creates its job in this
+        # transaction, so the driver has to enqueue inside it.
+        return await get_queue_client().enqueue(message, db=self.db)
 
 
 __all__ = ["UploadService", "ValidatedFile"]

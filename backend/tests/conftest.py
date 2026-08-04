@@ -8,11 +8,19 @@ otherwise capture whatever the developer's shell happened to hold.
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+# The settings groups read `.env` when it exists (see `config._group_config`).
+# For the suite that would mean asserting against whatever the developer last
+# configured locally - the embedding tests pin the shape the migrations target,
+# and a local file running a different provider fails them for reasons unrelated
+# to the change under test.
+os.environ.setdefault("CIP_DISABLE_DOTENV", "1")
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://cip:cip@localhost:5432/cip_test")
 os.environ.setdefault("JWT_SECRET", "t" * 48)
@@ -21,6 +29,48 @@ os.environ.setdefault("OTEL_ENABLED", "false")
 os.environ.setdefault("LLM_PROVIDER", "mock")
 os.environ.setdefault("EMBEDDING_PROVIDER", "mock")
 os.environ.setdefault("EMBEDDING_VERIFY_ON_STARTUP", "false")
+
+
+#: Where per-test temporary directories are rooted, when nothing overrides it.
+#:
+#: Short on purpose. pytest's default is
+#: ``<tempdir>/pytest-of-<username>/pytest-<n>/<test-name><n>``, which on this
+#: platform spends ~63 characters before a test has written anything - and a
+#: storage key is another ~130. Windows' 260-character ceiling is then reached
+#: partway through a suite that passes everywhere else.
+_TMP_ROOT_NAME = "ct"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Root temporary directories somewhere short enough for Windows.
+
+    Windows caps paths at 260 characters unless long-path support is enabled
+    system-wide, which is a registry change and an administrator prompt - not
+    something running the tests should require. The storage adapter now asks for
+    the extended-length API so it is no longer the binding constraint (see
+    ``app.storage.local._long_path_safe``), but any test that builds a path
+    through some other library is still exposed, so the base is kept short too.
+    Two independent defences, because this failure is expensive to diagnose: it
+    surfaces as ``No such file or directory`` naming a directory that plainly
+    exists.
+
+    Precedence is deliberate. An explicit ``--basetemp`` always wins, because
+    someone who passed it is debugging and wants their directory used. Otherwise
+    ``TEST_TMP_DIR`` - the documented escape hatch for a machine where even this
+    is too deep, or where the temp volume is unsuitable. Otherwise a short
+    directory inside the OS temp folder.
+
+    Not applied on POSIX, where the limit is per-component and ~4096 overall:
+    pytest's numbered directories are useful for debugging a failure days later,
+    and there is no reason to give them up.
+    """
+    if os.name != "nt" or config.option.basetemp:
+        return
+
+    override = os.environ.get("TEST_TMP_DIR", "").strip()
+    base = Path(override) if override else Path(tempfile.gettempdir()) / _TMP_ROOT_NAME
+    base.mkdir(parents=True, exist_ok=True)
+    config.option.basetemp = str(base)
 
 
 @pytest.fixture

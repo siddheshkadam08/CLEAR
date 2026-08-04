@@ -29,7 +29,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.ai.extraction import (
@@ -55,7 +55,7 @@ from app.core.enums import (
 from app.core.errors import PipelineError
 from app.core.logging import get_logger
 from app.core.versions import ComponentVersions, current_versions_for_stage
-from app.models.clause_master import ClauseMasterCategory
+from app.models.clause_master import AgreementTypeClause, ClauseMasterCategory
 from app.orchestrator.stages.base import (
     StageArtifact,
     StageContext,
@@ -258,11 +258,20 @@ class AIExtractionStage(StageHandler):
         return [CandidateChunk.from_row(row) for row in rows]
 
     async def _load_clause_definitions(self, ctx: StageContext) -> list[ClauseDefinition]:
-        """Load the Clause Master, restricted to what this profile asks for.
+        """Load the Clause Master, restricted to what this agreement type asks for.
 
-        The profile's mandatory and optional lists decide which categories run, so a
-        lease is not searched for a data-processing clause it never has. A profile
-        that names no clauses gets the whole active master list.
+        The mapping in ``agreement_type_clauses`` decides which categories run, so a
+        lease is not searched for a data-processing clause it never has, and a clause
+        switched off for this type is skipped without being forgotten.
+
+        **The switch applies to this run only.** A contract processed before a clause
+        was deactivated keeps the clauses it was extracted with; nothing re-reads this
+        mapping afterwards. Its stored clauses are evidence of what the document says,
+        not of what the configuration would look for today.
+
+        An agreement type with no mapping rows gets the whole active master list -
+        the same fallback as an unclassified document, and for the same reason: a
+        type nobody has configured is the one worth looking hardest at.
         """
         stmt = (
             select(ClauseMasterCategory)
@@ -275,15 +284,11 @@ class AIExtractionStage(StageHandler):
         )
         categories = (await ctx.db.execute(stmt)).scalars().all()
 
-        wanted: set[str] = set()
-        if ctx.profile is not None:
-            wanted = {str(key) for key in (ctx.profile.mandatory_clauses or [])} | {
-                str(key) for key in (ctx.profile.optional_clauses or [])
-            }
+        wanted = await self._active_clause_keys(ctx)
 
         definitions: list[ClauseDefinition] = []
         for category in categories:
-            if wanted and str(category.key) not in wanted:
+            if wanted is not None and str(category.key) not in wanted:
                 continue
             rule = _active_rule(category)
             if rule is None:
@@ -297,10 +302,41 @@ class AIExtractionStage(StageHandler):
                 continue
             definitions.append(ClauseDefinition.from_category(category, rule))
 
-        # Mandatory clauses are extracted even if the profile omitted them from its
-        # own lists: their absence is a finding, and a finding cannot be made about a
-        # category that never ran.
         return definitions
+
+    async def _active_clause_keys(self, ctx: StageContext) -> set[str] | None:
+        """Clause keys configured *and* active for this contract's agreement type.
+
+        ``None`` means "no mapping configured, run everything" - distinct from an
+        empty set, which would mean "configured to look for nothing" and is a state
+        the UI can produce by switching every clause off. Collapsing the two would
+        turn a deliberate empty configuration into a full extraction.
+        """
+        agreement_type = getattr(ctx.contract, "agreement_type", None)
+        if not agreement_type:
+            return None
+
+        rows = await ctx.db.execute(
+            select(AgreementTypeClause.clause_key).where(
+                AgreementTypeClause.agreement_type == str(agreement_type),
+                AgreementTypeClause.is_active.is_(True),
+            )
+        )
+        keys = {str(key) for (key,) in rows.all()}
+
+        configured = await ctx.db.scalar(
+            select(func.count())
+            .select_from(AgreementTypeClause)
+            .where(AgreementTypeClause.agreement_type == str(agreement_type))
+        )
+        if not configured:
+            logger.info(
+                "clause_mapping_absent",
+                agreement_type=str(agreement_type),
+                detail="no clauses configured for this type; running the whole Clause Master",
+            )
+            return None
+        return keys
 
     # =========================================================================
     # Persistence

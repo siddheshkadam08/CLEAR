@@ -293,7 +293,20 @@ export interface ContractDetail {
   id: UUID;
   title?: string | null;
   original_file_name: string;
+  /** The type being *processed* - always `pdf`. See `original_file_type`. */
   file_type?: string | null;
+  /**
+   * What the user uploaded: `pdf`, `doc` or `docx`.
+   *
+   * Differs from `file_type` for a Word upload, which is converted at upload so
+   * the pipeline and the evidence viewer only ever see a PDF.
+   */
+  original_file_type?: string | null;
+  /** True when a Word original was converted, so both files can be offered. */
+  has_converted_pdf?: boolean;
+  /** The archive this document was extracted from, if any. */
+  source_archive_id?: UUID | null;
+  source_archive_name?: string | null;
   mime_type?: string | null;
   file_size: number;
   sha256_hash?: string | null;
@@ -610,12 +623,32 @@ export interface Citation {
 
 export type ConfidenceBand = 'high' | 'medium' | 'low';
 
+/**
+ * Mirrors the backend `ResponseFormat` enum.
+ *
+ * This was typed as a bare `string`, so the Copilot's format picker could offer
+ * `bullet_points` and `table` - neither of which the enum contains - and nothing
+ * complained until the request came back 422. Two of its three options were
+ * unusable in production while typechecking cleanly.
+ */
+export type ResponseFormat =
+  | 'natural_language'
+  | 'json'
+  | 'executive_summary'
+  | 'risk_report'
+  | 'compliance_report'
+  | 'clause_comparison'
+  | 'timeline'
+  | 'action_items'
+  | 'contract_summary'
+  | 'obligation_report';
+
 export interface AnswerResponse {
   answer: string;
   citations: Citation[];
   confidence: number;
   confidence_band: ConfidenceBand;
-  response_format: string;
+  response_format: ResponseFormat;
   /** The model declined. A first-class outcome, not an error. */
   refused: boolean;
   /** A fabricated citation, no citations, or low grounding - check before relying. */
@@ -793,21 +826,32 @@ export interface ChatMessage {
 // =============================================================================
 // Processing
 // =============================================================================
+/**
+ * Upper case, unlike every other status union here.
+ *
+ * `JobState` is the one backend enum whose *values* are upper case - the others
+ * (`ContractStatus`, `AlertStatus`, `ExportStatus`) are lower case, and this
+ * type was written to match them rather than to match its own enum. The API
+ * sends `"READY"`; the type promised `"ready"`. Nothing complained, because a
+ * string literal union only constrains what the frontend writes, never what the
+ * server actually sends - so every comparison against a lower case literal
+ * silently failed while typechecking perfectly.
+ */
 export type JobState =
-  | 'queued'
-  | 'validating'
-  | 'parsing'
-  | 'enriching'
-  | 'classifying'
-  | 'chunking'
-  | 'ai_extraction'
-  | 'embedding'
-  | 'indexing'
-  | 'ready'
-  | 'failed'
-  | 'retrying'
-  | 'cancelled'
-  | 'paused';
+  | 'QUEUED'
+  | 'VALIDATING'
+  | 'PARSING'
+  | 'ENRICHING'
+  | 'CLASSIFYING'
+  | 'CHUNKING'
+  | 'AI_EXTRACTION'
+  | 'EMBEDDING'
+  | 'INDEXING'
+  | 'READY'
+  | 'FAILED'
+  | 'RETRYING'
+  | 'CANCELLED'
+  | 'PAUSED';
 
 export interface StageRun {
   id: UUID;
@@ -845,6 +889,18 @@ export interface JobListItem {
   error_message?: string | null;
   created_at: string;
   finished_at?: string | null;
+  /**
+   * The archive this document came out of, when it did.
+   *
+   * Grouping only. Every document extracted from a ZIP is an independent job with
+   * its own state, progress, retry and logs - these fields let the list show that
+   * fifty rows were one upload, not that they are one job.
+   */
+  source_archive_id?: UUID | null;
+  source_archive_name?: string | null;
+  /** What was uploaded. The job always processes a PDF; this may say `docx`. */
+  original_file_type?: string | null;
+  original_file_name?: string | null;
 }
 
 /** `GET /jobs/{id}`, `GET /contracts/{id}/jobs`, and the retry/reprocess results. */
@@ -956,6 +1012,73 @@ export interface ClauseCategory {
   created_at: string;
 }
 
+/**
+ * One clause, as it applies to one agreement type.
+ *
+ * Flattens two things the screen shows as one row: what the clause *is* comes
+ * from the Clause Master, whether it applies here comes from the mapping.
+ */
+export interface AgreementClause {
+  clause_key: string;
+  name: string;
+  description?: string | null;
+  group_name?: string | null;
+  /** Alternative headings. The strongest signal the clause detector has. */
+  synonyms: string[];
+  /** Applied to **new uploads only** — already-extracted contracts are untouched. */
+  is_active: boolean;
+  is_mandatory: boolean;
+  display_order: number;
+  /** False when the clause exists but is not attached to this agreement type. */
+  is_mapped: boolean;
+}
+
+export interface AgreementTypeClauses {
+  agreement_type: string;
+  /** The profile's display name where one exists, else the humanised type. */
+  label: string;
+  clauses: AgreementClause[];
+}
+
+export interface AgreementClauseUpsert {
+  clause_key: string;
+  is_active: boolean;
+  is_mandatory: boolean;
+  display_order?: number | null;
+}
+
+export interface ClauseDefinitionUpsert {
+  /** Required on create; the key is the identity and cannot change. */
+  key?: string | null;
+  name: string;
+  description?: string | null;
+  group_name?: string | null;
+  synonyms: string[];
+}
+
+/** One row of the import/export sheet. The two use identical columns. */
+export interface ClauseImportRow {
+  agreement_type: string;
+  clause_key: string;
+  name?: string | null;
+  description?: string | null;
+  group_name?: string | null;
+  synonyms: string[];
+  is_active: boolean;
+  is_mandatory: boolean;
+  display_order?: number | null;
+}
+
+export interface ClauseImportResult {
+  clauses_created: number;
+  clauses_updated: number;
+  mappings_created: number;
+  mappings_updated: number;
+  mappings_deactivated: number;
+  /** Rows that could not be applied, with the reason. Never fatal. */
+  skipped: { row: string; clause_key: string; reason: string }[];
+}
+
 // =============================================================================
 // Exports
 // =============================================================================
@@ -1006,21 +1129,269 @@ export interface ExportCapabilities {
   retention_hours: number;
 }
 
-export type AlertStatus = 'open' | 'acknowledged' | 'resolved' | 'dismissed' | 'escalated';
+// =============================================================================
+// Knowledge graph
+// =============================================================================
+export interface GraphNode {
+  node_type: string;
+  /** Stable within the contract. This is what edges point at, not `row_id`. */
+  ref: string;
+  label: string;
+  row_id?: UUID | null;
+  attributes: Record<string, unknown>;
+}
+
+export interface GraphEdge {
+  relation: string;
+  source_type: string;
+  source_ref: string;
+  target_type: string;
+  target_ref: string;
+  label?: string | null;
+  source_id?: UUID | null;
+  target_id?: UUID | null;
+  attributes: Record<string, unknown>;
+  /** False when an endpoint could not be matched to a node. Drawn anyway. */
+  is_resolved: boolean;
+  /** `derived` - structural - or `extracted`, which is a claim the document made. */
+  origin: string;
+}
+
+export interface DanglingReference {
+  /** The reference as the document wrote it — "Section 9.2", "the Supplier". */
+  reference: string;
+  relation: string;
+  reason: string;
+}
+
+export interface ContractGraph {
+  contract_id: UUID;
+  contract_title?: string | null;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  /** References the text made that nothing in the contract satisfies. */
+  dangling: DanglingReference[];
+  statistics: {
+    nodes?: number;
+    edges?: number;
+    resolved_edges?: number;
+    unresolved_edges?: number;
+    dangling_references?: number;
+    by_node_type?: Record<string, number>;
+    by_relation?: Record<string, number>;
+  };
+  warnings: string[];
+}
+
+// =============================================================================
+// Portfolio - cross-contract registers
+// =============================================================================
+/**
+ * `ResponseSchema` serialises dates and datetimes as epoch **seconds**, not ISO
+ * strings. `formatDate` and `daysUntil` both accept either; anything else that
+ * touches these must too.
+ */
+export type ApiDate = number | string;
+
+/** Where a portfolio row came from. Every register row carries this. */
+export interface PortfolioItem {
+  contract_id: UUID;
+  project_id: UUID;
+  contract_title?: string | null;
+  contract_number?: string | null;
+}
+
+export type ObligationStatus =
+  | 'open'
+  | 'in_progress'
+  | 'fulfilled'
+  | 'breached'
+  | 'waived'
+  | 'unknown';
+
+// `RiskSeverity` is already declared above, with the per-contract knowledge types.
+
+export type DateType =
+  | 'effective_date'
+  | 'execution_date'
+  | 'expiration_date'
+  | 'renewal_date'
+  | 'notice_deadline'
+  | 'milestone'
+  | 'payment_due'
+  | 'delivery_date'
+  | 'review_date'
+  | 'termination_date'
+  | 'commencement_date'
+  | 'other';
+
+export interface PortfolioObligation extends PortfolioItem {
+  id: UUID;
+  action: string;
+  responsible_party?: string | null;
+  due_date?: ApiDate | null;
+  /** The contract's own relative wording, kept when no calendar date resolved. */
+  due_description?: string | null;
+  trigger_event?: string | null;
+  frequency?: string | null;
+  is_recurring: boolean;
+  status: ObligationStatus;
+  penalty?: string | null;
+  clause_id?: UUID | null;
+}
+
+export interface PortfolioKeyDate extends PortfolioItem {
+  id: UUID;
+  date_type: DateType;
+  date_value?: ApiDate | null;
+  /** Preserved verbatim where extraction could not resolve a calendar date. */
+  date_expression?: string | null;
+  description?: string | null;
+  is_recurring: boolean;
+}
+
+export interface PortfolioRisk extends PortfolioItem {
+  id: UUID;
+  risk_type: string;
+  severity: RiskSeverity;
+  description: string;
+  recommendation?: string | null;
+  category?: string | null;
+  score_contribution?: number | null;
+  /** True when the finding is the *absence* of something - no clause to point at. */
+  is_omission: boolean;
+  clause_id?: UUID | null;
+  contract_risk_score?: number | null;
+}
+
+/**
+ * One counterparty, aggregated across contracts.
+ *
+ * Grouped by exact lower-cased name, not entity-resolved: "Acme Corp" and "Acme
+ * Corporation Inc." are two rows. `total_value` is keyed by currency and never
+ * summed across them.
+ */
+export interface PartyDirectoryEntry {
+  key: string;
+  name: string;
+  entity_types: string[];
+  roles: string[];
+  jurisdictions: string[];
+  contract_count: number;
+  is_primary_anywhere: boolean;
+  total_value: Record<string, number>;
+  next_expiry?: ApiDate | null;
+  sample_contract_id?: UUID | null;
+}
+
+/**
+ * Mirrors `AlertStatus` on the backend, exactly.
+ *
+ * There is no `escalated` member and there must not be: escalation raises an
+ * alert's *severity*, it does not move it to another status. This list used to
+ * carry one, and because the Alerts screen sent it as a default filter, every
+ * page load answered 422 - `list[AlertStatus]` rejects the value before the
+ * handler runs. A status the server does not know is not a harmless extra.
+ */
+export type AlertStatus = 'open' | 'acknowledged' | 'resolved' | 'dismissed';
+
+export type AlertSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+export type AlertType =
+  | 'contract_expiring'
+  | 'high_risk'
+  | 'missing_mandatory_clause'
+  | 'processing_failed'
+  | 'auto_renewal_notice'
+  | 'obligation_due'
+  | 'review_required';
 
 export interface Alert {
   id: UUID;
   project_id: UUID;
   contract_id?: UUID | null;
   contract_title?: string | null;
-  alert_type: string;
-  severity: string;
+  alert_type: AlertType | string;
+  severity: AlertSeverity | string;
   status: AlertStatus;
   title: string;
   message: string;
+  /** Days remaining, missing clause names, risk score - whatever raised it. */
+  details?: Record<string, unknown> | null;
   due_date?: string | null;
   created_at: string;
   note?: string | null;
+}
+
+/**
+ * A configurable threshold for one alert type.
+ *
+ * `project_id: null` is the platform default, which applies everywhere. A row
+ * with a project overrides it for that project alone, so one business unit can
+ * watch a 180-day expiry window while the rest use 90.
+ */
+export interface AlertRule {
+  id: UUID;
+  project_id?: UUID | null;
+  name: string;
+  alert_type: AlertType;
+  is_enabled: boolean;
+  severity: AlertSeverity;
+  /** Type-specific thresholds. See `RULE_FIELDS` on the Alerts screen. */
+  config: Record<string, unknown>;
+  escalate_after_days?: number | null;
+  notify_channels: string[];
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface AlertRuleInput {
+  name: string;
+  alert_type: AlertType;
+  severity: AlertSeverity;
+  is_enabled: boolean;
+  config: Record<string, unknown>;
+  escalate_after_days?: number | null;
+  notify_channels: string[];
+  project_id?: UUID | null;
+}
+
+
+// =============================================================================
+// Audit trail
+// =============================================================================
+export interface AuditEntry {
+  id: UUID;
+  /** Epoch seconds, as `ResponseSchema` serialises datetimes. */
+  created_at: number | string;
+  action: string;
+  entity_type: string;
+  entity_id?: UUID | null;
+  entity_label?: string | null;
+  project_id?: UUID | null;
+  user_id?: UUID | null;
+  /** Denormalised on write, so a deleted user's actions stay attributable. */
+  user_email?: string | null;
+  succeeded: boolean;
+  error_code?: string | null;
+  ip?: string | null;
+  route?: string | null;
+  /** Correlates the row with the request that produced it, and with the logs. */
+  request_id?: string | null;
+  trace_id?: string | null;
+  /** Already redacted on write - secrets never reach the row. */
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+}
+
+export interface AuditFilters {
+  page?: number;
+  size?: number;
+  project_id?: UUID;
+  user_id?: UUID;
+  action?: string;
+  entity_type?: string;
+  succeeded?: boolean;
 }
 
 

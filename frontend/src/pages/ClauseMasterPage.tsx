@@ -1,422 +1,813 @@
 /**
- * Clause Master.
+ * Clause Master — which clauses each agreement type is checked for.
  *
- * The configuration that drives extraction: which clause categories exist, which are
- * mandatory, what confidence they require, how they surface in the UI, and the
- * versioned rule that tells the model what to look for. Changing a category here
- * changes behaviour across the platform without a deployment.
+ * The screen this replaces was a master/detail over 30 global clauses in which a
+ * user could change exactly four things — mandatory, active, a confidence slider
+ * and a priority integer — while being shown, read-only, two blocks of raw JSON
+ * (`extraction_rule`, `output_schema`), five separate facts about `ui_config`,
+ * and a rule-version badge whose history had no UI. There was no create, no
+ * delete, and no way to see or change which clauses a given agreement type
+ * actually looks for. That last one is the thing people needed.
  *
- * Rules are versioned rather than edited in place, so an extraction can always be
- * explained by the rule version that produced it. The current version is shown
- * alongside the rule for exactly that reason.
+ * So: group by agreement type, one row per clause, and every control on the row.
  *
- * Master/detail above `lg`; below it the list becomes a select, because a 260px
- * sidebar next to a detail pane on a phone leaves neither one usable.
+ * **Two objects, deliberately not blurred.** Toggling active, marking mandatory
+ * and removing are *mappings* — they change this agreement type only. Editing a
+ * name, description or synonyms changes the *clause*, everywhere it is used. The
+ * row separates them: the switch and the remove button act here, the edit dialog
+ * says plainly that it does not.
+ *
+ * **Active means new uploads.** Extraction reads the mapping once, while a
+ * document is processed. Switching a clause off does not re-judge contracts
+ * already extracted — their clauses are evidence of what those documents say. The
+ * header states this rather than leaving it to be discovered.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Settings2 } from 'lucide-react';
-import { useState } from 'react';
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
 
-import { clauseMaster as clauseMasterApi } from '@/api/endpoints';
+import { clauseMaster as clauseApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
-import type { ClauseCategory } from '@/api/types';
+import type { AgreementClause, AgreementTypeClauses, ClauseImportResult } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
-import { ErrorBanner } from '@/components/common/Banner';
+import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card, PageHeader, SectionHeader } from '@/components/common/Card';
+import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
+import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { formatDateTime, formatPercent, humanise } from '@/lib/format';
+import { Modal } from '@/components/common/Modal';
+import { useCanAdminister } from '@/lib/auth';
+import { exportClauseSheet, parseClauseSheet } from '@/lib/clause-sheet';
+
+type ParsedSheet = Awaited<ReturnType<typeof parseClauseSheet>>;
 
 export function ClauseMasterPage() {
-  const [includeInactive, setIncludeInactive] = useState(false);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const isAdmin = useCanAdminister();
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ['clause-master', includeInactive],
-    queryFn: () => clauseMasterApi.list(includeInactive),
+  const [query, setQuery] = useState('');
+  const [openTypes, setOpenTypes] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState<{ clause: AgreementClause | null } | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const groups = useQuery({
+    queryKey: ['clause-master'],
+    queryFn: () => clauseApi.byAgreementType(true),
   });
 
-  const categories = data ?? [];
-  const selected = categories.find((category) => category.key === selectedKey) ?? categories[0];
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['clause-master'] });
 
-  const groups = categories.reduce<Record<string, ClauseCategory[]>>(
-    (accumulator, category) => {
-      const group = category.group_name ?? 'Other';
-      (accumulator[group] ??= []).push(category);
-      return accumulator;
-    },
-    {},
-  );
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const source = groups.data ?? [];
+    if (!needle) return source;
+    return source
+      .map((group) => ({
+        ...group,
+        clauses: group.clauses.filter(
+          (clause) =>
+            clause.name.toLowerCase().includes(needle) ||
+            clause.clause_key.includes(needle) ||
+            clause.synonyms.some((value) => value.toLowerCase().includes(needle)),
+        ),
+      }))
+      .filter((group) => group.clauses.length || group.label.toLowerCase().includes(needle));
+  }, [groups.data, query]);
+
+  async function onExport(format: 'csv' | 'xlsx') {
+    try {
+      exportClauseSheet(await clauseApi.exportRows(), format);
+      setActionError(null);
+    } catch (caught) {
+      setActionError(errorMessage(caught));
+    }
+  }
 
   return (
     <div className="space-y-5">
       <PageHeader
-        // title="Clause Master"
-        // subtitle="Configuration, not code. Adding a clause category or changing what makes one mandatory takes effect on the next extraction."
+        title="Clause Master"
+        subtitle="Which clauses each agreement type is checked for. Changes apply to new uploads; contracts already processed keep the clauses they were extracted with."
         actions={
-          <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-            <input
-              type="checkbox"
-              checked={includeInactive}
-              onChange={(event) => setIncludeInactive(event.target.checked)}
-              className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            Show inactive
-          </label>
+          isAdmin ? (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={Download}
+                onClick={() => void onExport('xlsx')}
+              >
+                XLSX
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={Download}
+                onClick={() => void onExport('csv')}
+              >
+                CSV
+              </Button>
+              <Button variant="secondary" size="sm" icon={Upload} onClick={() => setImporting(true)}>
+                Import
+              </Button>
+              <Button size="sm" icon={Plus} onClick={() => setEditing({ clause: null })}>
+                New clause
+              </Button>
+            </div>
+          ) : null
         }
       />
 
-      {error ? (
-        <ErrorBanner message={errorMessage(error)} onRetry={() => void refetch()} />
+      <Card dense>
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search clauses, keys or alternative headings"
+            className={`${inputClasses} pl-9`}
+          />
+        </div>
+        {!isAdmin ? (
+          <p className="mt-2 text-xs text-slate-500">
+            Read-only for you. A system administrator can change which clauses apply.
+          </p>
+        ) : null}
+      </Card>
+
+      {actionError ? <ErrorBanner message={actionError} /> : null}
+      {groups.error ? (
+        <ErrorBanner message={errorMessage(groups.error)} onRetry={() => void groups.refetch()} />
       ) : null}
 
-      {isLoading ? (
+      {groups.isLoading ? (
         <Card>
-          <LoadingSpinner label="Loading clause categories..." />
+          <LoadingSpinner label="Loading the clause taxonomy..." />
         </Card>
-      ) : categories.length ? (
-        <div className="grid gap-5 lg:grid-cols-[18rem_minmax(0,1fr)] lg:items-start">
-          <Card
-            dense
-            className="lg:sticky lg:top-24 lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto"
-          >
-            <label className="block lg:hidden">
-              <span className="mb-1.5 block text-sm font-medium text-slate-700">Category</span>
-              <div className="relative">
-              <select
-                value={selected?.key ?? ''}
-                onChange={(event) => setSelectedKey(event.target.value)}
-                className={selectClasses}
-              >
-                {categories
-                  .slice()
-                  .sort((a, b) => a.priority - b.priority)
-                  .map((category) => (
-                    <option key={category.id} value={category.key}>
-                      {category.priority}. {category.name}
-                      {category.mandatory ? ' (required)' : ''}
-                      {category.is_active ? '' : ' — inactive'}
-                    </option>
-                  ))}
-              </select>
-              <SelectChevron />
-              </div>
-            </label>
-
-            <div className="hidden lg:block">
-              {Object.entries(groups).map(([group, entries]) => (
-                <div key={group} className="mb-4 last:mb-0">
-                  <p className="px-2 pb-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
-                    {group}
-                  </p>
-                  <div className="space-y-0.5">
-                    {entries
-                      .slice()
-                      .sort((a, b) => a.priority - b.priority)
-                      .map((category) => {
-                        const active = selected?.key === category.key;
-                        return (
-                          <button
-                            key={category.id}
-                            type="button"
-                            onClick={() => setSelectedKey(category.key)}
-                            className={[
-                              'flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-sm transition',
-                              active
-                                ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-100'
-                                : 'text-slate-600 hover:bg-slate-100',
-                            ].join(' ')}
-                          >
-                            <span className="w-5 shrink-0 text-xs tabular-nums text-slate-400">
-                              {category.priority}
-                            </span>
-                            <span className="min-w-0 flex-1 truncate">{category.name}</span>
-                            {category.mandatory ? (
-                              <span
-                                title="Absence is treated as a risk"
-                                className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-blue-700"
-                              >
-                                req
-                              </span>
-                            ) : null}
-                            {!category.is_active ? (
-                              <span className="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
-                                off
-                              </span>
-                            ) : null}
-                          </button>
-                        );
-                      })}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          <div className="min-w-0">
-            {selected ? <CategoryDetail key={selected.id} category={selected} /> : null}
-          </div>
+      ) : filtered.length ? (
+        <div className="space-y-3">
+          {filtered.map((group) => (
+            <AgreementTypeCard
+              key={group.agreement_type}
+              group={group}
+              expanded={openTypes.has(group.agreement_type) || Boolean(query.trim())}
+              onToggleExpanded={() =>
+                setOpenTypes((current) => {
+                  const next = new Set(current);
+                  if (next.has(group.agreement_type)) next.delete(group.agreement_type);
+                  else next.add(group.agreement_type);
+                  return next;
+                })
+              }
+              editable={isAdmin}
+              onChanged={invalidate}
+              onEditClause={(clause) => setEditing({ clause })}
+              onError={setActionError}
+            />
+          ))}
         </div>
       ) : (
         <EmptyState
-          icon={Settings2}
-          title="No clause categories"
-          description="Run the seed command to install the standard categories, then they appear here ready to configure."
+          icon={AlertTriangle}
+          title={query ? 'Nothing matches that search' : 'No agreement types are configured'}
+          description={
+            query
+              ? 'Try a clause name, its key, or one of its alternative headings.'
+              : 'Agreement types come from the configured document profiles. Seed them to populate this screen.'
+          }
         />
+      )}
+
+      {editing ? (
+        <ClauseDialog
+          clause={editing.clause}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null);
+            await invalidate();
+          }}
+        />
+      ) : null}
+
+      {importing ? (
+        <ImportDialog onClose={() => setImporting(false)} onImported={invalidate} />
+      ) : null}
+    </div>
+  );
+}
+
+// =============================================================================
+// One agreement type
+// =============================================================================
+function AgreementTypeCard({
+  group,
+  expanded,
+  onToggleExpanded,
+  editable,
+  onChanged,
+  onEditClause,
+  onError,
+}: {
+  group: AgreementTypeClauses;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  editable: boolean;
+  onChanged: () => void | Promise<unknown>;
+  onEditClause: (clause: AgreementClause) => void;
+  onError: (message: string | null) => void;
+}) {
+  const mapped = group.clauses.filter((clause) => clause.is_mapped);
+  const active = mapped.filter((clause) => clause.is_active);
+  const mandatory = active.filter((clause) => clause.is_mandatory);
+  const available = group.clauses.filter((clause) => !clause.is_mapped);
+
+  const setMapping = useMutation({
+    mutationFn: (body: { clause_key: string; is_active: boolean; is_mandatory: boolean }) =>
+      clauseApi.setMapping(group.agreement_type, body),
+    onSuccess: () => {
+      onError(null);
+      void onChanged();
+    },
+    onError: (caught) => onError(errorMessage(caught)),
+  });
+
+  const removeMapping = useMutation({
+    mutationFn: (clauseKey: string) => clauseApi.removeMapping(group.agreement_type, clauseKey),
+    onSuccess: () => {
+      onError(null);
+      void onChanged();
+    },
+    onError: (caught) => onError(errorMessage(caught)),
+  });
+
+  const busy = setMapping.isPending || removeMapping.isPending;
+
+  return (
+    <Card className="overflow-hidden p-0">
+      <button
+        type="button"
+        onClick={onToggleExpanded}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-3 px-5 py-4 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60"
+      >
+        {expanded ? (
+          <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block font-semibold text-slate-900 dark:text-slate-100">
+            {group.label}
+          </span>
+          <span className="mt-0.5 block font-mono text-xs text-slate-400">
+            {group.agreement_type}
+          </span>
+        </span>
+        <span className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <Badge text={`${active.length} active`} variant={active.length ? 'success' : 'neutral'} />
+          {mandatory.length ? <Badge text={`${mandatory.length} mandatory`} variant="info" /> : null}
+          {mapped.length - active.length ? (
+            <Badge text={`${mapped.length - active.length} off`} variant="warning" />
+          ) : null}
+        </span>
+      </button>
+
+      {expanded ? (
+        <div className="border-t border-slate-200 dark:border-slate-700">
+          {mapped.length ? (
+            <ul className="divide-y divide-slate-100 dark:divide-slate-700/50">
+              {mapped.map((clause) => (
+                <ClauseRow
+                  key={clause.clause_key}
+                  clause={clause}
+                  editable={editable}
+                  busy={busy}
+                  onToggleActive={() =>
+                    setMapping.mutate({
+                      clause_key: clause.clause_key,
+                      is_active: !clause.is_active,
+                      is_mandatory: clause.is_mandatory,
+                    })
+                  }
+                  onToggleMandatory={() =>
+                    setMapping.mutate({
+                      clause_key: clause.clause_key,
+                      is_active: clause.is_active,
+                      is_mandatory: !clause.is_mandatory,
+                    })
+                  }
+                  onEdit={() => onEditClause(clause)}
+                  onRemove={() => removeMapping.mutate(clause.clause_key)}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="px-5 py-4 text-sm text-slate-500">
+              No clauses are configured for this agreement type, so a document of this type is
+              checked against the whole Clause Master.
+            </p>
+          )}
+
+          {editable && available.length ? (
+            <AddClauseRow
+              available={available}
+              busy={busy}
+              onAdd={(clauseKey) =>
+                setMapping.mutate({ clause_key: clauseKey, is_active: true, is_mandatory: false })
+              }
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
+function ClauseRow({
+  clause,
+  editable,
+  busy,
+  onToggleActive,
+  onToggleMandatory,
+  onEdit,
+  onRemove,
+}: {
+  clause: AgreementClause;
+  editable: boolean;
+  busy: boolean;
+  onToggleActive: () => void;
+  onToggleMandatory: () => void;
+  onEdit: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <li
+      className={[
+        'flex flex-col gap-3 px-5 py-3 sm:flex-row sm:items-center',
+        clause.is_active ? '' : 'bg-slate-50/70 dark:bg-slate-900/30',
+      ].join(' ')}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            className={[
+              'font-medium',
+              clause.is_active
+                ? 'text-slate-900 dark:text-slate-100'
+                : 'text-slate-400 line-through',
+            ].join(' ')}
+          >
+            {clause.name}
+          </span>
+          {clause.is_mandatory ? <Badge text="Mandatory" variant="info" /> : null}
+          {clause.group_name ? (
+            <span className="text-xs text-slate-400">{clause.group_name}</span>
+          ) : null}
+        </div>
+        {clause.synonyms.length ? (
+          <p className="mt-1 truncate text-xs text-slate-500">
+            also called {clause.synonyms.join(', ')}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2">
+        <Toggle
+          label="Active"
+          checked={clause.is_active}
+          disabled={!editable || busy}
+          onChange={onToggleActive}
+        />
+        <Toggle
+          label="Mandatory"
+          checked={clause.is_mandatory}
+          disabled={!editable || busy || !clause.is_active}
+          onChange={onToggleMandatory}
+        />
+        {editable ? (
+          <>
+            <button
+              type="button"
+              onClick={onEdit}
+              title="Edit this clause everywhere it is used"
+              aria-label={`Edit ${clause.name}`}
+              className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={busy}
+              title="Remove from this agreement type only"
+              aria-label={`Remove ${clause.name} from this agreement type`}
+              className="rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function Toggle({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onChange}
+      className={[
+        'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ring-1 ring-inset transition',
+        checked
+          ? 'bg-blue-600 text-white ring-blue-600'
+          : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 ring-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700',
+        disabled ? 'cursor-not-allowed opacity-50' : '',
+      ].join(' ')}
+    >
+      <span className={['h-1.5 w-1.5 rounded-full', checked ? 'bg-white dark:bg-slate-800' : 'bg-slate-300'].join(' ')} />
+      {label}
+    </button>
+  );
+}
+
+function AddClauseRow({
+  available,
+  busy,
+  onAdd,
+}: {
+  available: AgreementClause[];
+  busy: boolean;
+  onAdd: (clauseKey: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-t border-slate-100 bg-slate-50/60 px-5 py-3 dark:border-slate-700/50 dark:bg-slate-900/30">
+      {open ? (
+        <div className="flex flex-wrap gap-2">
+          {available.map((clause) => (
+            <button
+              key={clause.clause_key}
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                onAdd(clause.clause_key);
+                setOpen(false);
+              }}
+              className="rounded-full bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 ring-1 ring-inset ring-slate-200 transition hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50"
+            >
+              + {clause.name}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="px-2 text-xs font-medium text-slate-500 hover:text-slate-800"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-xs font-medium text-blue-600 transition hover:text-blue-700"
+        >
+          + Add a clause to this agreement type ({available.length} available)
+        </button>
       )}
     </div>
   );
 }
 
-function CategoryDetail({ category }: { category: ClauseCategory }) {
-  const queryClient = useQueryClient();
-  const initial = {
-    mandatory: category.mandatory,
-    confidence_threshold: category.confidence_threshold,
-    is_active: category.is_active,
-    priority: category.priority,
-  };
-  const [draft, setDraft] = useState(initial);
-  const [saveError, setSaveError] = useState<string | null>(null);
+// =============================================================================
+// Create / edit a clause
+// =============================================================================
+function ClauseDialog({
+  clause,
+  onClose,
+  onSaved,
+}: {
+  clause: AgreementClause | null;
+  onClose: () => void;
+  onSaved: () => void | Promise<unknown>;
+}) {
+  const isNew = clause === null;
+  const [key, setKey] = useState('');
+  const [name, setName] = useState(clause?.name ?? '');
+  const [description, setDescription] = useState(clause?.description ?? '');
+  const [groupName, setGroupName] = useState(clause?.group_name ?? '');
+  const [synonyms, setSynonyms] = useState((clause?.synonyms ?? []).join(', '));
+  const [error, setError] = useState<string | null>(null);
 
-  const save = useMutation({
-    mutationFn: () => clauseMasterApi.update(category.id, draft),
-    onSuccess: async () => {
-      setSaveError(null);
-      await queryClient.invalidateQueries({ queryKey: ['clause-master'] });
-    },
-    onError: (caught) => setSaveError(errorMessage(caught)),
+  const body = () => ({
+    key: isNew ? key.trim() : undefined,
+    name: name.trim(),
+    description: description.trim() || null,
+    group_name: groupName.trim() || null,
+    synonyms: synonyms
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
   });
 
-  const dirty =
-    draft.mandatory !== category.mandatory ||
-    draft.confidence_threshold !== category.confidence_threshold ||
-    draft.is_active !== category.is_active ||
-    draft.priority !== category.priority;
+  const save = useMutation({
+    mutationFn: () =>
+      isNew ? clauseApi.createClause(body()) : clauseApi.updateClause(clause.clause_key, body()),
+    onSuccess: () => {
+      setError(null);
+      void onSaved();
+    },
+    onError: (caught) => setError(errorMessage(caught)),
+  });
 
-  const rule = category.current_rule;
-  const uiConfig = category.ui_config ?? {};
-  const dropdown = (uiConfig.cap_dropdown ?? uiConfig.dropdown) as
-    { field: string; options: string[] } | undefined;
+  const remove = useMutation({
+    mutationFn: () => clauseApi.deleteClause(clause?.clause_key ?? ''),
+    onSuccess: () => {
+      setError(null);
+      void onSaved();
+    },
+    onError: (caught) => setError(errorMessage(caught)),
+  });
 
   return (
-    <div className="space-y-4">
-      <Card>
-        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-lg font-semibold text-slate-900">{category.name}</h3>
-              <span className="rounded-lg bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600">
-                {category.key}
-              </span>
-              {category.is_system ? (
-                <Badge text="System" variant="neutral" title="Seeded with the platform" />
-              ) : null}
-            </div>
-            {category.description ? (
-              <p className="mt-1.5 text-sm leading-6 text-slate-500">{category.description}</p>
-            ) : null}
-          </div>
-
-          {dirty ? (
-            <div className="flex shrink-0 gap-2">
-              <Button variant="secondary" size="sm" onClick={() => setDraft(initial)}>
-                Discard
-              </Button>
-              <Button size="sm" busy={save.isPending} onClick={() => save.mutate()}>
-                {save.isPending ? 'Saving…' : 'Save'}
-              </Button>
-            </div>
+    <Modal
+      open
+      onClose={onClose}
+      title={isNew ? 'New clause' : `Edit ${clause.name}`}
+      description={
+        isNew
+          ? 'Added to the taxonomy. Attach it to an agreement type afterwards to start looking for it.'
+          : 'Changes apply everywhere this clause is used, not only to the agreement type you opened it from.'
+      }
+      footer={
+        <>
+          {!isNew ? (
+            <Button
+              variant="ghost"
+              icon={Trash2}
+              busy={remove.isPending}
+              onClick={() => remove.mutate()}
+            >
+              Retire
+            </Button>
           ) : null}
-        </div>
-
-        {saveError ? (
-          <div className="mb-4">
-            <ErrorBanner message={saveError} />
-          </div>
-        ) : null}
-
-        <div className="grid gap-5 sm:grid-cols-2">
-          <label className="flex gap-3">
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            busy={save.isPending}
+            disabled={!name.trim() || (isNew && !key.trim())}
+            onClick={() => save.mutate()}
+          >
+            {isNew ? 'Create' : 'Save'}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {isNew ? (
+          <label className="block space-y-1">
+            <span className="text-sm font-medium text-slate-700">Key</span>
             <input
-              type="checkbox"
-              checked={draft.mandatory}
-              onChange={(event) => setDraft({ ...draft, mandatory: event.target.checked })}
-              className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              value={key}
+              onChange={(event) =>
+                setKey(event.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_'))
+              }
+              placeholder="e.g. data_residency"
+              className={`${inputClasses} font-mono`}
             />
-            <span>
-              <span className="block text-sm font-medium text-slate-800">Mandatory</span>
-              <span className="mt-0.5 block text-xs leading-5 text-slate-500">
-                When absent from a contract, its absence is recorded as a risk and contributes
-                to the risk score.
-              </span>
+            <span className="block text-xs text-slate-500">
+              Permanent. Every extracted clause references it, so it cannot change afterwards.
             </span>
           </label>
-
-          <label className="flex gap-3">
-            <input
-              type="checkbox"
-              checked={draft.is_active}
-              onChange={(event) => setDraft({ ...draft, is_active: event.target.checked })}
-              className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
-            <span>
-              <span className="block text-sm font-medium text-slate-800">Active</span>
-              <span className="mt-0.5 block text-xs leading-5 text-slate-500">
-                Inactive categories are skipped by future extractions. Existing extractions are
-                unaffected.
-              </span>
-            </span>
-          </label>
-
-          <div>
-            <p className="text-sm font-medium text-slate-800">Confidence threshold</p>
-            <div className="mt-2 flex items-center gap-3">
-              <input
-                type="range"
-                min={0.5}
-                max={0.99}
-                step={0.01}
-                value={draft.confidence_threshold}
-                onChange={(event) =>
-                  setDraft({ ...draft, confidence_threshold: Number(event.target.value) })
-                }
-                className="h-2 flex-1 cursor-pointer appearance-none rounded-full bg-slate-200 accent-blue-600"
-              />
-              <span className="w-12 text-right font-mono text-sm tabular-nums text-slate-700">
-                {formatPercent(draft.confidence_threshold)}
-              </span>
-            </div>
-            <p className="mt-1.5 text-xs leading-5 text-slate-500">
-              Extractions below this are routed to human review rather than accepted.
-            </p>
-          </div>
-
-          <div>
-            <p className="text-sm font-medium text-slate-800">Priority</p>
-            <input
-              type="number"
-              min={1}
-              value={draft.priority}
-              onChange={(event) => setDraft({ ...draft, priority: Number(event.target.value) })}
-              className={`${inputClasses} mt-2 w-28`}
-            />
-            <p className="mt-1.5 text-xs leading-5 text-slate-500">
-              Orders the clause tabs on the contract screen.
-            </p>
-          </div>
-        </div>
-      </Card>
-
-      <Card>
-        <SectionHeader
-          title="Presentation"
-          subtitle="How this category appears on the contract screen."
-        />
-        <dl className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-            <dt className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Placement
-            </dt>
-            <dd className="mt-1 text-sm text-slate-900">
-              {humanise(String(uiConfig.placement ?? 'list'))}
-            </dd>
-          </div>
-          <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-            <dt className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Tab label
-            </dt>
-            <dd className="mt-1 text-sm text-slate-900">
-              {String(uiConfig.tab_label ?? category.name)}
-            </dd>
-          </div>
-        </dl>
-
-        {Array.isArray(uiConfig.primary_fields) && uiConfig.primary_fields.length ? (
-          <ChipList
-            label="Leading fields"
-            values={(uiConfig.primary_fields as string[]).map(humanise)}
-          />
         ) : null}
 
-        {dropdown ? (
-          <ChipList
-            label={`Dropdown — ${humanise(dropdown.field)}`}
-            values={dropdown.options.map(humanise)}
+        <label className="block space-y-1">
+          <span className="text-sm font-medium text-slate-700">Name</span>
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className={inputClasses}
           />
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-sm font-medium text-slate-700">Alternative headings</span>
+          <input
+            value={synonyms}
+            onChange={(event) => setSynonyms(event.target.value)}
+            placeholder="Liability Cap, Limitation on Damages"
+            className={inputClasses}
+          />
+          <span className="block text-xs text-slate-500">
+            Comma separated. The strongest signal the detector has — a clause headed &quot;Liability
+            Cap&quot; is found because this list says so.
+          </span>
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-sm font-medium text-slate-700">Group</span>
+          <input
+            value={groupName}
+            onChange={(event) => setGroupName(event.target.value)}
+            placeholder="Risk, Legal, Commercial..."
+            className={inputClasses}
+          />
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-sm font-medium text-slate-700">Description</span>
+          <textarea
+            rows={2}
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            className={`${inputClasses} resize-y`}
+          />
+        </label>
+
+        {!isNew ? (
+          <NoticeBanner message="Retiring removes this clause from every agreement type and from future extractions. Contracts already processed keep the clauses they were extracted with." />
         ) : null}
 
-        {uiConfig.highlight_when != null &&
-        Object.keys(uiConfig.highlight_when as object).length ? (
-          <ChipList
-            label="Flagged when"
-            values={Object.entries(uiConfig.highlight_when as Record<string, unknown>).map(
-              ([field, value]) => `${humanise(field)} = ${String(value)}`,
-            )}
-          />
-        ) : null}
-      </Card>
-
-      {rule ? (
-        <Card>
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-900">Extraction rule</h3>
-            <span className="rounded-lg bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-600">
-              v{rule.version}
-            </span>
-          </div>
-          <p className="text-xs leading-5 text-slate-500">
-            Created {formatDateTime(rule.created_at)}
-            {rule.change_note ? ` — ${rule.change_note}` : ''}. Rules are versioned, so any
-            extraction can be explained by the rule that produced it.
-          </p>
-
-          {rule.synonyms.length ? (
-            <ChipList label="Also known as" values={rule.synonyms} />
-          ) : null}
-
-          <details className="mt-4 group">
-            <summary className="cursor-pointer text-sm font-medium text-blue-600 hover:text-blue-700">
-              Matching rule
-            </summary>
-            <pre className="mt-2 overflow-x-auto rounded-xl bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-100">
-              {JSON.stringify(rule.extraction_rule, null, 2)}
-            </pre>
-          </details>
-
-          <details className="mt-2 group">
-            <summary className="cursor-pointer text-sm font-medium text-blue-600 hover:text-blue-700">
-              Output schema
-            </summary>
-            <pre className="mt-2 overflow-x-auto rounded-xl bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-100">
-              {JSON.stringify(rule.output_schema, null, 2)}
-            </pre>
-          </details>
-        </Card>
-      ) : null}
-    </div>
+        {error ? <ErrorBanner message={error} /> : null}
+      </div>
+    </Modal>
   );
 }
 
-const ChipList = ({ label, values }: { label: string; values: string[] }) => (
-  <div className="mt-4">
-    <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-      {label}
-    </p>
-    <div className="flex flex-wrap gap-2">
-      {values.map((value) => (
-        <span
-          key={value}
-          className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600"
-        >
-          {value}
-        </span>
-      ))}
-    </div>
-  </div>
-);
+// =============================================================================
+// Import
+// =============================================================================
+function ImportDialog({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported: () => void | Promise<unknown>;
+}) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [parsed, setParsed] = useState<ParsedSheet | null>(null);
+  const [deactivateMissing, setDeactivateMissing] = useState(false);
+  const [result, setResult] = useState<ClauseImportResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onPick(file: File | undefined) {
+    if (!file) return;
+    setError(null);
+    setResult(null);
+    try {
+      const sheet = await parseClauseSheet(file);
+      setParsed(sheet);
+      setFileName(file.name);
+    } catch (caught) {
+      setParsed(null);
+      setFileName(null);
+      setError(errorMessage(caught));
+    }
+  }
+
+  const apply = useMutation({
+    mutationFn: () =>
+      clauseApi.importRows(parsed?.rows ?? [], {
+        deactivate_missing: deactivateMissing,
+        create_missing_clauses: true,
+      }),
+    onSuccess: async (outcome) => {
+      setResult(outcome);
+      setError(null);
+      await onImported();
+    },
+    onError: (caught) => setError(errorMessage(caught)),
+  });
+
+  const rowCount = parsed?.rows.length ?? 0;
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Import clauses"
+      description="Accepts .xlsx or .csv using the same columns the export produces."
+      footer={
+        result ? (
+          <Button onClick={onClose}>Done</Button>
+        ) : (
+          <>
+            <Button variant="secondary" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button busy={apply.isPending} disabled={!parsed} onClick={() => apply.mutate()}>
+              {rowCount ? `Apply ${rowCount} rows` : 'Apply'}
+            </Button>
+          </>
+        )
+      }
+    >
+      <div className="space-y-3">
+        {!result ? (
+          <>
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              className="hidden"
+              onChange={(event) => void onPick(event.target.files?.[0])}
+            />
+            <Button variant="secondary" icon={Upload} onClick={() => fileInput.current?.click()}>
+              {fileName ?? 'Choose a file'}
+            </Button>
+
+            {parsed ? (
+              <p className="text-sm text-slate-600">
+                {rowCount} row{rowCount === 1 ? '' : 's'} read.
+                {parsed.unknownColumns.length ? (
+                  <span className="block text-xs text-amber-600">
+                    Ignored unrecognised columns: {parsed.unknownColumns.join(', ')}
+                  </span>
+                ) : null}
+              </p>
+            ) : null}
+
+            <label className="flex items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={deactivateMissing}
+                onChange={(event) => setDeactivateMissing(event.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Deactivate clauses the file does not mention
+                <span className="block text-xs text-slate-500">
+                  Only within the agreement types the file covers. Off by default — a partial sheet
+                  is the usual case, and switching off everything it omits is rarely what was meant.
+                </span>
+              </span>
+            </label>
+          </>
+        ) : (
+          <div className="space-y-2 text-sm">
+            <p className="font-medium text-slate-800">
+              {result.mappings_created} added, {result.mappings_updated} updated
+              {result.mappings_deactivated ? `, ${result.mappings_deactivated} deactivated` : ''}.
+            </p>
+            {result.clauses_created || result.clauses_updated ? (
+              <p className="text-slate-600">
+                {result.clauses_created} new clause{result.clauses_created === 1 ? '' : 's'},{' '}
+                {result.clauses_updated} edited.
+              </p>
+            ) : null}
+            {result.skipped.length ? (
+              <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-900">
+                <p className="font-semibold">{result.skipped.length} row(s) skipped:</p>
+                <ul className="mt-1 space-y-0.5">
+                  {result.skipped.slice(0, 8).map((row, index) => (
+                    <li key={`${row.row}-${index}`}>
+                      row {row.row} ({row.clause_key || 'no key'}) — {row.reason}
+                    </li>
+                  ))}
+                  {result.skipped.length > 8 ? <li>and {result.skipped.length - 8} more</li> : null}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {error ? <ErrorBanner message={error} /> : null}
+      </div>
+    </Modal>
+  );
+}
 
 export default ClauseMasterPage;

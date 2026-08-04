@@ -12,6 +12,7 @@ provider-level impossibility rather than something the validator must catch.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -221,16 +222,48 @@ class OpenAIProvider(IInferenceProvider):
     ) -> AsyncIterator[str]:
         client = self._get_client()
         model = self._model_for(purpose)
-        try:
-            stream = await client.chat.completions.create(
+        budget = max_tokens or self.settings.llm.max_output_tokens_streaming
+        messages: list[Any] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+
+        async def _open(limit: int) -> Any:
+            return await client.chat.completions.create(
                 model=model,
-                max_completion_tokens=max_tokens or self.settings.llm.max_output_tokens_streaming,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
+                max_completion_tokens=limit,
+                messages=messages,
                 stream=True,
             )
+
+        try:
+            try:
+                stream = await _open(budget)
+            except Exception as exc:
+                # The model refused the *ceiling*, not the request. Its error names
+                # the limit it will accept, so asking again for that is a better
+                # answer than failing.
+                #
+                # This is worth handling rather than leaving to configuration
+                # because the default ceiling is deliberately generous - thinking
+                # counts against it - and every model has a different maximum. When
+                # it is too high the failure is total and silent-looking: the
+                # stream opens, emits its plan, then dies, and the user sees a
+                # Copilot that "does not respond". Non-streaming keeps working,
+                # because it uses a smaller budget, which makes it look like a
+                # streaming bug rather than a number being out of range.
+                allowed = _max_completion_tokens_from(exc)
+                if allowed is None or allowed >= budget:
+                    raise
+                logger.warning(
+                    "llm_stream_budget_reduced",
+                    provider=self.name,
+                    model=model,
+                    requested=budget,
+                    allowed=allowed,
+                )
+                stream = await _open(allowed)
+
             async for chunk in stream:
                 if not chunk.choices:
                     continue
@@ -269,6 +302,15 @@ class OpenAIProvider(IInferenceProvider):
         }
         if response_format is not None:
             request["response_format"] = response_format
+
+        # Extraction only. Sent solely when it differs from the provider default,
+        # so a deployment that has not configured it produces byte-identical
+        # requests to before this parameter existed - which is what makes the
+        # default a genuine no-op rather than a claimed one.
+        if purpose == "extraction":
+            temperature = self.settings.llm.extraction_temperature
+            if temperature != 1.0:
+                request["temperature"] = temperature
 
         async def _attempt() -> Any:
             return await client.chat.completions.create(**request)
@@ -355,6 +397,42 @@ class OpenAIProvider(IInferenceProvider):
             logger.warning("openai_health_check_failed", provider=self.name, error=str(exc))
             metrics.provider_health.labels(provider=self.name, kind="llm").set(0)
             return False
+
+
+#: "This model supports at most 32768 completion tokens" - the ceiling the model
+#: will accept, stated in its own rejection.
+_TOKEN_LIMIT_PATTERN = re.compile(
+    r"supports at most (\d[\d,_]*)\s*(?:completion\s*)?tokens", re.IGNORECASE
+)
+
+
+def _max_completion_tokens_from(exc: Exception) -> int | None:
+    """The ceiling a model named while refusing a too-large ``max_tokens``.
+
+    Returns None for any other failure, so an unrelated 400 is not mistaken for a
+    budget problem and quietly retried.
+
+    Parsing a provider message is ordinarily a bad idea - it is not a contract and
+    can change without notice. It is worth it here because the failure mode is so
+    poor without it: a ceiling above what the model accepts makes *every* streamed
+    answer fail while non-streaming keeps working, which reads as a broken feature
+    rather than a number that needs lowering. If the wording changes this simply
+    stops helping and the original error surfaces, which is where it started.
+    """
+    # Case-insensitive to match the pattern below. Gateways echo the parameter
+    # name with varying capitalisation, and a guard stricter than the regex it
+    # guards is an inconsistency that only shows up on one provider's wording.
+    message = str(exc)
+    lowered = message.lower()
+    if "max_tokens" not in lowered and "max_completion_tokens" not in lowered:
+        return None
+    match = _TOKEN_LIMIT_PATTERN.search(message)
+    if not match:
+        return None
+    try:
+        return int(match.group(1).replace(",", "").replace("_", ""))
+    except ValueError:  # pragma: no cover - the pattern only matches digits
+        return None
 
 
 def _translate_openai_error(exc: Exception, provider: str) -> ProviderError:

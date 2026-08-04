@@ -12,8 +12,6 @@
 
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import {
-  ChevronDown,
-  ChevronUp,
   FileText,
   SlidersHorizontal,
   Upload,
@@ -24,7 +22,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import { contracts as contractsApi, type ContractFilters } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
-import type { ContractListItem } from '@/api/types';
+import type { ContractListItem, ContractStatus, RiskBand } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getRiskVariant, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner } from '@/components/common/Banner';
@@ -34,6 +32,9 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Pagination } from '@/components/common/Pagination';
+import { FilterChip } from '@/components/common/FilterChip';
+import { SortableHeader } from '@/components/common/SortableHeader';
+import { ExportButton } from '@/components/ExportButton';
 import { useAuth } from '@/lib/auth';
 import {
   daysUntil,
@@ -48,6 +49,19 @@ import { useProjectScope } from '@/lib/scope';
 
 const PAGE_SIZE = 10;
 
+/** Filterable contract states, in lifecycle order rather than alphabetical. */
+const STATUSES: ContractStatus[] = [
+  'uploaded',
+  'processing',
+  'ready',
+  'needs_review',
+  'failed',
+  'archived',
+];
+
+/** Highest risk first: it is the band a reviewer is looking for. */
+const RISK_BANDS: RiskBand[] = ['high', 'medium', 'low'];
+
 export function ContractsPage() {
   const { projectId } = useProjectScope();
   const { user } = useAuth();
@@ -59,7 +73,7 @@ export function ContractsPage() {
   const filters: ContractFilters = {
     page: Number(params.get('page') ?? 1),
     size: PAGE_SIZE,
-    q: params.get('q') ?? undefined,
+    search: params.get('q') ?? undefined,
     status: params.getAll('status'),
     risk_band: params.getAll('risk_band'),
     agreement_type: params.getAll('agreement_type'),
@@ -72,6 +86,30 @@ export function ContractsPage() {
   };
 
   const [searchInput, setSearchInput] = useState('');
+
+  /**
+   * The same filters, in the shape the export endpoint takes.
+   *
+   * The list endpoint accepts flat query parameters; the export takes a
+   * `ContractFilterParams` body, where free text is `search` and dates are
+   * ranges. Translating here — rather than hoping the two happen to line up —
+   * is what keeps the workbook equal to the view it was launched from.
+   */
+  const exportFilters: Record<string, unknown> = {};
+  if (filters.search) exportFilters.search = filters.search;
+  if (filters.status?.length) exportFilters.status = filters.status;
+  if (filters.risk_band?.length) exportFilters.risk_band = filters.risk_band;
+  if (filters.agreement_type?.length) exportFilters.agreement_type = filters.agreement_type;
+  if (filters.needs_review !== undefined) exportFilters.needs_review = filters.needs_review;
+  if (filters.has_unlimited_liability !== undefined) {
+    exportFilters.has_unlimited_liability = filters.has_unlimited_liability;
+  }
+  if (filters.expiring_before || filters.expiring_after) {
+    exportFilters.expiration_date = {
+      from: filters.expiring_after ?? null,
+      to: filters.expiring_before ?? null,
+    };
+  }
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['contracts', projectId, params.toString()],
@@ -100,6 +138,30 @@ export function ContractsPage() {
     setParams(next);
   }
 
+  /** Add or remove one value of a repeated query parameter. */
+  function toggleMulti(key: string, value: string) {
+    update((next) => {
+      const current = next.getAll(key);
+      next.delete(key);
+      // Unlike the alerts screen, deselecting everything here is a valid state:
+      // no status filter means all statuses, which is the default view rather
+      // than an empty one.
+      for (const entry of current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value]) {
+        next.append(key, entry);
+      }
+    });
+  }
+
+  /** Set or clear a boolean flag carried as `?key=true`. */
+  function toggleFlag(key: string, checked: boolean) {
+    update((next) => {
+      if (checked) next.set(key, 'true');
+      else next.delete(key);
+    });
+  }
+
   function toggleSort(field: string) {
     update((next) => {
       const currentBy = next.get('sort_by');
@@ -116,7 +178,7 @@ export function ContractsPage() {
   const activeFilterCount =
     (filters.status?.length ?? 0) +
     (filters.risk_band?.length ?? 0) +
-    (filters.q ? 1 : 0) +
+    (filters.search ? 1 : 0) +
     (filters.needs_review ? 1 : 0) +
     (filters.has_unlimited_liability ? 1 : 0) +
     (filters.expiring_before ? 1 : 0);
@@ -153,6 +215,9 @@ export function ContractsPage() {
             >
               Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
             </Button>
+            {/* The same filters the table is showing, so the workbook and the
+                screen cannot disagree. */}
+            <ExportButton filters={exportFilters} projectId={projectId} />
             {/* Uploading is project-member work; an administrator has no upload
                 permission, so the call to action would only lead to a 403. */}
             {!isAdmin ? (
@@ -204,7 +269,7 @@ export function ContractsPage() {
               onChange={(e) => setSearchInput(e.target.value)}
               className={`${inputClasses} sm:flex-1`}
             />
-            {/* <div className="relative sm:w-52">
+            <div className="relative sm:w-52">
               <select
                 aria-label="Sort order"
                 value={`${filters.sort_by ?? 'created_at'}:${filters.sort_dir ?? 'desc'}`}
@@ -224,54 +289,48 @@ export function ContractsPage() {
                 <option value="title:asc">Title A–Z</option>
               </select>
               <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[#5B6478]" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
-            </div> */}
+            </div>
           </div>
 
           {/* Status + risk chips combined */}
-          {/* <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Status</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">
+              Status
+            </span>
             {STATUSES.map((status) => (
-              <Chip
+              <FilterChip
                 key={status}
-                label={humanise(status)}
+                label={formatStatusLabel(status)}
                 active={Boolean(filters.status?.includes(status))}
                 onClick={() => toggleMulti('status', status)}
               />
             ))}
             <div className="mx-1 h-4 w-px bg-slate-200 dark:bg-slate-600" />
-            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">Risk</span>
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">
+              Risk
+            </span>
             {RISK_BANDS.map((band) => (
-              <Chip
+              <FilterChip
                 key={band}
                 label={`${humanise(band)} risk`}
                 active={Boolean(filters.risk_band?.includes(band))}
                 onClick={() => toggleMulti('risk_band', band)}
               />
             ))}
-          </div> */}
+          </div>
 
           {/* Toggles */}
           <div className="flex flex-wrap items-center gap-4">
-            {/* <Toggle
+            <Toggle
               label="Needs review"
               checked={Boolean(filters.needs_review)}
-              onChange={(checked) =>
-                update((next) => {
-                  if (checked) next.set('needs_review', 'true');
-                  else next.delete('needs_review');
-                })
-              }
+              onChange={(checked) => toggleFlag('needs_review', checked)}
             />
             <Toggle
               label="Unlimited liability"
               checked={Boolean(filters.has_unlimited_liability)}
-              onChange={(checked) =>
-                update((next) => {
-                  if (checked) next.set('has_unlimited_liability', 'true');
-                  else next.delete('has_unlimited_liability');
-                })
-              }
-            /> */}
+              onChange={(checked) => toggleFlag('has_unlimited_liability', checked)}
+            />
             {activeFilterCount > 0 ? (
               <Button
                 variant="ghost"
@@ -302,73 +361,29 @@ export function ContractsPage() {
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50/80 text-xs dark:bg-slate-800/80">
                   <tr className="border-b border-slate-200 dark:border-slate-700">
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button type="button" onClick={() => toggleSort('title')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
-                        Contract
-                        {filters.sort_by === 'title' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
-                      </button>
-                    </th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button type="button" onClick={() => toggleSort('agreement_type')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
-                        Type
-                        {filters.sort_by === 'agreement_type' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
-                      </button>
-                    </th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button type="button" onClick={() => toggleSort('status')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
-                        Status
-                        {filters.sort_by === 'status' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
-                      </button>
-                    </th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button type="button" onClick={() => toggleSort('risk_score')} className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition">
-                        Risk
-                        {filters.sort_by === 'risk_score' ? (filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />) : <ChevronDown className="h-3.5 w-3.5 opacity-30" />}
-                      </button>
-                    </th>
-                    {/* <th className="px-5 py-3.5 text-right font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button
-                        type="button"
-                        onClick={() => toggleSort('contract_value')}
-                        className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition"
-                      >
-                        Value
-                        {filters.sort_by === 'contract_value' ? (
-                          filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
-                        )}
-                      </button>
-                    </th> */}
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button
-                        type="button"
-                        onClick={() => toggleSort('created_at')}
-                        className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition"
-                      >
-                        Created On
-                        {filters.sort_by === 'created_at' ? (
-                          filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
-                        )}
-                      </button>
-                    </th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
-                      <button
-                        type="button"
-                        onClick={() => toggleSort('expiration_date')}
-                        className="inline-flex items-center gap-1 hover:text-[#0F172A] dark:hover:text-slate-100 transition"
-                      >
-                        Expires
-                        {filters.sort_by === 'expiration_date' ? (
-                          filters.sort_dir === 'asc' ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5 opacity-30" />
-                        )}
-                      </button>
-                    </th>
-                    <th className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400">
+                    {[
+                      { label: 'Contract', field: 'title' },
+                      { label: 'Type', field: 'agreement_type' },
+                      { label: 'Status', field: 'status' },
+                      { label: 'Risk', field: 'risk_score' },
+                      { label: 'Value', field: 'contract_value', align: 'right' as const },
+                      { label: 'Created On', field: 'created_at' },
+                      { label: 'Expires', field: 'expiration_date' },
+                    ].map((column) => (
+                      <SortableHeader
+                        key={column.field}
+                        label={column.label}
+                        field={column.field}
+                        align={column.align}
+                        activeField={filters.sort_by}
+                        direction={filters.sort_dir}
+                        onSort={toggleSort}
+                      />
+                    ))}
+                    <th
+                      scope="col"
+                      className="px-5 py-3.5 font-semibold uppercase tracking-[0.06em] text-slate-500 dark:text-slate-400"
+                    >
                       Uploaded By
                     </th>
                   </tr>
@@ -450,6 +465,34 @@ export function ContractsPage() {
 }
 
 // =============================================================================
+// Filter controls
+// =============================================================================
+/** A toggleable filter pill. Same shape as the one on the alerts screen. */
+
+/** A labelled on/off switch for a boolean filter. */
+function Toggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="inline-flex cursor-pointer items-center gap-2 text-[13px] text-slate-600 dark:text-slate-300">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-blue-600 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-800"
+      />
+      {label}
+    </label>
+  );
+}
+
+// =============================================================================
 // Rows
 // =============================================================================
 /** Shared derivation so the table row and the card cannot disagree. */
@@ -511,9 +554,9 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
           variant={getRiskVariant(contract.risk_band)}
         />
       </td>
-      {/* <td className="px-5 py-3 text-right tabular-nums text-slate-700 dark:text-slate-300">
+      <td className="px-5 py-3 text-right tabular-nums text-slate-700 dark:text-slate-300">
         {formatMoney(contract.contract_value, contract.currency)}
-      </td> */}
+      </td>
       <td className="px-5 py-3 text-slate-600 dark:text-slate-300">
         {formatDateTimeFull(contract.created_at)}
       </td>

@@ -18,32 +18,24 @@ import {
   Upload,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts';
 
-import { contracts as contractsApi, dashboard as dashboardApi } from '@/api/endpoints';
+import { dashboard as dashboardApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
 import type { KpiTile } from '@/api/types';
+import { Badge } from '@/components/common/Badge';
 import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import {
   Card,
   KpiSkeleton,
+  PageHeader,
   SectionHeader,
 } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { formatMoney, formatNumber, humanise } from '@/lib/format';
+import { formatDate, formatNumber, humanise } from '@/lib/format';
+import { getRiskVariant } from '@/lib/badges';
 import { useAuth } from '@/lib/auth';
 import { useProjectScope } from '@/lib/scope';
 import { useTheme } from '@/lib/theme';
@@ -66,17 +58,11 @@ const RISK_FILLS: Record<string, string> = {
   low: '#22c55e',
 };
 
-function truncName(s: string, max = 22): string {
-  return s.length > max ? s.slice(0, max) + '…' : s;
-}
-
-function shortValue(v: number): string {
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
-  return String(v);
-}
-
 const KPI_ICONS = [FileText, CalendarClock, ShieldAlert, AlertTriangle, BarChart3];
+
+/** Matches `_EXPIRING_WINDOW_DAYS` in the overview endpoint - the horizon the
+ *  backend used to select these rows, so the empty state names the same window. */
+const EXPIRY_WINDOW_DAYS = 90;
 
 /** Maps a KPI key to its semantic accent and bar color. */
 function getKpiColor(key: string): { accent: string; bar: string } {
@@ -107,15 +93,8 @@ export function DashboardPage() {
     queryFn: () => dashboardApi.overview(projectId),
   });
 
-  const topContractsQuery = useQuery({
-    queryKey: ['contracts-top-value', projectId],
-    queryFn: () => contractsApi.list(projectId, { sort_by: 'contract_value', sort_dir: 'desc', size: 5, page: 1 }),
-  });
-
   const { theme } = useTheme();
   const isDark = theme === 'dark';
-  const chartTick = { fontSize: 11, fill: isDark ? '#94a3b8' : '#64748b' };
-  const chartGrid = isDark ? '#334155' : '#e2e8f0';
   const tooltipStyle = {
     background: isDark ? '#1e293b' : '#fff',
     border: `1px solid ${isDark ? '#334155' : '#E4E7EC'}`,
@@ -124,14 +103,11 @@ export function DashboardPage() {
     color: isDark ? '#f1f5f9' : '#0f172a',
   };
 
-  const topContracts = (topContractsQuery.data?.items ?? [])
-    .filter((c) => (c.contract_value ?? 0) > 0)
-    .map((c) => ({
-      name: truncName(c.title ?? c.original_file_name ?? 'Untitled'),
-      fullName: c.title ?? c.original_file_name ?? 'Untitled',
-      value: c.contract_value ?? 0,
-      currency: c.currency ?? 'USD',
-    }));
+  // The renewal watchlist, in date order. `expiring_soon` has been computed by
+  // the overview endpoint all along and never rendered - it carries the notice
+  // deadline and the auto-renewal flag, which is the pair that decides whether a
+  // contract needs action this week or can wait.
+  const expiring = data?.expiring_soon ?? [];
 
   function openDrilldown(kpi: KpiTile) {
     if (!kpi.drilldown) return;
@@ -146,7 +122,7 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-5">
-      {/* <PageHeader
+      <PageHeader
         title="Overview"
         subtitle={
           projectId
@@ -155,7 +131,7 @@ export function DashboardPage() {
               ? `Across ${data.project_ids.length} project${data.project_ids.length === 1 ? '' : 's'} you can see`
               : 'Your contract repository at a glance'
         }
-      /> */}
+      />
 
       {error ? (
         <ErrorBanner message={errorMessage(error)} onRetry={() => void refetch()} />
@@ -236,42 +212,80 @@ export function DashboardPage() {
             })}
           </div>
 
-          {/* Row 1: Top 5 by value + Agreement types */}
+          {/* Row 1: Renewal watchlist + Agreement types */}
           <div className="grid gap-4 xl:grid-cols-2">
             <Card>
-              <SectionHeader title="Top 5 by value" subtitle="Highest-value contracts in scope." icon={BarChart3} />
-              {topContracts.length ? (
-                <div className="h-[220px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart layout="vertical" data={topContracts} margin={{ top: 4, right: 24, bottom: 4, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} horizontal={false} />
-                      <XAxis type="number" tick={chartTick} tickLine={false} axisLine={false} tickFormatter={shortValue} />
-                      <YAxis type="category" dataKey="name" tick={chartTick} tickLine={false} axisLine={false} width={120} />
-                      <Tooltip
-                        contentStyle={tooltipStyle}
-                        formatter={(val, _name, item) => {
-                          // `item` is optional on Recharts' formatter signature and
-                          // is genuinely absent on some render paths, so the
-                          // shorter `item.payload` form throws rather than
-                          // rendering an empty tooltip.
-                          const row = item?.payload as
-                            | { fullName?: string; currency?: string }
-                            | undefined;
-                          return [formatMoney(Number(val ?? 0), row?.currency), row?.fullName ?? ''];
-                        }}
-                        labelFormatter={() => ''}
-                      />
-                      <Bar dataKey="value" radius={[0, 6, 6, 0]} maxBarSize={28}>
-                        {topContracts.map((_, i) => (
-                          <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+              <SectionHeader
+                title="Renewal watchlist"
+                subtitle="Closest expiry first. Auto-renewing contracts lapse into a new term unless notice is served."
+                icon={CalendarClock}
+                action={
+                  expiring.length > 5 ? (
+                    <button
+                      type="button"
+                      onClick={() => navigate('/contracts?expiring=true')}
+                      className="text-[12px] font-medium text-blue-600 transition hover:text-blue-700 dark:text-blue-400"
+                    >
+                      View all {expiring.length}
+                    </button>
+                  ) : undefined
+                }
+              />
+              {expiring.length ? (
+                <ul className="divide-y divide-[#E4E7EC] dark:divide-slate-700">
+                  {expiring.slice(0, 5).map((row) => {
+                    const days = row.days_remaining ?? null;
+                    // Under a fortnight is the point at which most notice
+                    // windows have either closed or are about to.
+                    const urgent = days !== null && days <= 14;
+                    return (
+                      <li key={row.contract_id}>
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/contracts/${row.contract_id}`)}
+                          className="flex w-full items-center gap-3 py-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-slate-700/40"
+                        >
+                          <span
+                            className={[
+                              'flex h-9 w-9 shrink-0 flex-col items-center justify-center rounded-lg text-[11px] font-semibold leading-none',
+                              urgent
+                                ? 'bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-300'
+                                : 'bg-amber-50 text-amber-600 dark:bg-amber-950/40 dark:text-amber-300',
+                            ].join(' ')}
+                          >
+                            {days !== null ? (
+                              <>
+                                <span className="tabular-nums">{days}</span>
+                                <span className="mt-0.5 text-[8px] font-medium uppercase tracking-wide opacity-70">days</span>
+                              </>
+                            ) : (
+                              <CalendarClock className="h-4 w-4" />
+                            )}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[13px] font-medium text-[#0F172A] dark:text-slate-100">
+                              {row.title ?? 'Untitled contract'}
+                            </span>
+                            <span className="mt-0.5 flex items-center gap-2 text-[11.5px] text-[#5B6478] dark:text-slate-400">
+                              <span>{row.expiration_date ? formatDate(row.expiration_date) : 'No end date'}</span>
+                              {row.auto_renewal ? (
+                                <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:bg-violet-950/40 dark:text-violet-300">
+                                  Auto-renews
+                                </span>
+                              ) : null}
+                            </span>
+                          </span>
+                          {row.risk_band ? (
+                            <Badge text={humanise(row.risk_band)} variant={getRiskVariant(row.risk_band)} />
+                          ) : null}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
               ) : (
                 <p className="rounded-lg border border-dashed border-[#E4E7EC] px-4 py-10 text-center text-[13px] text-[#5B6478] dark:border-slate-700 dark:text-slate-400">
-                  No contracts with a recorded value yet.
+                  Nothing expiring in the next {EXPIRY_WINDOW_DAYS} days.
                 </p>
               )}
             </Card>

@@ -27,6 +27,12 @@ from app.core.enums import AuditAction, Permission, ReviewStatus, RiskBand
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
 from app.schemas.common import BoundingBox, ProvenanceInfo
+from app.schemas.graph import (
+    ContractGraphResponse,
+    DanglingReference,
+    GraphEdgeResponse,
+    GraphNodeResponse,
+)
 from app.schemas.knowledge import (
     ClauseResponse,
     ClauseReviewRequest,
@@ -165,6 +171,79 @@ async def list_key_dates(ref: ContractContextDep, db: DbSession) -> list[KeyDate
 
     rows = await KeyDateRepository(db).list_for_contract(ref.contract_id, ref.project_id)
     return [_key_date(row) for row in rows]
+
+
+# =============================================================================
+# Knowledge graph
+# =============================================================================
+@router.get(
+    "/graph",
+    response_model=ContractGraphResponse,
+    summary="The contract's knowledge graph",
+)
+async def get_graph(ref: ContractContextDep, db: DbSession) -> ContractGraphResponse:
+    """Nodes and edges for one contract, built on request.
+
+    Built rather than read back, because there is nothing to read back: nodes have
+    never been persisted anywhere. What the Indexing stage stores is the derived
+    *edges*, as ``knowledge_relationships`` rows carrying string references and no
+    labels - enough for retrieval to traverse, not enough to draw.
+
+    ``KnowledgeGraphBuilder`` is pure and synchronous, and the six row sets it needs
+    are the same ones ``/knowledge`` already loads for the detail screen, so this
+    costs one more read of data the page is fetching anyway. It also means the graph
+    reflects the contract as it stands now - including a clause corrected an hour
+    ago - rather than as it was when indexing last ran.
+
+    A contract that has not reached the Indexing stage still answers, with whatever
+    has been extracted so far. An empty graph and a 404 mean different things, and
+    the caller needs to be able to tell them apart.
+    """
+    ref.require(Permission.KNOWLEDGE_READ)
+    contract_id, project_id = ref.contract_id, ref.project_id
+
+    from app.ai.graph import KnowledgeGraphBuilder
+    from app.repositories.contract import ContractMetadataRepository, ContractRepository
+    from app.repositories.knowledge import (
+        ClauseRepository,
+        EntityRepository,
+        KnowledgeRelationshipRepository,
+        ObligationRepository,
+        RiskRepository,
+    )
+
+    # `ContractContext` carries the id and the verified project, not the row - so the
+    # title and agreement type, which label the contract node, are fetched here.
+    # `get_scoped_or_404` re-applies the project filter rather than trusting the id.
+    contract = await ContractRepository(db).get_scoped_or_404(
+        contract_id, project_id, resource="Contract"
+    )
+
+    graph = KnowledgeGraphBuilder().build(
+        contract_id=contract_id,
+        contract_title=contract.title,
+        agreement_type=contract.agreement_type,
+        parties=list(await EntityRepository(db).list_for_contract(contract_id, project_id)),
+        clauses=list(await ClauseRepository(db).list_for_contract(contract_id, project_id)),
+        obligations=list(
+            await ObligationRepository(db).list_for_contract(contract_id, project_id)
+        ),
+        risks=list(await RiskRepository(db).list_for_contract(contract_id, project_id)),
+        relationships=list(
+            await KnowledgeRelationshipRepository(db).list_for_contract(contract_id, project_id)
+        ),
+        metadata=await ContractMetadataRepository(db).get_for_contract(contract_id),
+    )
+
+    return ContractGraphResponse(
+        contract_id=contract_id,
+        contract_title=contract.title,
+        nodes=[GraphNodeResponse(**node.as_dict()) for node in graph.nodes],
+        edges=[GraphEdgeResponse(**edge.as_dict()) for edge in graph.edges],
+        dangling=[DanglingReference(**entry) for entry in graph.dangling],
+        statistics=graph.statistics(),
+        warnings=list(graph.warnings),
+    )
 
 
 # =============================================================================

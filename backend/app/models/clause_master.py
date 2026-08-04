@@ -258,4 +258,84 @@ class AISettings(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
 
-__all__ = ["AISettings", "ClauseMasterCategory", "ClauseMasterRule"]
+class AgreementTypeClause(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Which clauses an agreement type is checked for, and whether each is live.
+
+    The clause taxonomy is global - one ``Limitation of Liability``, used by many
+    document types - and this table is the *mapping* between the two. It replaces
+    the two JSONB arrays on ``document_profiles`` (``mandatory_clauses`` and
+    ``optional_clauses``), which could hold a key set but had nowhere to put a
+    per-pair state.
+
+    That gap was the whole problem. With the arrays, "this MSA should stop looking
+    for Insurance" and "delete Insurance from the MSA list" were the same edit, so
+    switching a clause off lost the record that it had ever been on and there was
+    nothing to switch back. Here it is one column:
+
+    * ``is_active = false`` - configured for this type, deliberately not applied.
+    * row absent - never configured for this type.
+
+    **Deactivating affects new uploads only.** Extraction reads this table once,
+    while a document is being processed; nothing re-reads it afterwards. A contract
+    processed last week keeps the clauses it was extracted with, which is the
+    honest behaviour - its stored clauses are evidence of what the document says,
+    not of what the current configuration would look for.
+    """
+
+    __tablename__ = "agreement_type_clauses"
+
+    #: An ``AgreementType`` value. Not a foreign key to ``document_profiles``:
+    #: a type is a value, not a row, and this mapping should survive a profile
+    #: being re-seeded or replaced.
+    agreement_type: Mapped[str] = mapped_column(extensible_enum(64), nullable=False, index=True)
+
+    clause_key: Mapped[str] = mapped_column(
+        extensible_enum(64),
+        ForeignKey("clause_master_categories.key", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    #: Whether this clause is applied when a document of this type is processed.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    #: Whether its absence is a finding. Feeds `missing_mandatory_clauses` and the
+    #: "Missing Clauses" alert; the platform-wide default lives on the category.
+    is_mandatory: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    #: Presentation order within the type. Falls back to the category's own
+    #: `priority` when equal, so an unordered import still reads sensibly.
+    display_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=100, server_default="100"
+    )
+
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    category: Mapped[ClauseMasterCategory] = relationship(
+        "ClauseMasterCategory", lazy="joined", viewonly=True
+    )
+
+    __table_args__ = (
+        # One row per pair. The import path relies on this for its upsert: a
+        # re-imported sheet updates rather than accumulating duplicates.
+        UniqueConstraint("agreement_type", "clause_key", name="uq_agreement_type_clause"),
+        # The extraction-time read: every active clause for one type.
+        Index(
+            "ix_agreement_type_clauses_active",
+            "agreement_type",
+            "display_order",
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+
+__all__ = [
+    "AISettings",
+    "AgreementTypeClause",
+    "ClauseMasterCategory",
+    "ClauseMasterRule",
+]

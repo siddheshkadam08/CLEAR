@@ -213,7 +213,14 @@ def storage(tmp_path: Any) -> IObjectStorage:
 
 
 def artifact_key(kind: str = "normalized_document") -> str:
-    return StorageKey.artifact(PROJECT_ID, DOCUMENT_ID, kind, "g1.json")
+    """The key the pipeline really writes.
+
+    The fourth argument is ``generation: int``, not a filename. Passing "g1.json"
+    produced ``.../gg1.json.json`` - still a valid key, so nothing failed, but it
+    exercised a shape the pipeline never generates and made every path in this
+    module five characters longer than production's.
+    """
+    return StorageKey.artifact(PROJECT_ID, DOCUMENT_ID, kind, 1)
 
 
 async def store_and_load(storage: IObjectStorage, model: BaseModel, key: str) -> Any:

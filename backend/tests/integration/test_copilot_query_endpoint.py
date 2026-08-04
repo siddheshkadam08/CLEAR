@@ -303,11 +303,22 @@ class TestVectorSearchScaling:
             assert parameter in source
 
 
-class TestIngestTablesAreNotReadAtQueryTime:
-    """Answers come from the vector store, not from ``cip_DocContentMaster``."""
+class TestExternalTablesAreNotReadAnywhere:
+    """The ``cip_*`` tables are another system's, and this application uses none.
+
+    This began as "the query path must not read `cip_DocContentMaster`", because
+    an answer built from the ingest tables rather than the vector store would be
+    reading a second, unsearched copy of the data. The rule now holds everywhere:
+    those three tables were owned by another team, existed only on a database that
+    has been decommissioned, and every column duplicated one the platform keeps.
+    The taxonomy comes from `document_profiles` and the Clause Master instead.
+
+    Written against the source text rather than by importing, so a raw SQL string
+    naming a table is caught as well as an import.
+    """
 
     @pytest.mark.parametrize("relative", QUERY_PATH_MODULES)
-    def test_no_query_path_module_imports_the_ingest_tables(self, relative: str) -> None:
+    def test_no_query_path_module_imports_them(self, relative: str) -> None:
         source = (APP_ROOT / relative).read_text(encoding="utf-8")
         tree = ast.parse(source)
 
@@ -319,26 +330,65 @@ class TestIngestTablesAreNotReadAtQueryTime:
                 imported.update(alias.name for alias in node.names)
 
         offenders = [name for name in imported if "docpipeline.tables" in name]
-        assert not offenders, (
-            f"{relative} imports {offenders}. The ingest tables must not be read while "
-            "answering: everything the answer needs is already on the embedding row."
-        )
+        assert not offenders, f"{relative} imports {offenders}, which no longer exists."
 
-    @pytest.mark.parametrize("relative", QUERY_PATH_MODULES)
-    def test_no_query_path_module_names_the_table(self, relative: str) -> None:
-        source = (APP_ROOT / relative).read_text(encoding="utf-8")
-        # Comments explaining the rule are fine; a raw SQL string naming the table
-        # is not, and would slip past the import check above.
-        code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
-        assert "cip_DocContentMaster" not in code
+    def test_the_module_that_declared_them_is_gone(self) -> None:
+        assert not (APP_ROOT / "ai/docpipeline/tables.py").exists()
+        assert not (APP_ROOT / "ai/docpipeline/persistence.py").exists()
+
+    def test_nothing_under_app_names_them(self) -> None:
+        """One sweep over the package, so the coupling cannot be reintroduced.
+
+        Checks *executable* code only. Prose explaining why these tables were
+        retired is exactly what a reader needs, and several modules carry it - a
+        naive substring search over the file would flag every one of those
+        explanations and make the test unpassable without deleting the history.
+        """
+        retired = ("cip_DocContentMaster", "cip_DocMaster", "cip_docMapping")
+        offenders: list[str] = []
+
+        for path in APP_ROOT.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docstrings = {
+                id(node.body[0].value)
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)
+            }
+            for node in ast.walk(tree):
+                named = (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                    and any(name in node.value for name in retired)
+                ) or (isinstance(node, ast.Name) and any(name in node.id for name in retired))
+                if named:
+                    offenders.append(str(path.relative_to(APP_ROOT)))
+                    break
+
+        assert not offenders, f"these still reference the retired ingest tables: {offenders}"
 
 
-class TestDocumentTypeVocabularyComesFromTheTaxonomy:
-    def test_the_service_reads_cip_doc_mapping(self) -> None:
-        """The clause taxonomy is data another system owns, so it is read at runtime."""
+class TestDocumentTypeVocabularyComesFromTheDatabase:
+    def test_the_service_resolves_the_type_at_runtime(self) -> None:
+        """Which types exist is configuration, so it is read rather than hardcoded."""
         source = (APP_ROOT / "services/copilot.py").read_text(encoding="utf-8")
         assert "load_doc_types" in source
         assert "resolve_document_type" in source
+
+    def test_an_absent_vocabulary_does_not_discard_the_query_analysis(self) -> None:
+        """`except Exception` here swallowed far more than the missing taxonomy.
+
+        Because the early return skips `analyse()` entirely, a broad catch threw
+        away the whole query analysis - intent, entities and all - and every
+        question silently fell back to the deterministic planner. Only the one
+        failure this can honestly absorb is caught.
+        """
+        source = (APP_ROOT / "services/copilot.py").read_text(encoding="utf-8")
+        assert "except LookupError" in source
 
 
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set")

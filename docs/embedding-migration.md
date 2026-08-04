@@ -180,10 +180,29 @@ fail identically every time.
 
 Check that the re-index actually finished (`cip embeddings` lists vectors by
 model). If it did, the similarity floors are the next thing to look at: Nemotron's
-score distribution is not OpenAI's, and the defaults
-(`RETRIEVAL_MIN_SIMILARITY=0.40`, with per-level overrides) are tuned for it. Lower
-`RETRIEVAL_MIN_SIMILARITY_CLAUSE` if relevant clauses are being cut; raise it if
-boilerplate is crowding the results.
+score distribution is not OpenAI's, and the built-in floors (0.35 document / 0.45
+clause / 0.40 chunk) are tuned for it.
+
+The most specific setting wins:
+
+| Set | Effect |
+| --- | --- |
+| nothing | 0.35 / 0.45 / 0.40 |
+| `RETRIEVAL_MIN_SIMILARITY=0.30` | all three become 0.30 |
+| the above plus `RETRIEVAL_MIN_SIMILARITY_CLAUSE=0.45` | 0.30 / 0.45 / 0.30 |
+| `RETRIEVAL_MIN_SIMILARITY_CHUNK=0.30` alone | 0.35 / 0.45 / 0.30 |
+
+Each level also accepts the `RETRIEVAL_<LEVEL>_MIN_SIMILARITY` spelling. A blank
+value means "not configured", so `RETRIEVAL_MIN_SIMILARITY=` leaves the defaults
+alone rather than failing to start.
+
+Lower the clause floor if relevant clauses are being cut; raise it if boilerplate
+is crowding the results.
+
+> Before 2026-08-03 the per-level floors were eager defaults, so
+> `RETRIEVAL_MIN_SIMILARITY` parsed and validated but nothing read it. If you
+> tuned around that by setting only the base and seeing no change, the base is
+> live now — re-check the value before deploying.
 
 ---
 

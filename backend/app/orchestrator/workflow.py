@@ -160,6 +160,23 @@ class WorkflowEngine:
         if from_stage is not None:
             self._validate_prerequisites(from_stage, checkpoints)
 
+        # Once any stage is going to run, everything after it must run too.
+        #
+        # `_plan_stage` judges a stage only against its own versions, which is
+        # correct in isolation and wrong in sequence: a checkpoint says "this
+        # output is current for these versions", not "the input it was computed
+        # from still exists". When an upstream stage re-runs it replaces that
+        # input, and the downstream checkpoint is then describing rows that have
+        # been deleted.
+        #
+        # Observed on a live retry: the LLM model had changed, so `docpipeline`
+        # and `extraction` re-ran with `version_changed:model_name` and rebuilt
+        # the chunks. `embedding` compared only its own versions - the embedding
+        # model had not changed - skipped as `checkpoint_current`, and the job
+        # finished READY with **zero** embeddings, because the vectors it was
+        # reusing belonged to chunks that no longer existed. The contract was
+        # complete, healthy-looking and invisible to every semantic search.
+        upstream_reruns = False
         for stage in scope:
             planned = self._plan_stage(
                 stage=stage,
@@ -168,6 +185,14 @@ class WorkflowEngine:
                 checkpoint=checkpoints.get(stage),
                 force=force,
             )
+            if upstream_reruns and planned.action == "skip":
+                planned = PlannedStage(
+                    stage=stage,
+                    action="run",
+                    reason="upstream_rerun",
+                    versions=planned.versions,
+                )
+            upstream_reruns = upstream_reruns or planned.action == "run"
             plan.stages.append(planned)
 
         plan.branches = self._resolve_branches(contract)
@@ -361,8 +386,11 @@ class WorkflowEngine:
             # The bands below are for stages no longer in STAGE_ORDER, kept so a
             # historical run still renders.
             PipelineStage.DOCPIPELINE: (35, 50),
-            PipelineStage.EXTRACTION: (50, 90),
-            PipelineStage.EMBEDDING: (90, 100),
+            PipelineStage.EXTRACTION: (50, 85),
+            # Embedding gives up its tail to indexing. Both used to end at 100,
+            # so the bar hit 100% while a stage was still running and then sat
+            # there - the one reading a progress bar has of being lied to.
+            PipelineStage.EMBEDDING: (85, 95),
             PipelineStage.ENRICHMENT: (35, 45),
             PipelineStage.CLASSIFICATION: (45, 50),
             PipelineStage.CHUNKING: (50, 58),

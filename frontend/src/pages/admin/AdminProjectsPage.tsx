@@ -20,7 +20,7 @@ import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner, SuccessBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { Card } from '@/components/common/Card';
+import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { Field, inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -74,7 +74,7 @@ export function AdminProjectsPage() {
 
   return (
     <div className="space-y-5">
-      {/* <PageHeader
+      <PageHeader
         title="Business Units"
         subtitle="Create Business Units and decide who works in them."
         actions={
@@ -82,7 +82,7 @@ export function AdminProjectsPage() {
             New Business Unit
           </Button>
         }
-      /> */}
+      />
 
       {notice ? <SuccessBanner message={notice} /> : null}
       {error ? (

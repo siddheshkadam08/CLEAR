@@ -201,7 +201,7 @@ export const Layout = ({ children }: { children: ReactNode }) => {
                 onClick={() => setIsSidebarOpen(true)}
                 title="Open navigation"
                 aria-label="Open navigation"
-                className="shrink-0 rounded-xl border border-slate-200 p-2 text-slate-600 shadow-sm transition hover:bg-slate-50 lg:hidden"
+                className="shrink-0 rounded-xl border border-slate-200 p-2 text-slate-600 shadow-sm transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 lg:hidden"
               >
                 <Menu className="h-5 w-5" />
               </button>

@@ -74,13 +74,20 @@ class ValidationStage(StageHandler):
         # refers to these exact bytes.
         actual_hash = sha256_bytes(content)
         checks["sha256"] = actual_hash
-        checks["hash_matches"] = actual_hash == contract.sha256_hash
+        # `processing_sha256` describes the file at `storage_path` - the one just
+        # read. `sha256_hash` describes what the *user uploaded*, which is a
+        # different file whenever a Word document was converted to PDF, and
+        # comparing against it would fail every converted upload here. It falls
+        # back for rows created before conversion existed, where the two were
+        # necessarily the same bytes.
+        expected_hash = contract.processing_sha256 or contract.sha256_hash
+        checks["hash_matches"] = actual_hash == expected_hash
 
         if not checks["hash_matches"]:
             logger.error(
                 "validation_hash_mismatch",
                 contract_id=str(contract.id),
-                expected=contract.sha256_hash,
+                expected=expected_hash,
                 actual=actual_hash,
             )
             return self._halt(

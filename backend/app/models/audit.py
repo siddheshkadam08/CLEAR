@@ -5,7 +5,7 @@ Three separate concerns, deliberately not merged:
 * :class:`AuditLog` - append-only record of **every mutating request**: who, what,
   before, after, from where. The compliance artifact. Never updated, never
   deleted by application code.
-* :class:`ContractHistory` / :class:`ClauseHistory` - field-level change trails
+* :class:`ContractHistory` - field-level change trail
   for the two entities that carry legal weight, including human review decisions.
   A reviewer's correction of an AI extraction must be attributable years later.
 * :class:`RetrievalAudit` - what was retrieved and answered. Required by §17
@@ -146,67 +146,6 @@ class ContractHistory(Base, UUIDPrimaryKeyMixin):
     __table_args__ = (Index("ix_contract_history_contract_created", "contract_id", "created_at"),)
 
 
-class ClauseHistory(Base, UUIDPrimaryKeyMixin):
-    """Change trail for an extracted clause, including review decisions.
-
-    The record that makes human-in-the-loop auditable: which reviewer accepted,
-    rejected or corrected which AI extraction, when, and what the text was before
-    and after.
-    """
-
-    __tablename__ = "clause_history"
-
-    clause_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("clauses.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    contract_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        ForeignKey("contracts.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
-    )
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
-
-    change_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    field_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
-    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: ``approved`` | ``rejected`` | ``corrected`` when this row is a review
-    #: decision.
-    review_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="ai_extraction", server_default="ai_extraction"
-    )
-    #: Versions in effect when the change was made.
-    versions: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=text("now()")
-    )
-
-    __table_args__ = (
-        Index("ix_clause_history_clause_created", "clause_id", "created_at"),
-        Index("ix_clause_history_contract_created", "contract_id", "created_at"),
-        Index(
-            "ix_clause_history_reviews",
-            "project_id",
-            "created_at",
-            postgresql_where=text("review_decision IS NOT NULL"),
-        ),
-    )
-
-
 class RetrievalAudit(Base, UUIDPrimaryKeyMixin):
     """What a search or Copilot answer retrieved, and how it was validated.
 
@@ -288,4 +227,4 @@ class RetrievalAudit(Base, UUIDPrimaryKeyMixin):
     )
 
 
-__all__ = ["AuditLog", "ClauseHistory", "ContractHistory", "RetrievalAudit"]
+__all__ = ["AuditLog", "ContractHistory", "RetrievalAudit"]
