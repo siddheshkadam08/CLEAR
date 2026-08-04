@@ -51,8 +51,14 @@ logger = get_logger(__name__)
 #: A constant rather than an inline string because it is a product decision that
 #: two call sites and a test all have to agree on.
 INSUFFICIENT_CONTEXT = (
-    "I couldn't find sufficient information within the selected contract or "
-    "project to answer this question."
+    "I couldn't find wording in this contract that answers that confidently, so "
+    "I'd rather say so than guess.\n\n"
+    "Two things usually help:\n"
+    "- Name the clause directly - \"What is the liability cap?\" rather than "
+    "\"Key risks?\". Broad questions match many passages weakly instead of one "
+    "strongly, which is what this check measures.\n"
+    "- Check the contract has finished processing. Clauses only become "
+    "searchable once extraction and indexing complete."
 )
 
 #: Shown when retrieval succeeded but the model could not be reached. Deliberately
@@ -257,6 +263,12 @@ class CopilotService:
             # It is also what makes the similarity guardrail below meaningful: a
             # plan with no vector levels has no similarity to judge.
             prefer_content=True,
+            # This is an answering caller, so the document-summary level may be
+            # skipped when a contract is already named - it selects documents, and
+            # the selection is made. `/search` deliberately does not set this: its
+            # results are browsed rather than answered from, and the summary is a
+            # row the reader came to see.
+            for_answer=True,
         )
         with span(
             "copilot.retrieval",
@@ -545,9 +557,19 @@ class CopilotService:
                 None,
             )
 
+        # `LookupError` only: that is the one failure this can absorb honestly - no
+        # document profiles are configured, so there is no vocabulary to classify
+        # into, and the question is still answerable without a type filter.
+        #
+        # A bare `except Exception` here was worse than it looked. It also caught a
+        # missing table, a dead connection and a bug in the query, and because the
+        # early return skips `analyse()` entirely it discarded *the whole query
+        # analysis* - intent, entities and all - not merely the type filter. Every
+        # question then fell back to the deterministic planner with
+        # `intent=GENERAL_QA`, silently and with no user-visible error.
         try:
             doc_types = await load_doc_types(self.db)
-        except Exception as exc:  # noqa: BLE001 - an unavailable taxonomy is not a failed question
+        except LookupError as exc:
             logger.warning("doc_type_vocabulary_unavailable", error=str(exc))
             return QueryAnalysis(method="unavailable"), None
 

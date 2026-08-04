@@ -16,12 +16,16 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
+  FileDown,
   FileSearch,
   FileText,
   FolderKanban,
   Gauge,
+  Landmark,
   LayoutDashboard,
   ListChecks,
+  ScrollText,
+  Search,
   Settings2,
   Upload,
   Users,
@@ -52,6 +56,14 @@ interface NavItem {
   label: string;
   icon: LucideIcon;
   audience?: Audience;
+  /**
+   * Show only to a holder of this permission, on any project.
+   *
+   * `audience` cannot express this: some screens are open to a role rather than
+   * to administrators, and Activity is the first - AUDIT_READ belongs to Project
+   * Manager, so `audience: 'admin'` would hide it from the people it is for.
+   */
+  permission?: string;
   section?: string;
 }
 
@@ -59,7 +71,11 @@ const NAV: NavItem[] = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/upload', label: 'Upload', icon: Upload, audience: 'member' },
   { href: '/contracts', label: 'Contracts', icon: FileText },
-  // { href: '/search', label: 'Search', icon: Search },
+  // The cross-contract registers. Sits next to Contracts because it is the same
+  // corpus read the other way round: by obligation, date, risk and counterparty
+  // rather than by document.
+  { href: '/portfolio', label: 'Portfolio', icon: Landmark },
+  { href: '/search', label: 'Search', icon: Search },
   // Disabled, not deleted - the Copilot moved into the drawer on a contract.
   // The /copilot route still exists and still works. Restoring this entry needs
   // the `Bot` icon import back; it was removed because this was its only use.
@@ -67,6 +83,7 @@ const NAV: NavItem[] = [
   { href: '/jobs', label: 'Processing', icon: ListChecks },
   { href: '/doc-pipeline', label: 'Doc Pipeline', icon: FileSearch },
   { href: '/alerts', label: 'Alerts', icon: AlertTriangle },
+  { href: '/exports', label: 'Exports', icon: FileDown },
   {
     href: '/admin/projects',
     label: 'Business Unit',
@@ -95,10 +112,21 @@ const NAV: NavItem[] = [
     audience: 'admin',
     section: 'Administration',
   },
+  {
+    href: '/admin/audit',
+    label: 'Activity',
+    icon: ScrollText,
+    permission: 'audit:read',
+    section: 'Administration',
+  },
 ];
 
-const visibleTo = (item: NavItem, isAdmin: boolean) =>
-  item.audience === 'admin' ? isAdmin : item.audience === 'member' ? !isAdmin : true;
+const visibleTo = (item: NavItem, isAdmin: boolean, permissions: Set<string>) => {
+  if (item.permission) return isAdmin || permissions.has(item.permission);
+  if (item.audience === 'admin') return isAdmin;
+  if (item.audience === 'member') return !isAdmin;
+  return true;
+};
 
 const NavItemLink = ({
   item,
@@ -165,7 +193,13 @@ export const Sidebar = ({
   // cannot use is noise, and a greyed-out admin link tells an ordinary user that
   // something exists which is none of their business.
   const isAdmin = Boolean(user?.is_system_admin);
-  const items = NAV.filter((item) => visibleTo(item, isAdmin));
+  // Flattened across every membership: these items span projects, so holding the
+  // permission anywhere is what decides whether the screen is offered. The
+  // endpoint behind it still scopes rows to the caller's own projects.
+  const permissions = new Set(
+    (user?.memberships ?? []).flatMap((membership) => membership.permissions),
+  );
+  const items = NAV.filter((item) => visibleTo(item, isAdmin, permissions));
   const primary = items.filter((item) => !item.section);
   const governance = items.filter((item) => item.section);
   const governanceHeading = governance[0]?.section;

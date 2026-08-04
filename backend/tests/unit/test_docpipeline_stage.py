@@ -16,14 +16,14 @@ from app.core.enums import (
 )
 
 
-def test_the_pipeline_is_validation_parser_docpipeline_extraction_embedding() -> None:
-    """Five stages, not eight.
+def test_the_pipeline_is_validation_parser_docpipeline_extraction_embedding_indexing() -> None:
+    """Six stages, not eight.
 
     DOCPIPELINE locates clauses; EXTRACTION turns them into typed knowledge and
     writes the `chunks` rows the keyword search reads; EMBEDDING vectorises those
-    so semantic search and Copilot have something to retrieve. The remaining
-    original stages stay as enum members because historical job_stage_runs rows
-    name them.
+    so semantic search and Copilot have something to retrieve; INDEXING derives
+    the graph edges retrieval traverses. The remaining original stages stay as
+    enum members because historical job_stage_runs rows name them.
     """
     assert STAGE_ORDER == (
         PipelineStage.VALIDATION,
@@ -31,16 +31,24 @@ def test_the_pipeline_is_validation_parser_docpipeline_extraction_embedding() ->
         PipelineStage.DOCPIPELINE,
         PipelineStage.EXTRACTION,
         PipelineStage.EMBEDDING,
+        PipelineStage.INDEXING,
     )
 
 
 def test_the_old_stages_are_no_longer_dispatched() -> None:
+    """INDEXING is deliberately *not* in this set.
+
+    It was retired alongside the others, but unlike them it had no replacement:
+    the derived edges it writes into `knowledge_relationships` are what
+    `RetrievalEngine._expand_graph` traverses, and nothing else produces them.
+    Dropping it degraded retrieval silently rather than visibly, which is why it
+    is back in STAGE_ORDER while these four stay out.
+    """
     retired = {
         PipelineStage.ENRICHMENT,
         PipelineStage.CLASSIFICATION,
         PipelineStage.CHUNKING,
         PipelineStage.AI_EXTRACTION,
-        PipelineStage.INDEXING,
     }
 
     assert not retired & set(STAGE_ORDER)
@@ -48,6 +56,28 @@ def test_the_old_stages_are_no_longer_dispatched() -> None:
     for stage in retired:
         assert stage in STAGE_TO_STATE
         assert stage in STAGE_DEPENDENCIES
+
+
+def test_indexing_runs_last_and_after_embedding() -> None:
+    """Its `requires` and its dependency both point at earlier stages.
+
+    Ordering matters more than usual here: the stage refuses to run when the
+    contract has no vectors, so scheduling it before EMBEDDING would fail every
+    job rather than merely produce a thin graph.
+    """
+    assert STAGE_ORDER[-1] is PipelineStage.INDEXING
+    assert STAGE_DEPENDENCIES[PipelineStage.INDEXING] == (PipelineStage.EMBEDDING,)
+
+
+def test_indexing_does_not_claim_an_artifact_kind_extraction_owns() -> None:
+    """Two stages emitting one kind makes re-running either invalidate the other.
+
+    `DocumentArtifactRepository.invalidate_from_stage` supersedes by kind, so
+    when indexing also emitted RELATIONSHIPS - which EXTRACTION declares - a
+    reprocess of one silently dropped the other's output.
+    """
+    assert ArtifactKind.RELATIONSHIPS in STAGE_ARTIFACTS[PipelineStage.EXTRACTION]
+    assert ArtifactKind.RELATIONSHIPS not in STAGE_ARTIFACTS[PipelineStage.INDEXING]
 
 
 def test_docpipeline_depends_on_the_parser() -> None:
@@ -76,6 +106,34 @@ def test_the_ai_worker_serves_the_new_stage() -> None:
 
     assert PipelineStage.DOCPIPELINE in stages_for_role("ai")
     assert PipelineStage.DOCPIPELINE in stages_for_role("all")
+
+
+def test_every_document_type_has_a_profile_to_resolve_to() -> None:
+    """Each `cip_docMapping` docType must reach a seeded Document Profile.
+
+    The profile decides the mandatory-clause list a document is scored against,
+    so a type that falls through to the default is judged by another type's
+    clauses. That is precisely the failure that retired the old rules classifier
+    - a License Agreement checked against an NDA's four mandatory clauses found
+    none of them and failed the job - and it came back in a quieter form when
+    only MSA and NDA had profiles and the other four defaulted silently.
+
+    `other` is the deliberate exception: it means "unrecognised", and the default
+    profile is the honest answer for a document nobody could type.
+    """
+    from app.ai.docpipeline.taxonomy import agreement_type_for
+    from app.db.seed import PROFILE_SEEDS
+
+    seeded = {spec["agreement_type"] for spec in PROFILE_SEEDS}
+
+    for doc_type in ("MSA", "NDA", "License Agreement", "Contract cum Order Form", "Addendum"):
+        agreement_type, _ = agreement_type_for(doc_type)
+        value = getattr(agreement_type, "value", agreement_type)
+        assert value in seeded, f"{doc_type} -> {value} has no profile"
+
+    assert any(spec.get("is_default") for spec in PROFILE_SEEDS), (
+        "Others/unrecognised documents need a default profile to fall back to."
+    )
 
 
 def test_progress_reaches_100_at_the_end_of_the_pipeline() -> None:

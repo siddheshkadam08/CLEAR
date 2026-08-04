@@ -88,7 +88,19 @@ class ExtractionStage(AIExtractionStage):
     retryable = True
 
     def versions_for(self, ctx: StageContext) -> ComponentVersions:
-        return current_versions_for_stage(self.stage, profile_id=None)
+        # Keyed on the profile, like every other stage.
+        #
+        # This hardcoded `None` was correct only while nothing assigned a
+        # profile: DOCPIPELINE now resolves one, and the profile is what supplies
+        # this stage's mandatory clauses, risk weights and validation rules.
+        # Leaving it out would let a profile edit go unnoticed by the checkpoint
+        # logic, so a re-run would reuse an extraction the new profile would not
+        # have produced.
+        return current_versions_for_stage(
+            self.stage,
+            profile_id=str(ctx.profile.id) if ctx.profile else None,
+            profile_version=ctx.profile.version if ctx.profile else None,
+        )
 
     # ------------------------------------------------------------------ input
     async def _load_chunks(self, ctx: StageContext) -> list[CandidateChunk]:

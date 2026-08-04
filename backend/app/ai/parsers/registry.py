@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 #: Adapter constructors, imported lazily so a deployment only loads the SDK it uses.
 _FACTORIES: dict[str, str] = {
     "idoc": "app.ai.parsers.idoc_adapter:IDocParser",
+    "pdfextract": "app.ai.parsers.pdfextract_adapter:PdfTextExtractorParser",
     "pymupdf": "app.ai.parsers.pymupdf_adapter:PyMuPdfParser",
     "docx": "app.ai.parsers.docx_adapter:DocxParser",
     "mock": "app.ai.parsers.mock_adapter:MockParser",
@@ -37,16 +38,21 @@ _FACTORIES: dict[str, str] = {
 
 #: Preference order when the configured parser cannot handle a file type.
 #:
-#: ``idoc`` leads for PDFs: it returns real layout roles and coordinates, so section
-#: structure comes from the service rather than from font-size heuristics. PyMuPDF is
-#: the last resort because it is local, dependency-light and always present - a
-#: degraded parse beats a failed upload when the layout service is unreachable.
+#: ``idoc`` and ``pdfextract`` lead for PDFs, in that order: both return real layout
+#: roles and coordinates, so section structure comes from the parser rather than from
+#: font-size heuristics, and both emit the per-page layout JSON the document pipeline
+#: reads. ``pdfextract`` sits second because it is local - preferred when the service
+#: is unreachable, but the service is the one with the tuned model behind it.
+#:
+#: PyMuPDF remains the last resort: dependency-light and always present, so a
+#: degraded parse beats a failed upload. Note it produces no layout JSON, so a
+#: document that falls all the way through cannot run the document pipeline.
 #:
 #: Deliberately excludes ``adi``: it is not implemented here, and listing an
 #: unavailable parser in a fallback chain only delays the real error while making the
 #: logs harder to read.
 _FALLBACKS: dict[FileType, tuple[str, ...]] = {
-    FileType.PDF: ("idoc", "pymupdf"),
+    FileType.PDF: ("idoc", "pdfextract", "pymupdf"),
     FileType.DOCX: ("docx",),
 }
 

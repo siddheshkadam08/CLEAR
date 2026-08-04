@@ -217,7 +217,13 @@ export async function apiStream(
       const { done, value } = await reader.read();
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
+      // Normalise line endings before looking for frame boundaries. The spec
+      // allows CRLF, LF or CR, and this server sends CRLF - so splitting on
+      // "\n\n" alone finds nothing in "\r\n\r\n", every frame stays in the
+      // buffer, and not one event is ever dispatched. The stream then ends
+      // cleanly having delivered nothing, which is indistinguishable from a
+      // request that hung.
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
 
       // SSE frames are separated by a blank line. A frame can arrive split across
       // reads, so anything after the last separator stays buffered.

@@ -23,12 +23,14 @@ import {
   FileSearch,
   FileText,
   Layers,
+  Share2,
   Sparkles,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { getAccessToken } from '@/api/client';
 import {
   contracts as contractsApi,
   jobs as jobsApi,
@@ -43,6 +45,7 @@ import type {
   Party,
   Risk,
   RiskAssessment,
+  UUID,
 } from '@/api/types';
 import { ClausePanel } from '@/components/ClausePanel';
 import { Badge } from '@/components/common/Badge';
@@ -53,6 +56,7 @@ import { Card, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { CopilotDrawer } from '@/components/CopilotDrawer';
+import { KnowledgeGraph } from '@/components/KnowledgeGraph';
 import { PdfViewer } from '@/components/PdfViewer';
 import { exportContractCsv } from '@/lib/export-csv';
 import {
@@ -64,12 +68,53 @@ import {
   humanise,
 } from '@/lib/format';
 
-type FixedTab = 'overview' | 'risks' | 'obligations' | 'dates' | 'parties' | 'processing';
+type FixedTab =
+  | 'overview'
+  | 'risks'
+  | 'obligations'
+  | 'dates'
+  | 'parties'
+  | 'graph'
+  | 'processing';
 
 interface Focus {
   boxes: BoundingBox[];
   page?: number | null;
   token: number;
+}
+
+/**
+ * Download the source document, either the processed PDF or the original.
+ *
+ * Fetched rather than linked. The URL the API returns is either a pre-signed
+ * storage URL, which a plain link handles, or - on every local-storage
+ * deployment - an API path behind the session guard, which a link cannot
+ * authenticate: the browser would navigate to it without the bearer token and
+ * land on a 401 rendered as JSON. Fetching lets the same code serve both.
+ */
+async function downloadSource(contractId: UUID, original: boolean): Promise<void> {
+  const access = original
+    ? await contractsApi.fileAccessForDownload(contractId)
+    : await contractsApi.fileAccess(contractId);
+
+  const token = getAccessToken();
+  const response = await fetch(access.url, {
+    headers: access.is_proxied && token ? { Authorization: `Bearer ${token}` } : {},
+    credentials: access.is_proxied ? 'include' : 'omit',
+  });
+  if (!response.ok) throw new Error(`Download failed (${response.status})`);
+
+  const blob = await response.blob();
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = href;
+  anchor.download = access.file_name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  // Released on the next tick: revoking synchronously can cancel the download in
+  // Firefox before it has read the blob.
+  setTimeout(() => URL.revokeObjectURL(href), 0);
 }
 
 export function ContractDetailPage() {
@@ -160,6 +205,9 @@ export function ContractDetailPage() {
       { key: 'obligations', label: 'Obligations', count: knowledge?.obligations.length },
       { key: 'dates', label: 'Key dates', count: knowledge?.key_dates.length },
       { key: 'parties', label: 'Parties', count: knowledge?.parties.length },
+      // No count: the graph is built on request, so a number here would mean
+      // fetching it on every visit to the contract just to label a tab.
+      { key: 'graph', label: 'Graph' },
       { key: 'processing', label: 'Processing' },
     ];
     return fixed;
@@ -199,7 +247,7 @@ export function ContractDetailPage() {
     <div className="space-y-4">
       <Link
         to="/contracts"
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-slate-900"
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 dark:text-slate-400 transition hover:text-slate-900"
       >
         <ArrowLeft className="h-4 w-4" />
         Contracts
@@ -207,7 +255,7 @@ export function ContractDetailPage() {
 
       <header className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
-          <h1 className="truncate text-xl font-semibold text-slate-900 sm:text-2xl">
+          <h1 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
             {contract.title ?? contract.original_file_name}
           </h1>
           
@@ -302,7 +350,7 @@ export function ContractDetailPage() {
       ) : null}
 
       {/* Pane switch, below `xl` only. */}
-      <div className="flex rounded-2xl border border-slate-200 bg-white p-1 shadow-sm xl:hidden">
+      <div className="flex rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-1 shadow-sm xl:hidden">
         {(
           [
             ['knowledge', 'Extracted', Layers],
@@ -408,6 +456,8 @@ export function ContractDetailPage() {
               <DatesTab dates={knowledge?.key_dates ?? []} onShowEvidence={showEvidence} />
             ) : active === 'parties' ? (
               <PartiesTab parties={knowledge?.parties ?? []} onShowEvidence={showEvidence} />
+            ) : active === 'graph' ? (
+              <GraphTab contractId={contractId} />
             ) : (
               <ProcessingTab contractId={contractId} />
             )}
@@ -464,7 +514,7 @@ const TabButton = ({
         ? 'bg-blue-600 text-white shadow-sm'
         : missing
           ? 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200 hover:bg-amber-100'
-          : 'bg-white text-slate-600 ring-1 ring-inset ring-slate-200 hover:bg-slate-50',
+          : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 ring-1 ring-inset ring-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700',
     ].join(' ')}
   >
     {label}
@@ -588,6 +638,61 @@ function OverviewTab({
       ) : null}
 
       <Card>
+        <SectionHeader
+          title="Source document"
+          subtitle={
+            contract.has_converted_pdf
+              ? 'Uploaded as a Word document and converted to PDF for processing.'
+              : 'The file as uploaded.'
+          }
+        />
+        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <DataField label="Original file" value={contract.original_file_name} />
+          <DataField
+            label="Uploaded as"
+            value={(contract.original_file_type ?? contract.file_type ?? '—').toUpperCase()}
+          />
+          {/* Only shown when the two differ. Saying "Processed as PDF" under a PDF
+              upload is noise that makes the interesting case harder to spot. */}
+          {contract.has_converted_pdf ? (
+            <DataField label="Processed as" value="PDF (converted)" />
+          ) : null}
+          {contract.source_archive_name ? (
+            <DataField label="From archive" value={contract.source_archive_name} />
+          ) : null}
+        </dl>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={Download}
+            onClick={() => void downloadSource(contract.id, false)}
+          >
+            {contract.has_converted_pdf ? 'Download PDF (processed)' : 'Download document'}
+          </Button>
+          {/* The original is only a separate file when it was converted. For a PDF
+              upload the two are the same object, and offering both would imply a
+              difference that does not exist. */}
+          {contract.has_converted_pdf ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={Download}
+              onClick={() => void downloadSource(contract.id, true)}
+            >
+              Download original ({(contract.original_file_type ?? '').toUpperCase()})
+            </Button>
+          ) : null}
+        </div>
+        {contract.has_converted_pdf ? (
+          <p className="mt-3 text-xs text-slate-500">
+            Evidence and highlights are positioned against the converted PDF, so that is
+            what the viewer shows.
+          </p>
+        ) : null}
+      </Card>
+
+      <Card>
         <SectionHeader title="Commercial terms" subtitle="Extracted from the document." />
         <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
           <DataField label="Party A" value={metadata?.party_a ?? '—'} />
@@ -597,7 +702,7 @@ function OverviewTab({
             value={formatMoney(metadata?.contract_value, metadata?.currency)}
           />
           <DataField label="Effective" value={formatDate(metadata?.effective_date)} />
-          {/* <DataField label="Executed" value={formatDate(metadata?.execution_date)} /> */}
+          <DataField label="Executed" value={formatDate(metadata?.execution_date)} />
           <DataField
             label="Expires"
             value={
@@ -615,8 +720,8 @@ function OverviewTab({
             label="Term"
             value={metadata?.term_months ? `${metadata.term_months} months` : '—'}
           />
-          {/* <DataField label="Governing law" value={metadata?.governing_law ?? '—'} />
-          <DataField label="Jurisdiction" value={metadata?.jurisdiction ?? '—'} /> */}
+          <DataField label="Governing law" value={metadata?.governing_law ?? '—'} />
+          <DataField label="Jurisdiction" value={metadata?.jurisdiction ?? '—'} />
           <DataField
             label="Payment terms"
             value={metadata?.payment_terms_days ? `${metadata.payment_terms_days} days` : '—'}
@@ -631,7 +736,7 @@ function OverviewTab({
                   : 'No'
             }
           />
-          {/* <DataField label="Language" value={contract.language?.toUpperCase() ?? '—'} /> */}
+          <DataField label="Language" value={contract.language?.toUpperCase() ?? '—'} />
         </dl>
       </Card>
 
@@ -698,12 +803,12 @@ function RisksTab({
         {assessment.breakdown.length ? (
           <div className="-mx-6 mt-5 overflow-x-auto px-6">
             <table className="w-full min-w-[30rem] text-left text-sm">
-              <thead className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
+              <thead className="border-b border-slate-200 dark:border-slate-700 text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
-                  <th className="py-2 pr-4 font-semibold">Finding</th>
-                  <th className="py-2 pr-4 font-semibold">Severity</th>
-                  <th className="py-2 pr-4 text-right font-semibold">Weight</th>
-                  <th className="py-2 text-right font-semibold">Applied</th>
+                  <th scope="col" className="py-2 pr-4 font-semibold">Finding</th>
+                  <th scope="col" className="py-2 pr-4 font-semibold">Severity</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Weight</th>
+                  <th scope="col" className="py-2 text-right font-semibold">Applied</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -754,7 +859,7 @@ function RiskCard({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
           <Badge text={humanise(risk.severity)} variant={getRiskVariant(risk.severity)} />
-          <span className="font-semibold text-slate-900">{humanise(risk.risk_type)}</span>
+          <span className="font-semibold text-slate-900 dark:text-slate-100">{humanise(risk.risk_type)}</span>
         </div>
         {/* An omission has no coordinates by definition, so no evidence button is
             offered - the evidence is that nothing matched anywhere. */}
@@ -800,7 +905,7 @@ function ObligationsTab({
         <Card key={obligation.id} dense>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
-              <p className="text-sm font-medium text-slate-900">{obligation.action}</p>
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-100">{obligation.action}</p>
               {obligation.trigger_event ? (
                 <p className="mt-1 text-xs text-slate-500">
                   Trigger: {obligation.trigger_event}
@@ -863,7 +968,7 @@ function DatesTab({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge text={humanise(date.date_type)} variant="info" />
-                <span className="text-sm font-medium text-slate-900">
+                <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
                   {date.date_value
                     ? formatDate(date.date_value)
                     : (date.date_expression ?? '—')}
@@ -908,7 +1013,7 @@ function PartiesTab({
         <Card key={party.id} dense>
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate font-semibold text-slate-900">{party.name}</p>
+              <p className="truncate font-semibold text-slate-900 dark:text-slate-100">{party.name}</p>
               {party.legal_name && party.legal_name !== party.name ? (
                 <p className="truncate text-xs text-slate-500">{party.legal_name}</p>
               ) : null}
@@ -932,6 +1037,40 @@ function PartiesTab({
       ))}
     </div>
   );
+}
+
+/**
+ * Graph tab.
+ *
+ * Fetched only when the tab is opened, and never refetched on its own: the graph
+ * is rebuilt server-side from six row sets, so polling it would be pure cost for a
+ * picture that only changes when somebody reprocesses or reviews the contract.
+ *
+ * A contract still being processed answers with a partial graph rather than an
+ * error, which is why an empty result is presented as "nothing extracted yet"
+ * instead of a failure.
+ */
+function GraphTab({ contractId }: { contractId: string }) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ['contract-graph', contractId],
+    queryFn: () => knowledgeApi.graph(contractId),
+    staleTime: 5 * 60_000,
+  });
+
+  if (isLoading) return <LoadingSpinner label="Building the graph..." />;
+  if (error) {
+    return <ErrorBanner message={errorMessage(error)} onRetry={() => void refetch()} />;
+  }
+  if (!data || !data.nodes.length) {
+    return (
+      <EmptyState
+        icon={Share2}
+        title="Nothing to graph yet"
+        description="The graph is built from the parties, clauses, obligations and risks extracted from this contract. It fills in once processing has run."
+      />
+    );
+  }
+  return <KnowledgeGraph graph={data} />;
 }
 
 /**
@@ -1002,12 +1141,12 @@ function ProcessingTab({ contractId }: { contractId: string }) {
 
           <div className="-mx-5 mt-4 overflow-x-auto px-5">
             <table className="w-full min-w-[26rem] text-left text-sm">
-              <thead className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500">
+              <thead className="border-b border-slate-200 dark:border-slate-700 text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
-                  <th className="py-2 pr-4 font-semibold">Stage</th>
-                  <th className="py-2 pr-4 font-semibold">Status</th>
-                  <th className="py-2 pr-4 text-right font-semibold">Attempt</th>
-                  <th className="py-2 text-right font-semibold">Duration</th>
+                  <th scope="col" className="py-2 pr-4 font-semibold">Stage</th>
+                  <th scope="col" className="py-2 pr-4 font-semibold">Status</th>
+                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Attempt</th>
+                  <th scope="col" className="py-2 text-right font-semibold">Duration</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">

@@ -40,6 +40,14 @@ from app.storage import get_storage
 
 logger = get_logger(__name__)
 
+#: Media type to serve an *original* upload as. `contracts.mime_type` describes the
+#: processed file - always a PDF once conversion exists - so it cannot answer this.
+_MEDIA_TYPES = {
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
 
 class ContractService:
     def __init__(self, db: AsyncSession) -> None:
@@ -173,6 +181,14 @@ class ContractService:
             sha256_hash=contract.sha256_hash,
             mime_type=contract.mime_type,
             language=contract.language,
+            # `original_file_type` is NULL on rows created before Word uploads
+            # existed. Those were processed as uploaded, so their original type is
+            # their current one - falling back keeps the field meaningful for
+            # history instead of showing a blank the UI has to special-case.
+            original_file_type=str(contract.original_file_type or contract.file_type),
+            has_converted_pdf=contract.converted_file_path is not None,
+            source_archive_id=contract.source_archive_id,
+            source_archive_name=contract.source_archive_name,
             status=str(contract.status),
             needs_review=contract.needs_review,
             current_version=contract.current_version,
@@ -470,9 +486,20 @@ class ContractService:
             contract_id, project_id, resource="Contract"
         )
 
+        # Two different files can be wanted here, and which one depends on why.
+        #
+        # Viewing means the PDF the pipeline read: evidence coordinates were
+        # computed against its pages, so showing the Word original instead would
+        # put every highlight nowhere. Downloading means what the user gave us -
+        # they uploaded a .docx and expect a .docx back.
+        #
+        # `storage_path` is the processing PDF for both PDF and converted uploads,
+        # so the view path needs no special case.
         storage_path = contract.storage_path
         file_name = contract.original_file_name
         file_size = contract.file_size
+        if download and contract.original_file_path and contract.converted_file_path:
+            storage_path = contract.original_file_path
 
         if version is not None and version != contract.current_version:
             match = next(
@@ -495,6 +522,32 @@ class ContractService:
             expires_in=ttl,
             download_filename=file_name if download else None,
         )
+        # A backend that cannot sign returns an API path instead of a URL, and the
+        # one the local adapter builds - `/api/v1/files/{container}/{key}` - has no
+        # route behind it. Nothing serves it and nothing ever did, so with
+        # STORAGE_PROVIDER=local the viewer asked for a 404 on every document and
+        # reported "This document could not be displayed."
+        #
+        # `/contracts/{id}/content` already streams these bytes and exists for
+        # exactly this case. Repointing here rather than in the adapter keeps
+        # storage ignorant of API routing: it knows a key, not which contract the
+        # key belongs to, and reconstructing that by parsing the path would couple
+        # the two and break the moment a key layout changes.
+        #
+        # `inline=false` only sets Content-Disposition, so a download still works.
+        # There is deliberately no `version` parameter: `/content` streams the
+        # current version only, and appending one that the route does not read
+        # would silently serve the wrong bytes rather than fail. A historical
+        # version under local storage is a gap, not something to paper over.
+        if not url.startswith(("http://", "https://")):
+            url = f"/api/v1/contracts/{contract_id}/content"
+            if download:
+                url += "?inline=false"
+                # `inline=false` only sets Content-Disposition. Selecting the
+                # *original* file needs `original=true`, or the download quietly
+                # serves the converted PDF under the original's filename.
+                if contract.converted_file_path:
+                    url += "&original=true"
 
         if download and actor is not None:
             await self.audit.record(
@@ -522,17 +575,36 @@ class ContractService:
         )
 
     async def stream_file(
-        self, contract_id: uuid.UUID, project_id: uuid.UUID
-    ) -> tuple[Contract, Any]:
-        """Byte stream for the document.
+        self, contract_id: uuid.UUID, project_id: uuid.UUID, *, original: bool = False
+    ) -> tuple[Contract, Any, str]:
+        """Byte stream for the document, plus the name and media type to serve it as.
 
         Used where a signed URL is unavailable (local storage) or where the client
-        cannot follow a redirect. Returns the contract plus an async iterator.
+        cannot follow a redirect.
+
+        ``original=True`` serves the file the user uploaded rather than the PDF the
+        pipeline read. Without it there is no way to get a Word original back on a
+        local-storage deployment: `file_access` can *name* the original, but every
+        proxied URL it hands out routes here, and this streamed `storage_path`
+        unconditionally - so "download original" quietly returned the converted PDF
+        with a .docx filename on it.
         """
         contract = await self.contracts.get_scoped_or_404(
             contract_id, project_id, resource="Contract"
         )
-        return contract, self.storage.get_stream(contract.storage_path)
+
+        # Only meaningful when the two are actually different files. For a PDF
+        # upload `original_file_path` and `storage_path` are the same object, and
+        # for rows predating conversion the former is NULL.
+        wants_original = original and contract.converted_file_path and contract.original_file_path
+        path = str(contract.original_file_path) if wants_original else contract.storage_path
+        media_type = (
+            (contract.original_file_type and _MEDIA_TYPES.get(str(contract.original_file_type)))
+            or "application/octet-stream"
+            if wants_original
+            else (contract.mime_type or "application/pdf")
+        )
+        return contract, self.storage.get_stream(path), media_type
 
 
 __all__ = ["ContractService"]

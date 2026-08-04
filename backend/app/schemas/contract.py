@@ -58,7 +58,11 @@ class UploadedFileResult(ResponseSchema):
     #: Set when the file was accepted.
     contract_id: uuid.UUID | None = None
     job_id: uuid.UUID | None = None
-    status: str = Field(description="accepted | duplicate | rejected")
+    #: ``expanded`` is the archive's own row: the ZIP is not a document, so it is
+    #: never accepted or rejected on its own terms - it either yielded documents
+    #: or it did not. Deliberately not counted in accepted/duplicates/rejected,
+    #: which tally documents; the documents it produced are counted individually.
+    status: str = Field(description="accepted | duplicate | rejected | expanded")
     size: int | None = None
     sha256: str | None = None
     #: Populated for ``duplicate`` so the client can link to the existing contract.
@@ -261,12 +265,24 @@ class ContractResponse(ResponseSchema):
     contract_number: str | None = None
     agreement_type: str | None = None
     agreement_subtype: str | None = None
+    #: The type of the file being *processed*, which is always PDF. What the user
+    #: uploaded is `original_file_type` - the two differ for a Word upload.
     file_type: str
     file_size: int
     page_count: int | None = None
     sha256_hash: str
     mime_type: str | None = None
     language: str | None = None
+
+    # --- source provenance ---------------------------------------------------
+    #: What was uploaded: pdf, doc or docx. Equal to `file_type` for a PDF.
+    original_file_type: str | None = None
+    #: True when a Word original was converted, so the UI can offer both files and
+    #: explain that the viewer is showing a conversion rather than the original.
+    has_converted_pdf: bool = False
+    #: The archive this document came out of, so the UI can group and link back.
+    source_archive_id: uuid.UUID | None = None
+    source_archive_name: str | None = None
 
     status: str
     needs_review: bool = False

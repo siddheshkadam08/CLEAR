@@ -434,9 +434,20 @@ class RetrievalPlanner:
         document_type: ResolvedDocumentType | None = None,
         level_limit: int | None = None,
         prefer_content: bool = False,
+        for_answer: bool = False,
     ) -> RetrievalPlan:
         text = (query or "").strip()
         reasoning: list[str] = []
+
+        # Coerce both, because the callers are request payloads and the request
+        # schemas set `use_enum_values=True` - so an explicitly supplied `scope`
+        # or `mode` arrives as a bare `str` no matter what the annotation says.
+        # `RetrievalPlan.as_dict` and the planning log both read `.value` off
+        # these, so a scoped search raised `AttributeError: 'str' object has no
+        # attribute 'value'` and returned a 500. Defaults were unaffected, which
+        # is why it only broke when the caller named a scope.
+        scope = SearchScope(scope)
+        mode = SearchMode(mode)
 
         agreement_types = self._with_document_type(
             agreement_types, analysis=analysis, document_type=document_type, reasoning=reasoning
@@ -447,7 +458,14 @@ class RetrievalPlanner:
             intent, text, scope, contract_ids, reasoning, prefer_content
         )
         filters = self._extract_filters(text, agreement_types, contract_ids, reasoning)
-        levels = self._level_budgets(strategy, scope, reasoning, level_limit)
+        levels = self._level_budgets(
+            strategy,
+            scope,
+            reasoning,
+            level_limit,
+            # Only an answering caller may drop L1 - see `_level_budgets`.
+            named_contracts=bool(contract_ids) and for_answer,
+        )
 
         plan = RetrievalPlan(
             query=text,
@@ -701,6 +719,8 @@ class RetrievalPlanner:
         scope: SearchScope,
         reasoning: list[str],
         level_limit: int | None = None,
+        *,
+        named_contracts: bool = False,
     ) -> list[LevelBudget]:
         """How many candidates each level yields.
 
@@ -724,7 +744,27 @@ class RetrievalPlanner:
             reasoning.append("Metadata only: no vector search is performed.")
             return budgets
 
-        if strategy in {
+        # L1 exists to narrow *which documents* to search. When the caller has
+        # already named them - the Copilot opened on one contract, which is the
+        # dominant path in the UI - there is nothing left to narrow, and the level
+        # runs a vector query whose only output is a candidate list the plan
+        # already holds. Measured cost: ~110 ms per query.
+        #
+        # **Answering callers only** (`for_answer=True`), and the distinction is
+        # not fussiness. L1 is excluded from `answerable_similarity` by design, so
+        # dropping it cannot change an answer - a document summary never supports
+        # one, it only selects documents. But `/search` is a *browse* surface: its
+        # results are read directly, and the summary row is a legitimate result
+        # there. Skipping L1 for it removes a row the user came to see. Measured:
+        # hits fell 3 -> 2 on the same query.
+        #
+        # So the saving is taken where it is free and declined where it is not.
+        if named_contracts:
+            reasoning.append(
+                "Contracts were named in the request, so the document-summary level "
+                "was skipped - it selects documents and the selection is already made."
+            )
+        elif strategy in {
             RetrievalStrategy.METADATA_PLUS_DOCUMENT,
             RetrievalStrategy.HYBRID,
             RetrievalStrategy.GRAPH_TRAVERSAL,
@@ -754,7 +794,26 @@ class RetrievalPlanner:
                 )
             )
 
-        if strategy in {RetrievalStrategy.CHUNK_RETRIEVAL, RetrievalStrategy.HYBRID}:
+        # L3 is where the document's own words live, and only two strategies used
+        # to reach it. That left most of the intent map unable to answer from the
+        # text: "Key risks?" routes to METADATA_PLUS_DOCUMENT, which planned
+        # summary + clause, and `answerable_similarity` excludes summaries by
+        # design - so one weak clause hit decided the answer while the risk
+        # language in the chunks was never read. Measured: 0.2935 against a 0.45
+        # gate on a contract holding eight extracted risks.
+        #
+        # The same hole made three termination questions score 0.26-0.31 under
+        # CLAUSE_RETRIEVAL during threshold calibration.
+        #
+        # METADATA_ONLY stays out: it answers from the projection and must not pay
+        # for a vector search it does not read.
+        if strategy in {
+            RetrievalStrategy.CHUNK_RETRIEVAL,
+            RetrievalStrategy.HYBRID,
+            RetrievalStrategy.METADATA_PLUS_DOCUMENT,
+            RetrievalStrategy.CLAUSE_RETRIEVAL,
+            RetrievalStrategy.GRAPH_TRAVERSAL,
+        }:
             budgets.append(
                 LevelBudget(
                     level=EmbeddingLevel.CHUNK,

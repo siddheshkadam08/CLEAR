@@ -74,6 +74,10 @@ frontend/stats.html
 # `make openapi` writes this at the repo root; it is generated from the running
 # API, so a committed copy is stale the moment a route changes.
 openapi.json
+# pandoc renders these from the Markdown next to them; the command is at the top
+# of each source file. A committed .docx is stale the moment the .md is edited,
+# and a binary that nobody can diff is the last place you want the truth to live.
+docs/*.docx
 
 # ---- Deployment ----
 # scripts/deploy-remote.sh packages the tree into a tarball and unpacks it on the

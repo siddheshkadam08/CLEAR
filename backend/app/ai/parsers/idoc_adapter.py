@@ -162,8 +162,12 @@ class IDocParser(IDocumentParser):
     # =========================================================================
     async def parse(self, request: ParseRequest) -> NormalizedDocument:
         if request.file_type is not FileType.PDF:
+            # Named from the capability rather than hardcoded: subclasses reuse this
+            # method, and `PdfTextExtractorParser` reporting "the iDoc service" would
+            # send whoever reads the error looking at a service it never called.
             raise ParserError(
-                f"The iDoc service accepts PDF only; received {request.file_type.value}.",
+                f"The {self.capabilities.name} parser accepts PDF only; "
+                f"received {request.file_type.value}.",
                 retryable=False,
                 details={"file_type": request.file_type.value},
             )

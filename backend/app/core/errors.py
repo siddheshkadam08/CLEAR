@@ -36,6 +36,12 @@ class ErrorCode:
     UNSUPPORTED_FILE_TYPE = "unsupported_file_type"
     FILE_TOO_LARGE = "file_too_large"
     DUPLICATE_DOCUMENT = "duplicate_document"
+    #: A Word document was stored but could not be turned into a PDF. Separate
+    #: from a processing failure: the pipeline never started, and the remedy is a
+    #: different source file rather than a retry.
+    CONVERSION_FAILED = "conversion_failed"
+    #: The archive itself could not be read, so nothing inside it was processed.
+    ARCHIVE_ERROR = "archive_error"
     INVALID_STATE_TRANSITION = "invalid_state_transition"
 
     # 401 / 403
@@ -220,7 +226,31 @@ class DuplicateDocumentError(ConflictError):
 
 class UnsupportedFileTypeError(ValidationError):
     code = ErrorCode.UNSUPPORTED_FILE_TYPE
-    message = "Only PDF and DOCX files are supported."
+    message = "Only PDF, DOC, DOCX and ZIP files are supported."
+
+
+class ConversionError(ValidationError):
+    """A Word document was stored but could not be turned into a PDF.
+
+    Not a ``PipelineError``: the pipeline never started. The original is safe in
+    storage and downloadable; what is missing is the PDF everything downstream
+    needs. Retrying the same bytes will fail the same way unless the failure was
+    a timeout, hence ``retryable`` being set per-raise rather than on the class.
+    """
+
+    code = ErrorCode.CONVERSION_FAILED
+    message = "This document could not be converted to PDF."
+
+
+class ArchiveError(ValidationError):
+    """The archive could not be read, so nothing inside it was processed.
+
+    Distinct from a member failing: this rejects the whole upload, because an
+    archive that will not open has no members to succeed.
+    """
+
+    code = ErrorCode.ARCHIVE_ERROR
+    message = "This archive could not be opened."
 
 
 class FileTooLargeError(ValidationError):

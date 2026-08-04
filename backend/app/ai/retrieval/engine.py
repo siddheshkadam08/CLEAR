@@ -141,6 +141,11 @@ class RetrievalResult:
     #: Rows the metadata-only strategy answers from directly.
     metadata_rows: list[dict[str, Any]] = field(default_factory=list)
     duration_ms: int = 0
+    #: Milliseconds per retrieval leg, summed across levels: vector, keyword,
+    #: fusion. Reported alongside `duration_ms` so a slow retrieval is
+    #: attributable without a profiler - the legs scale with different things and
+    #: the total cannot distinguish them. Empty when nothing ran.
+    leg_ms: dict[str, int] = field(default_factory=dict)
     #: Time spent re-ranking, when a re-ranker ran. Reported separately from
     #: ``duration_ms`` so a slow answer can be attributed to the right stage.
     rerank_ms: int = 0
@@ -199,6 +204,7 @@ class RetrievalResult:
             "metadata_rows": len(self.metadata_rows),
             "duration_ms": self.duration_ms,
             "rerank_ms": self.rerank_ms,
+            "leg_ms": dict(self.leg_ms),
             "top_similarity": round(self.top_similarity, 4),
             "by_source": self.counts,
             "truncated": self.truncated,
@@ -279,16 +285,35 @@ class RetrievalEngine:
         query_vector = await self._embed_query(plan, result)
 
         for budget in plan.levels:
+            # Timed per leg, per level. Measurement only - the calls, their order
+            # and their arguments are unchanged, and `perf_counter` costs tens of
+            # nanoseconds against queries measured in milliseconds.
+            level_label = budget.level.value
+
+            leg_started = time.perf_counter()
             vector_hits = (
                 await self._vector_search(plan, budget, candidates, query_vector)
                 if query_vector
                 else []
             )
+            vector_ms = int((time.perf_counter() - leg_started) * 1000)
+
+            leg_started = time.perf_counter()
             keyword_hits = (
                 await self._keyword_search(plan, budget, candidates)
                 if plan.mode in {SearchMode.HYBRID, SearchMode.KEYWORD}
                 else []
             )
+            keyword_ms = int((time.perf_counter() - leg_started) * 1000)
+
+            result.leg_ms["vector"] = result.leg_ms.get("vector", 0) + vector_ms
+            result.leg_ms["keyword"] = result.leg_ms.get("keyword", 0) + keyword_ms
+            metrics.retrieval_leg_duration_seconds.labels(
+                leg="vector", level=level_label
+            ).observe(vector_ms / 1000)
+            metrics.retrieval_leg_duration_seconds.labels(
+                leg="keyword", level=level_label
+            ).observe(keyword_ms / 1000)
 
             # Taken here, before fusion: `_fuse` replaces `score` with a
             # reciprocal-rank value, so this is the last point at which a cosine
@@ -305,7 +330,13 @@ class RetrievalEngine:
             elif plan.mode is SearchMode.KEYWORD:
                 merged = keyword_hits
             else:
+                fuse_started = time.perf_counter()
                 merged = _fuse(vector_hits, keyword_hits, limit=budget.limit)
+                fusion_ms = int((time.perf_counter() - fuse_started) * 1000)
+                result.leg_ms["fusion"] = result.leg_ms.get("fusion", 0) + fusion_ms
+                metrics.retrieval_leg_duration_seconds.labels(
+                    leg="fusion", level=level_label
+                ).observe(fusion_ms / 1000)
 
             result.evidence.extend(merged)
 
@@ -555,16 +586,16 @@ class RetrievalEngine:
                 Chunk.page_end,
                 Chunk.bounding_boxes,
                 func.ts_rank(
-                    Chunk.search_vector, func.plainto_tsquery("english", plan.query)
+                    Chunk.search_vector, func.websearch_to_tsquery("english", plan.query)
                 ).label("rank_score"),
             )
             .where(
                 Chunk.project_id.in_(plan.project_ids),
-                Chunk.search_vector.op("@@")(func.plainto_tsquery("english", plan.query)),
+                Chunk.search_vector.op("@@")(func.websearch_to_tsquery("english", plan.query)),
             )
             .order_by(
                 func.ts_rank(
-                    Chunk.search_vector, func.plainto_tsquery("english", plan.query)
+                    Chunk.search_vector, func.websearch_to_tsquery("english", plan.query)
                 ).desc()
             )
             .limit(budget.limit)

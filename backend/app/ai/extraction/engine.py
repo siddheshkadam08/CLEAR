@@ -71,6 +71,7 @@ from app.ai.extraction.validation import (
 from app.ai.rag.providers import (
     IInferenceProvider,
     StructuredResult,
+    estimate_tokens,
     get_inference_provider,
 )
 from app.core import metrics
@@ -397,6 +398,12 @@ class ExtractionEngine:
             limit=request.evidence_limit,
         )
         outcome.evidence_chunks = len(bundle.chunks)
+        # Instrumentation only. Sized here rather than in `_call` because this is
+        # where the evidence exists as separable text - by the time the prompt is
+        # built it is interleaved with the scaffolding and cannot be split again.
+        outcome.evidence_tokens = sum(
+            estimate_tokens(chunk.text) for chunk in bundle.chunks if chunk.text
+        )
 
         if bundle.is_empty:
             # No candidate evidence: report absence rather than spending a call on a
@@ -1248,6 +1255,37 @@ class ExtractionEngine:
         outcome.cost_usd += structured.cost_usd
         outcome.latency_ms += structured.inference.latency_ms
         outcome.model = structured.model
+
+        # --- instrumentation only -------------------------------------------
+        #
+        # Splits the prompt into the part that is about this document (evidence)
+        # and the part re-sent identically on every clause call (scaffolding).
+        # Derived from what was already sent - nothing here changes the prompt,
+        # the call, or the result.
+        #
+        # `outcome.evidence_tokens` was estimated from the bundle when it was
+        # selected, because the provider reports only a total: the split is not
+        # observable from the API and has to come from the text we supplied. It
+        # is an estimate and labelled as one; the ratio is what matters here, not
+        # the digit.
+        evidence_tokens = outcome.evidence_tokens
+        # Clamped at zero: a token estimate and a provider count are different
+        # counters, so on a very short prompt the estimate can exceed the total
+        # and a negative "repeated" figure would be meaningless.
+        outcome.repeated_tokens += max(0, usage.input_tokens - evidence_tokens)
+
+        metrics.clause_extraction_duration_seconds.observe(
+            structured.inference.latency_ms / 1000
+        )
+        for kind, count in (
+            ("input", usage.input_tokens),
+            ("output", usage.output_tokens),
+            ("cache_read", usage.cache_read_tokens),
+            ("evidence", evidence_tokens),
+            ("repeated", max(0, usage.input_tokens - evidence_tokens)),
+        ):
+            if count:
+                metrics.clause_extraction_tokens.labels(kind=kind).observe(count)
 
         # Second line of defence: the provider constrains output to the schema, but a
         # mock or a non-strict deployment may not.

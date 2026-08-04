@@ -23,14 +23,17 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC
 from typing import Any
 
 import httpx
+from sqlalchemy import func
 
 from app.core import metrics
 from app.core.config import get_settings
-from app.core.enums import JobPriority, PipelineStage
+from app.core.enums import JobPriority, PipelineStage, StageQueueState
 from app.core.errors import QueueError
 from app.core.logging import get_logger
 from app.core.telemetry import inject_context
@@ -112,14 +115,39 @@ class QueueStats:
     delayed: int = 0
 
 
+@dataclass(slots=True)
+class ClaimedStage:
+    """One leased row, as the worker loop sees it.
+
+    ``row_id`` is the queue row, not the job: completing or failing addresses the
+    lease, while everything inside ``message`` addresses the pipeline.
+    """
+
+    row_id: uuid.UUID
+    message: StageMessage
+    attempt: int
+    max_attempts: int
+
+
 class IQueueClient(ABC):
     """Dispatch contract. Implementations must be safe to call concurrently."""
 
     driver: str = "abstract"
 
     @abstractmethod
-    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0) -> str:
-        """Queue one stage execution. Returns the queue's job id."""
+    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0, db: Any = None) -> str:
+        """Queue one stage execution. Returns the queue's job id.
+
+        ``db`` is an open session to enqueue *within*, for callers that create the
+        job and queue it in one transaction. Only a database-backed driver can
+        honour it; the broker drivers ignore it, because a broker cannot take part
+        in a Postgres transaction whatever it is passed.
+
+        Passing it where one is open is not optional for those callers. The queue
+        row carries a foreign key to ``processing_jobs``, and a driver opening its
+        own session cannot see a job the caller has only flushed - the insert fails
+        on the foreign key and the upload is rejected having already stored the file.
+        """
 
     @abstractmethod
     async def stats(self) -> list[QueueStats]:
@@ -129,9 +157,9 @@ class IQueueClient(ABC):
     async def dlq_size(self) -> int:
         """Jobs that exhausted their retries."""
 
-    async def enqueue_many(self, messages: list[StageMessage]) -> list[str]:
+    async def enqueue_many(self, messages: list[StageMessage], *, db: Any = None) -> list[str]:
         """Queue several stages. Overridden where the driver supports batching."""
-        return [await self.enqueue(message) for message in messages]
+        return [await self.enqueue(message, db=db) for message in messages]
 
     async def health(self) -> bool:
         try:
@@ -175,7 +203,8 @@ class BullMQHttpDriver(IQueueClient):
             )
         return self._client
 
-    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0) -> str:
+    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0, db: Any = None) -> str:
+        # `db` ignored: a broker cannot join a Postgres transaction.
         payload = message.to_payload()
         payload["trace"] = inject_context(dict(message.trace))
         payload["delay_ms"] = delay_ms
@@ -216,7 +245,7 @@ class BullMQHttpDriver(IQueueClient):
         )
         return queue_job_id
 
-    async def enqueue_many(self, messages: list[StageMessage]) -> list[str]:
+    async def enqueue_many(self, messages: list[StageMessage], *, db: Any = None) -> list[str]:
         """Batch enqueue - one HTTP round trip for a whole upload."""
         if not messages:
             return []
@@ -313,7 +342,8 @@ class RedisListDriver(IQueueClient):
     def _delayed_key(self) -> str:
         return f"{self.prefix}:delayed"
 
-    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0) -> str:
+    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0, db: Any = None) -> str:
+        # `db` ignored: Redis cannot join a Postgres transaction.
         import orjson
 
         from app.core.cache import get_queue_redis
@@ -437,6 +467,401 @@ class RedisListDriver(IQueueClient):
 
 
 # =============================================================================
+# Postgres driver
+# =============================================================================
+class PostgresQueueDriver(IQueueClient):
+    """Queue in the same database the pipeline already writes to.
+
+    The broker-free path. ``SELECT ... FOR UPDATE SKIP LOCKED`` is what makes a
+    table viable here: several workers select the same rows and Postgres hands
+    each of them a disjoint set rather than serialising them behind one another.
+
+    Enqueue runs in its own short session. That is not incidental - the runner
+    calls this *after* the stage transaction has committed, precisely so a worker
+    cannot start the next stage before the previous one's checkpoint is durable.
+    Joining the caller's transaction would undo that guarantee.
+
+    ``delay_ms`` and retry backoff are the same column, ``available_at``. A
+    delayed job and a backed-off job are indistinguishable to the claim query, so
+    unlike the Redis driver there is no separate delay tier for the scheduler to
+    promote.
+    """
+
+    driver = "postgres"
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self.max_attempts = settings.queue.max_attempts
+
+    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0, db: Any = None) -> str:
+        ids = await self._insert([(message, delay_ms)], db=db)
+        return ids[0] if ids else ""
+
+    async def enqueue_many(self, messages: list[StageMessage], *, db: Any = None) -> list[str]:
+        if not messages:
+            return []
+        return await self._insert([(message, 0) for message in messages], db=db)
+
+    async def _insert(self, items: list[tuple[StageMessage, int]], *, db: Any = None) -> list[str]:
+        from datetime import datetime, timedelta
+
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        now = datetime.now(UTC)
+        rows = []
+        for message, delay_ms in items:
+            payload = message.to_payload()
+            payload["trace"] = inject_context(dict(message.trace))
+            rows.append(
+                {
+                    "dispatch_id": message.dispatch_id,
+                    "job_id": message.job_id,
+                    "contract_id": message.contract_id,
+                    "project_id": message.project_id,
+                    "stage": message.stage,
+                    "priority": message.priority,
+                    "payload": payload,
+                    "attempt": message.attempt,
+                    "max_attempts": self.max_attempts,
+                    "state": StageQueueState.PENDING,
+                    "available_at": now + timedelta(milliseconds=delay_ms),
+                }
+            )
+
+        # ON CONFLICT DO NOTHING is the deduplication. A driver retrying the same
+        # payload sends the same dispatch_id and collapses onto the existing row;
+        # asking for the stage again builds a new message with a new id, so a
+        # deliberate re-run still runs.
+        statement = (
+            pg_insert(StageQueueEntry)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["dispatch_id"])
+            .returning(StageQueueEntry.id)
+        )
+
+        try:
+            if db is not None:
+                # The caller's transaction. Deliberately not committed here - the
+                # caller owns it, and that is the point: the queue row and the job
+                # row it references commit together or not at all. A broker cannot
+                # offer that, so a rolled-back upload leaves BullMQ holding a job
+                # for a contract that never existed.
+                result = await db.execute(statement)
+                inserted = [str(row[0]) for row in result.all()]
+            else:
+                async with session_scope() as own:
+                    result = await own.execute(statement)
+                    inserted = [str(row[0]) for row in result.all()]
+        except Exception as exc:
+            for message, _ in items:
+                metrics.queue_enqueue_failures_total.labels(
+                    queue=self.queue_name(message.stage)
+                ).inc()
+            raise QueueError(f"Could not enqueue to Postgres: {exc}") from exc
+
+        for message, _ in items:
+            metrics.queue_enqueued_total.labels(
+                queue=self.queue_name(message.stage), priority=message.priority.value
+            ).inc()
+            logger.info(
+                "stage_enqueued",
+                queue=self.queue_name(message.stage),
+                job_id=str(message.job_id),
+                stage=message.stage.value,
+                attempt=message.attempt,
+                driver=self.driver,
+            )
+
+        if len(inserted) < len(items):
+            # Not an error: this is deduplication doing its job. Logged because a
+            # burst of it means something is re-delivering, which is worth seeing.
+            logger.info(
+                "stage_enqueue_deduplicated",
+                requested=len(items),
+                inserted=len(inserted),
+            )
+        return inserted
+
+    async def stats(self) -> list[QueueStats]:
+        from sqlalchemy import case, func, select
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        # `pending` splits into two things an operator reads differently: rows that
+        # are claimable now, and rows held back by `available_at` - a retry backoff
+        # or an enqueue delay. Reporting both as "waiting" would show a queue that
+        # looks stuck while it is in fact deliberately paused, so the distinction
+        # is made here rather than left for someone to query by hand.
+        delayed = case((StageQueueEntry.available_at > func.now(), 1), else_=0)
+
+        async with session_scope() as db:
+            result = await db.execute(
+                select(
+                    StageQueueEntry.stage,
+                    StageQueueEntry.state,
+                    func.count().label("count"),
+                    func.coalesce(func.sum(delayed), 0).label("delayed"),
+                ).group_by(StageQueueEntry.stage, StageQueueEntry.state)
+            )
+            counts: dict[PipelineStage, dict[StageQueueState, tuple[int, int]]] = {}
+            for stage, state, count, held in result.all():
+                counts.setdefault(stage, {})[state] = (int(count), int(held))
+
+        stats: list[QueueStats] = []
+        for stage, by_state in sorted(counts.items(), key=lambda item: item[0].value):
+            pending, held = by_state.get(StageQueueState.PENDING, (0, 0))
+            stats.append(
+                QueueStats(
+                    queue=self.queue_name(stage),
+                    waiting=pending - held,
+                    delayed=held,
+                    active=by_state.get(StageQueueState.CLAIMED, (0, 0))[0],
+                    completed=by_state.get(StageQueueState.DONE, (0, 0))[0],
+                    failed=by_state.get(StageQueueState.DEAD, (0, 0))[0],
+                )
+            )
+        return stats
+
+    async def dlq_size(self) -> int:
+        from sqlalchemy import func, select
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        async with session_scope() as db:
+            result = await db.execute(
+                select(func.count())
+                .select_from(StageQueueEntry)
+                .where(StageQueueEntry.state == StageQueueState.DEAD)
+            )
+            return int(result.scalar_one())
+
+    async def health(self) -> bool:
+        from sqlalchemy import text as sa_text
+
+        from app.db.session import session_scope
+
+        try:
+            async with session_scope() as db:
+                await db.execute(sa_text("SELECT 1"))
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    # -- worker-facing ----------------------------------------------------
+    # Beyond IQueueClient, like RedisListDriver's pop/promote_delayed. Only the
+    # worker loop and the scheduler sweep call these.
+
+    async def claim(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        stages: Sequence[PipelineStage] | None = None,
+    ) -> list[ClaimedStage]:
+        """Take up to ``limit`` rows, marking them claimed.
+
+        ``FOR UPDATE SKIP LOCKED`` is the whole trick: two workers running this
+        at the same moment lock disjoint rows and neither waits for the other.
+
+        **This commits before the caller runs anything.** A stage can take
+        minutes, and holding the claim transaction open across it would pin a
+        connection for the duration and serialise every other worker behind the
+        row lock - which is exactly what SKIP LOCKED exists to avoid. The claim
+        is therefore a lease, recovered by :meth:`reclaim_stale` if the worker
+        dies holding it.
+
+        ``stages`` lets a caller claim only what it has spare capacity for, so a
+        worker saturated on ``docpipeline`` can still pick up parser work.
+        """
+        from sqlalchemy import select, update
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        if limit <= 0:
+            return []
+
+        candidates = (
+            select(StageQueueEntry.id)
+            .where(
+                StageQueueEntry.state == StageQueueState.PENDING,
+                StageQueueEntry.available_at <= func.now(),
+            )
+            .order_by(StageQueueEntry.priority, StageQueueEntry.available_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        if stages:
+            candidates = candidates.where(StageQueueEntry.stage.in_(list(stages)))
+
+        # A CTE, not `WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`.
+        #
+        # The obvious IN form is wrong, and wrong quietly: Postgres pulls the
+        # subquery up into a semi-join and re-evaluates it per candidate row, so
+        # the LIMIT stops bounding the UPDATE. Measured against this schema, a
+        # claim of `limit=1` over three pending rows updated all three - one
+        # worker taking the entire queue every poll.
+        #
+        # `FOR UPDATE` forces the CTE to materialise, which restores the fence:
+        # the inner SELECT runs exactly once, locks at most `limit` rows, and the
+        # UPDATE joins against that fixed set.
+        claim_cte = candidates.cte("claimable")
+
+        async with session_scope() as db:
+            result = await db.execute(
+                update(StageQueueEntry)
+                .where(StageQueueEntry.id == claim_cte.c.id)
+                .values(
+                    state=StageQueueState.CLAIMED,
+                    claimed_at=func.now(),
+                    claimed_by=worker_id[:128],
+                )
+                .returning(
+                    StageQueueEntry.id,
+                    StageQueueEntry.payload,
+                    StageQueueEntry.attempt,
+                    StageQueueEntry.max_attempts,
+                ),
+                # Plain SQL, not an ORM-synchronised UPDATE. Two reasons, both
+                # load-bearing: the ORM path tries to build identity keys from
+                # RETURNING and raises `unhashable type: 'dict'` on the JSONB
+                # payload, and its 'fetch' strategy re-evaluates the WHERE
+                # clause - which re-runs the LIMIT subquery and claims more rows
+                # than were asked for.
+                execution_options={"synchronize_session": False},
+            )
+            rows = result.all()
+
+        claimed = []
+        for row_id, payload, attempt, max_attempts in rows:
+            message = StageMessage.from_payload(payload)
+            message.attempt = attempt
+            claimed.append(
+                ClaimedStage(
+                    row_id=row_id,
+                    message=message,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                )
+            )
+        return claimed
+
+    async def complete(self, row_id: uuid.UUID) -> None:
+        """Mark a claimed row done."""
+        from sqlalchemy import update
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        async with session_scope() as db:
+            await db.execute(
+                update(StageQueueEntry)
+                .where(StageQueueEntry.id == row_id)
+                .values(state=StageQueueState.DONE, claimed_at=None, claimed_by=None)
+            )
+
+    async def fail(self, row_id: uuid.UUID, *, error: dict[str, Any]) -> bool:
+        """Reschedule a failed row, or retire it once attempts are spent.
+
+        Returns ``True`` when it will be retried. Backoff is exponential from
+        ``QUEUE_BACKOFF_MS`` and lands in ``available_at``, so a backed-off row is
+        indistinguishable from a delayed one to the claim query.
+        """
+        from datetime import datetime, timedelta
+
+        from sqlalchemy import select, update
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        async with session_scope() as db:
+            current = (
+                await db.execute(
+                    select(StageQueueEntry.attempt, StageQueueEntry.max_attempts).where(
+                        StageQueueEntry.id == row_id
+                    )
+                )
+            ).first()
+            if current is None:
+                return False
+            attempt, max_attempts = current
+            retrying = attempt < max_attempts
+
+            if retrying:
+                backoff_ms = get_settings().queue.backoff_ms * (2 ** (attempt - 1))
+                values: dict[str, Any] = {
+                    "state": StageQueueState.PENDING,
+                    "attempt": attempt + 1,
+                    "available_at": datetime.now(UTC) + timedelta(milliseconds=backoff_ms),
+                }
+            else:
+                values = {"state": StageQueueState.DEAD}
+
+            values.update(claimed_at=None, claimed_by=None, last_error=error)
+            await db.execute(
+                update(StageQueueEntry).where(StageQueueEntry.id == row_id).values(**values)
+            )
+
+        if not retrying:
+            logger.error("stage_queue_row_dead", row_id=str(row_id), attempts=attempt)
+        return retrying
+
+    async def reclaim_stale(self, *, lease_seconds: int) -> int:
+        """Return leases whose worker stopped reporting.
+
+        A worker that dies mid-stage leaves its row ``claimed`` forever; nothing
+        else would ever pick it up. Rows with attempts left go back to
+        ``pending``, the rest to ``dead`` - visible, rather than silently retried
+        into the same crash.
+        """
+        from sqlalchemy import case, cast, update
+
+        from app.db.session import session_scope
+        from app.models.queue import StageQueueEntry
+
+        cutoff = func.now() - func.make_interval(0, 0, 0, 0, 0, 0, lease_seconds)
+
+        async with session_scope() as db:
+            result = await db.execute(
+                update(StageQueueEntry)
+                .where(
+                    StageQueueEntry.state == StageQueueState.CLAIMED,
+                    StageQueueEntry.claimed_at < cutoff,
+                )
+                .values(
+                    # Cast explicitly: a CASE over string literals is typed
+                    # VARCHAR, and Postgres will not coerce that into a native
+                    # enum column on its own.
+                    state=cast(
+                        case(
+                            (
+                                StageQueueEntry.attempt < StageQueueEntry.max_attempts,
+                                StageQueueState.PENDING.value,
+                            ),
+                            else_=StageQueueState.DEAD.value,
+                        ),
+                        StageQueueEntry.state.type,
+                    ),
+                    attempt=StageQueueEntry.attempt + 1,
+                    available_at=func.now(),
+                    claimed_at=None,
+                    claimed_by=None,
+                )
+                .returning(StageQueueEntry.id)
+            )
+            reclaimed = len(result.all())
+
+        if reclaimed:
+            logger.warning("stage_queue_leases_reclaimed", count=reclaimed)
+        return reclaimed
+
+
+# =============================================================================
 # Inline driver (tests)
 # =============================================================================
 class InlineDriver(IQueueClient):
@@ -452,7 +877,8 @@ class InlineDriver(IQueueClient):
     def __init__(self) -> None:
         self.executed: list[StageMessage] = []
 
-    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0) -> str:
+    async def enqueue(self, message: StageMessage, *, delay_ms: int = 0, db: Any = None) -> str:
+        # `db` ignored: the stage runs in-process and opens its own session.
         self.executed.append(message)
         queue_job_id = uuid.uuid4().hex
 
@@ -495,6 +921,8 @@ def get_queue_client() -> IQueueClient:
         _client = InlineDriver()
     elif driver == "bullmq":
         _client = BullMQHttpDriver()
+    elif driver == "postgres":
+        _client = PostgresQueueDriver()
     else:
         _client = RedisListDriver()
 
@@ -517,8 +945,10 @@ async def close_queue_client() -> None:
 
 __all__ = [
     "BullMQHttpDriver",
+    "ClaimedStage",
     "IQueueClient",
     "InlineDriver",
+    "PostgresQueueDriver",
     "QueueStats",
     "RedisListDriver",
     "StageMessage",

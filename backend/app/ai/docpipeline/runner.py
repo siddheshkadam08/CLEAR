@@ -27,7 +27,6 @@ from app.ai.docpipeline.clauses import (
     ClauseDetector,
 )
 from app.ai.docpipeline.mapping import ClauseSpec, load_clauses, load_doc_types
-from app.ai.docpipeline.persistence import PersistedDocument, persist_document
 from app.ai.docpipeline.source import PageContent, load_pages
 from app.ai.docpipeline.vectors import EmbeddingOutcome, embed_texts
 from app.core.logging import get_logger
@@ -47,7 +46,6 @@ class PipelineOutcome:
     clause_specs: list[ClauseSpec] = field(default_factory=list)
     detection: ClauseDetection | None = None
     embeddings: EmbeddingOutcome | None = None
-    persisted: PersistedDocument | None = None
 
     @property
     def paragraph_count(self) -> int:
@@ -106,7 +104,7 @@ async def run_document_pipeline(
         outcome.clause_specs = await load_clauses(db, classification.doc_type)
         emit("")
         emit(
-            f"===== CLAUSE TARGETS (cip_docMapping / {classification.doc_type}) ====="
+            f"===== CLAUSE TARGETS (profile / {classification.doc_type}) ====="
             f"  {len(outcome.clause_specs)} clauses"
         )
         if not outcome.clause_specs:
@@ -129,12 +127,19 @@ async def run_document_pipeline(
 
         if not persist:
             emit("")
-            emit("Stopped before embedding and persistence (--no-persist).")
+            emit("Stopped before embedding (--no-persist).")
             return outcome
 
         # --------------------------------------------------------- stage 3
+        #
+        # A diagnostic, and only that. This used to be followed by a stage 4 that
+        # wrote the clauses and their vectors to `cip_DocMaster` /
+        # `cip_DocContentMaster`; those tables were owned elsewhere, no longer
+        # exist, and the vector column they held was never searched by anything.
+        # Embedding here still answers the question this command is for - "would
+        # this document embed, and how long would it take" - without writing.
         emit("")
-        emit("===== EMBEDDINGS =====")
+        emit("===== EMBEDDINGS (diagnostic - nothing is written) =====")
         if not detection.detected:
             emit("  no clauses detected - nothing to embed.")
             return outcome
@@ -145,23 +150,6 @@ async def run_document_pipeline(
             f"  {len(embeddings.vectors)} texts in {embeddings.batches} batch(es) | "
             f"{embeddings.model} | dim {embeddings.dim} | {embeddings.duration_ms} ms"
         )
-
-        # --------------------------------------------------------- stage 4
-        persisted = await persist_document(
-            db,
-            doc_type=classification.doc_type,
-            json_dir=source_dir,
-            pdf_path=pdf_path,
-            clauses=detection.detected,
-            vectors=embeddings.vectors,
-        )
-        outcome.persisted = persisted
-        emit("")
-        emit("===== PERSISTED =====")
-        if persisted.replaced_previous:
-            emit("  replaced a previous run over the same source directory")
-        emit(f"  cip_DocMaster         docid={persisted.docid}")
-        emit(f"  cip_DocContentMaster  {persisted.clause_rows} rows")
 
     return outcome
 
@@ -236,7 +224,7 @@ def _report_detection(
     emit("")
     emit("===== CLAUSE DETECTION SUMMARY =====")
     doc_type = outcome.classification.doc_type if outcome.classification else "?"
-    emit(f"  document type : {doc_type}   (cip_docMapping: {detection.total_targets} clauses)")
+    emit(f"  document type : {doc_type}   (profile targets {detection.total_targets} clauses)")
     percent = (
         (len(detection.detected) / detection.total_targets * 100) if detection.total_targets else 0
     )
@@ -303,11 +291,10 @@ def _report_detection(
 
 
 def _report_clause_text(detection: ClauseDetection, emit: Emit) -> None:
-    """Print the full text, pages and box of every clause that will be stored.
+    """Print the full text, pages and box of every clause the detector located.
 
-    This is what actually goes into ``cip_DocContentMaster.textcontent`` and gets
-    embedded, so seeing it is the only way to catch a clause that was located
-    correctly but whose extent is wrong.
+    This is the text that gets embedded, so seeing it is the only way to catch a
+    clause that was located correctly but whose extent is wrong.
     """
     emit("")
     emit("===== CLAUSE TEXT (what gets stored and embedded) =====")
@@ -350,5 +337,5 @@ def summarise(outcome: PipelineOutcome) -> dict[str, object]:
         "pages_never_read": list(detection.pages_never_read) if detection else [],
         "early_stopped": detection.early_stopped if detection else False,
         "chunk_calls": detection.llm_chunk_calls if detection else 0,
-        "docid": outcome.persisted.docid if outcome.persisted else None,
+        "embedded": len(outcome.embeddings.vectors) if outcome.embeddings else 0,
     }

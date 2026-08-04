@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -31,32 +32,76 @@ from app.storage.base import (
 
 logger = get_logger(__name__)
 
+#: Windows' legacy 260-character path ceiling, which this module has to work under
+#: because opting out system-wide is a registry change no test run should require.
+_WINDOWS_MAX_PATH = 260
+
+
+def _long_path_safe(path: Path) -> Path:
+    """On Windows, rewrite an absolute path so ``MAX_PATH`` does not apply.
+
+    A storage key is deep by design - ``projects/<uuid>/contracts/<uuid>/artifacts/
+    <kind>/g1.json`` is 130-odd characters before the root - so a root that is
+    itself nested puts ordinary writes over the 260-character limit. The failure is
+    an unhelpful one: ``mkdir`` succeeds because the directory chain fits, then the
+    file write fails with ``[Errno 2] No such file or directory`` (WinError 206),
+    which reads as a missing directory rather than a path-length problem.
+
+    The ``\\\\?\\`` prefix asks Win32 for the extended-length API, where the limit
+    is ~32767 instead. It is a no-op on POSIX, and skipped for UNC paths, which
+    need the different ``\\\\?\\UNC\\server\\share`` spelling and are not worth
+    special-casing for a development-only adapter.
+
+    Requires a fully-qualified, normalised path - the prefix disables the OS's own
+    normalisation, so ``..`` would stop being collapsed. Every caller here passes a
+    ``resolve()``-d path, which guarantees both.
+    """
+    if os.name != "nt":
+        return path
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return path
+    # Drive-letter paths only: `C:` is two characters, a UNC drive is not.
+    if len(path.drive) != 2 or not path.drive.endswith(":"):
+        return path
+    return Path(f"\\\\?\\{text}")
+
 
 class LocalStorage(IObjectStorage):
     provider = "local"
 
     def __init__(self, root: str | None = None) -> None:
         settings = get_settings()
-        self.root = Path(root or settings.storage.local_root)
+        # Resolved once, so every derived path is absolute and normalised - which
+        # is what `_long_path_safe` requires and what makes the containment check
+        # in `_path` meaningful.
+        self.root = _long_path_safe(Path(root or settings.storage.local_root).resolve())
         self.default_container = settings.storage.container
         self.root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ paths
+    def _bucket_root(self, container: str | None) -> Path:
+        return (self.root / (container or self.default_container)).resolve()
+
     def _path(self, key: str, container: str | None) -> Path:
         """Resolve a key to a path, refusing anything that escapes the root.
 
         ``StorageKey`` already sanitises filenames, but this is the backstop: a key
         assembled elsewhere must not be able to traverse out of the storage root.
+
+        The containment check runs on the resolved path *before* the long-path
+        rewrite matters, and both sides are resolved the same way, so escaping via
+        ``..`` is still caught - see `_long_path_safe` on why that ordering is not
+        incidental.
         """
-        bucket = container or self.default_container
-        target = (self.root / bucket / key).resolve()
-        root = (self.root / bucket).resolve()
+        root = self._bucket_root(container)
+        target = (root / key).resolve()
         if not str(target).startswith(str(root)):
             raise StorageError(
                 "Rejected a storage key that resolves outside the storage root.",
                 details={"key": key},
             )
-        return target
+        return _long_path_safe(target)
 
     # ------------------------------------------------------------------ write
     async def put_bytes(
@@ -211,8 +256,9 @@ class LocalStorage(IObjectStorage):
     async def list_keys(
         self, prefix: str, *, container: str | None = None, limit: int = 1000
     ) -> list[str]:
-        bucket = container or self.default_container
-        root = (self.root / bucket).resolve()
+        # Same rewrite as `_path`, or `relative_to` below would compare a prefixed
+        # path against an unprefixed root and raise.
+        root = _long_path_safe(self._bucket_root(container))
         base = self._path(prefix, container)
 
         def _list() -> list[str]:

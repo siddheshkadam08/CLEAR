@@ -398,15 +398,31 @@ async def stream_content(
     db: DbSession,
     inline: Annotated[bool, Query(description="Content-Disposition: inline")] = True,
     redirect: Annotated[bool, Query(description="Redirect to the signed URL instead")] = False,
+    original: Annotated[
+        bool,
+        Query(
+            description=(
+                "Serve the file as uploaded rather than the PDF the pipeline read. "
+                "Only differs for a converted Word document."
+            )
+        ),
+    ] = False,
 ) -> Response:
     """Serve the document bytes through the API.
 
     Kept for clients that cannot use a signed URL (local storage in development, or
     a viewer that will not follow a cross-origin redirect). ``redirect=true`` opts
     into the cheaper path.
+
+    ``original=true`` is what makes "download the Word document you uploaded" work
+    on a local-storage deployment. Every proxied URL routes here, so without it
+    this endpoint's single hardcoded path was the only file anyone could ever get -
+    and a download labelled `.docx` returned the converted PDF's bytes.
     """
     contract_id, project_id, ctx = ref.contract_id, ref.project_id, ref.project
-    ctx.require(Permission.CONTRACT_READ)
+    # Retrieving the source file the user supplied is a download, not a read: it
+    # leaves the platform in its original form and is audited as such elsewhere.
+    ctx.require(Permission.CONTRACT_DOWNLOAD if original else Permission.CONTRACT_READ)
     service = ContractService(db)
 
     if redirect:
@@ -414,14 +430,18 @@ async def stream_content(
         if not access.is_proxied:
             return RedirectResponse(url=access.url, status_code=status.HTTP_302_FOUND)
 
-    contract, stream = await service.stream_file(contract_id, project_id)
+    contract, stream, media_type = await service.stream_file(
+        contract_id, project_id, original=original
+    )
     disposition = "inline" if inline else "attachment"
     return StreamingResponse(
         stream,
-        media_type=contract.mime_type or "application/octet-stream",
+        media_type=media_type,
         headers={
             "Content-Disposition": f'{disposition}; filename="{contract.original_file_name}"',
-            "Content-Length": str(contract.file_size),
+            # No Content-Length: `contract.file_size` describes the *processed*
+            # file, and declaring it for a differently-sized original truncates the
+            # response at that many bytes. Chunked transfer is correct here.
             # The bytes never change for a given contract version, so allow caching.
             "Cache-Control": "private, max-age=3600",
             "Accept-Ranges": "none",

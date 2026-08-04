@@ -377,9 +377,16 @@ class KeyDate(Base, UUIDPrimaryKeyMixin, TimestampMixin, EvidenceMixin, Extracti
 class KnowledgeRelationship(Base, UUIDPrimaryKeyMixin, TimestampMixin, ExtractionProvenanceMixin):
     """A cross-reference, definition link or dependency found during extraction.
 
-    The relational record of what the extraction saw. The Indexing stage projects
-    these into :mod:`app.models.graph` for traversal; keeping both means graph
-    rebuilds never need the LLM again.
+    **This table is the knowledge graph.** Rows carry an ``attributes.origin`` of
+    either ``extracted`` - what the model read out of the document - or
+    ``derived``, which the Indexing stage resolves from the extracted rows.
+    ``RetrievalEngine._expand_graph`` traverses both.
+
+    The docstring here used to say the Indexing stage projected these into
+    ``app.models.graph`` for traversal. It never did: those tables were created,
+    indexed and never written to, and have now been dropped. What misled was that
+    ``app.ai.graph.builder`` defines in-memory dataclasses with the same names as
+    the models had.
     """
 
     __tablename__ = "knowledge_relationships"

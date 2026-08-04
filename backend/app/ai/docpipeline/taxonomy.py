@@ -76,25 +76,51 @@ DOC_TYPE_AGREEMENTS: dict[str, tuple[str, str | None]] = {
 }
 
 
-def agreement_type_for(doc_type: str) -> tuple[str, str | None]:
-    """A ``cip_docMapping`` document type as ``(agreement_type, subtype)``.
+#: Every ``AgreementType`` value, for the identity check below. Built once.
+_AGREEMENT_TYPE_VALUES: frozenset[str] = frozenset(member.value for member in AgreementType)
 
-    An unrecognised type - someone adds a row to ``cip_docMapping`` and nobody
-    updates this map - becomes ``other`` with the raw label preserved in the
-    subtype, and says so in the log. The alternative is writing the raw label
-    into ``agreement_type``, where it would silently create a filter bucket that
-    matches nothing the UI offers.
+
+def legacy_agreement_type(doc_type: str) -> tuple[str, str | None] | None:
+    """A retired ``cip_docMapping`` label as ``(agreement_type, subtype)``.
+
+    ``None`` when the label is not one of the six. Kept separate from
+    :func:`agreement_type_for` so a caller can tell "this is an old label I
+    translated" from "I gave up and filed it as other" - the first is a match, the
+    second is not.
     """
-    key = normalise(doc_type)
-    mapped = DOC_TYPE_AGREEMENTS.get(key)
+    return DOC_TYPE_AGREEMENTS.get(normalise(doc_type))
+
+
+def agreement_type_for(doc_type: str) -> tuple[str, str | None]:
+    """A document type as ``(agreement_type, subtype)``.
+
+    Document types are now ``AgreementType`` values taken from the configured
+    document profiles, so the common case is identity - the label the classifier
+    answers with *is* the value written to ``contracts.agreement_type``.
+
+    The six retired ``cip_docMapping`` labels are still translated, because
+    documents classified under them are still in the database and a question asked
+    in those words should still find them.
+
+    Anything else becomes ``other`` with the raw label preserved in the subtype,
+    and says so in the log. The alternative is writing an unknown label into
+    ``agreement_type``, where it would silently create a filter bucket matching
+    nothing the UI offers.
+    """
+    candidate = (doc_type or "").strip()
+    if candidate in _AGREEMENT_TYPE_VALUES:
+        return candidate, None
+
+    mapped = legacy_agreement_type(candidate)
     if mapped is not None:
         return mapped
 
+    key = normalise(candidate)
     logger.info(
         "doc_type_unmapped",
         doc_type=doc_type,
         normalised=key,
-        reason="no AgreementType for this cip_docMapping type; filed as 'other'",
+        reason="not an AgreementType and not a retired label; filed as 'other'",
     )
     return AgreementType.OTHER.value, key.replace(" ", "_")[:64] or None
 

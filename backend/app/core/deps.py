@@ -120,8 +120,15 @@ async def get_current_user_optional(
 async def require_password_current(user: CurrentUserDep) -> User:
     """Block normal API use while a forced password change is outstanding.
 
-    Applied to everything except the change-password and logout endpoints, so a
-    seeded admin cannot keep operating on the default credential.
+    Attached once, to every router except ``auth``, in ``app.api.v1.__init__`` -
+    so a provisioned account cannot keep operating on its temporary credential.
+
+    This docstring used to claim it was "applied to everything except the
+    change-password and logout endpoints". It was not applied to anything at all:
+    the dependency was defined and exported and no route referenced it, which made
+    ``must_change_password`` and ``SEED_ADMIN_FORCE_PASSWORD_CHANGE`` inert. The
+    gate is registered at the router level now precisely because per-route is what
+    allowed it to be forgotten.
     """
     if user.must_change_password:
         raise ForbiddenError(
@@ -141,6 +148,54 @@ async def require_system_admin(user: CurrentUserDep) -> User:
 
 
 SystemAdminDep = Annotated[User, Depends(require_system_admin)]
+
+
+def require_permission_global(permission: Permission) -> Callable[..., Awaitable[User]]:
+    """Require a permission *somewhere*, for endpoints that span projects.
+
+    ``require_permission`` cannot serve these: it resolves a ``ProjectContext``,
+    which needs a project, and an endpoint whose project filter is optional has
+    none to resolve. Guarding such an endpoint with ``require_system_admin``
+    instead would be secure but wrong - it would quietly withdraw a permission the
+    seeded roles do grant. ``AUDIT_READ``, for instance, belongs to Project
+    Manager, so an admin-only audit view would mean the role holds a permission
+    that no endpoint honours.
+
+    Membership alone is not enough, and the row-level scoping is what makes this
+    safe: the handler still narrows results to ``AccessScope.project_ids``, so
+    holding the permission on one project does not reveal another's rows. This
+    dependency answers only "may this caller use this endpoint at all".
+    """
+
+    async def dependency(user: CurrentUserDep, db: DbSession) -> User:
+        if user.is_system_admin and permission.value not in ADMIN_EXCLUDED_PERMISSIONS:
+            return user
+
+        from sqlalchemy import exists, select
+
+        from app.models.identity import Role
+        from app.models.project import ProjectMember
+
+        holds = await db.scalar(
+            select(
+                exists().where(
+                    ProjectMember.user_id == user.id,
+                    ProjectMember.role_id == Role.id,
+                    Role.permissions.contains([permission.value]),
+                )
+            )
+        )
+        if not holds:
+            metrics.authorization_denied_total.labels(reason="permission").inc()
+            logger.warning(
+                "global_permission_denied",
+                user_id=str(user.id),
+                permission=permission.value,
+            )
+            raise PermissionDeniedError(permission.value)
+        return user
+
+    return dependency
 
 
 #: Capabilities a System Administrator does **not** inherit.
@@ -565,6 +620,7 @@ __all__ = [
     "require_internal_caller",
     "require_password_current",
     "require_permission",
+    "require_permission_global",
     "require_project_role",
     "require_system_admin",
     "resolve_scope_for_project",

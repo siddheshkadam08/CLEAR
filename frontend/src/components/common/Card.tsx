@@ -92,27 +92,49 @@ export const PageHeader = ({
   </div>
 );
 
-/** KPI tile. Accent rotates through the tint sequence so a grid reads as a series. */
+/** KPI tile. Accent rotates through the tint sequence so a grid reads as a series.
+ *
+ *  `hint` and `alarm` exist because the pages that used to hand-roll their own
+ *  tile needed them: Doc Pipeline puts a qualifier under the number ("per
+ *  document on average"), and Jobs turns a count red once it means something is
+ *  wrong. Folding both in here is what let those pages drop their private
+ *  versions, which had drifted to a different radius, padding and border - and
+ *  carried no dark-mode colours at all.
+ */
 export const MetricCard = ({
   label,
   value,
   icon: Icon,
   accent,
+  hint,
+  alarm = false,
   onClick,
 }: {
   label: string;
   value: ReactNode;
   icon: LucideIcon;
   accent: string;
+  hint?: string;
+  alarm?: boolean;
   onClick?: () => void;
 }) => {
   const body = (
     <div className="flex items-start justify-between gap-3">
       <div className="min-w-0">
         <p className="text-[12.5px] text-[#5B6478] dark:text-slate-400">{label}</p>
-        <p className="mt-2 text-[26px] font-semibold leading-tight text-[#0F172A] dark:text-slate-100">{value}</p>
+        <p
+          className={[
+            'mt-2 text-[26px] font-semibold leading-tight tabular-nums',
+            alarm ? 'text-rose-600 dark:text-rose-400' : 'text-[#0F172A] dark:text-slate-100',
+          ].join(' ')}
+        >
+          {value}
+        </p>
+        {hint ? (
+          <p className="mt-1 truncate text-[11.5px] text-[#94A0B4] dark:text-slate-500">{hint}</p>
+        ) : null}
       </div>
-      <div className={['shrink-0 rounded-lg p-2', accent].join(' ')}>
+      <div className={['shrink-0 rounded-lg p-2', alarm ? 'bg-rose-50 text-rose-600 dark:bg-rose-950/50 dark:text-rose-400' : accent].join(' ')}>
         <Icon className="h-4 w-4" />
       </div>
     </div>

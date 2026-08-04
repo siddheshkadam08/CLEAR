@@ -28,6 +28,7 @@ from app.core.deps import (
     DbSession,
     PaginationDep,
     RequestInfoDep,
+    require_permission_global,
     require_system_admin,
     resolve_scope_for_project,
 )
@@ -35,19 +36,23 @@ from app.core.enums import (
     AlertStatus,
     AuditAction,
     JobState,
+    Permission,
     RiskBand,
 )
 from app.core.errors import ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models.alert import Alert, AlertRule
+from app.models.audit import AuditLog
 from app.models.clause_master import ClauseMasterCategory, ClauseMasterRule
 from app.models.contract import Contract, ContractMetadata
+from app.models.knowledge import Clause
 from app.schemas.admin import (
     AlertResponse,
     AlertRuleCreate,
     AlertRuleResponse,
     AlertRuleUpdate,
     AlertUpdateRequest,
+    AuditEntryResponse,
     ClauseCategoryCreate,
     ClauseCategoryResponse,
     ClauseCategoryUpdate,
@@ -60,12 +65,16 @@ from app.schemas.admin import (
     TimeSeriesPoint,
 )
 from app.schemas.common import MessageResponse, Paginated
+from app.services.audit import AuditRepository
 
 logger = get_logger(__name__)
 
 clause_master_router = APIRouter(prefix="/clause-master", tags=["Clause Master"])
 dashboard_router = APIRouter(prefix="/dashboard", tags=["Dashboards"])
 alert_router = APIRouter(prefix="/alerts", tags=["Alerts"])
+#: Separate from the other admin routers because it is not administrator-only:
+#: AUDIT_READ is a Project Manager permission, scoped by the caller's projects.
+audit_router = APIRouter(prefix="/audit", tags=["Audit"])
 
 #: Window for the "expiring soon" tile. Ninety days is long enough that a renewal
 #: notice period has not already lapsed by the time anyone looks.
@@ -201,6 +210,12 @@ async def update_clause_category(
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(category, field, value)
     await db.flush()
+    # `updated_at` carries `onupdate=func.now()`, so the flush leaves it expired -
+    # SQLAlchemy cannot know what the server computed. `_category` is a plain
+    # function, so reading it there triggers a lazy refresh with no greenlet to
+    # run the IO in, and the whole request answers 500. Refreshing here is the
+    # one await that makes the value real.
+    await db.refresh(category, ["updated_at"])
 
     await _audit(
         db,
@@ -379,11 +394,14 @@ async def get_dashboard(
             Contract.deleted_at.is_(None),
         ),
     )
-    total_value = await _scalar(
+    # Replaced the "total value" tile. A summed contract value is the weakest
+    # number the dashboard can show: it is only populated where extraction found
+    # an amount, mixes currencies into one figure, and answers a question nobody
+    # opens this screen to ask. Extracted clauses is what the platform actually
+    # produces, and it moves as documents finish processing.
+    clauses_extracted = await _scalar(
         db,
-        select(func.coalesce(func.sum(ContractMetadata.contract_value), 0)).where(
-            ContractMetadata.project_id.in_(project_ids)
-        ),
+        select(func.count()).select_from(Clause).where(Clause.project_id.in_(project_ids)),
     )
 
     kpis = [
@@ -420,7 +438,7 @@ async def get_dashboard(
             value=float(needs_review),
             drilldown={"needs_review": True},
         ),
-        KpiTile(key="total_value", label="Total value", value=float(total_value), unit="USD"),
+        KpiTile(key="clauses_extracted", label="Clauses extracted", value=float(clauses_extracted)),
     ]
 
     return DashboardResponse(
@@ -665,6 +683,9 @@ async def update_alert_rule(
         setattr(rule, field, value)
     rule.updated_by = user.id
     await db.flush()
+    # See `update_clause_category`: the flush expires `updated_at`, and the sync
+    # response builder cannot load it back.
+    await db.refresh(rule, ["updated_at"])
 
     from app.services.audit import AuditService
 
@@ -936,6 +957,93 @@ def _alert(row: Alert) -> AlertResponse:
     )
 
 
+# =============================================================================
+# Audit trail
+# =============================================================================
+@audit_router.get(
+    "",
+    response_model=Paginated[AuditEntryResponse],
+    summary="Read the audit trail",
+    dependencies=[Depends(require_permission_global(Permission.AUDIT_READ))],
+)
+async def list_audit(
+    db: DbSession,
+    scope: AccessScopeDep,
+    pagination: PaginationDep,
+    project_id: Annotated[uuid.UUID | None, Query()] = None,
+    user_id: Annotated[uuid.UUID | None, Query()] = None,
+    action: Annotated[AuditAction | None, Query()] = None,
+    entity_type: Annotated[str | None, Query(max_length=64)] = None,
+    entity_id: Annotated[uuid.UUID | None, Query()] = None,
+    succeeded: Annotated[bool | None, Query()] = None,
+) -> Paginated[AuditEntryResponse]:
+    """Who did what, when.
+
+    The table has had eight-plus write sites since the beginning and no way to read
+    it: ``AuditRepository.filtered`` was written for this endpoint and then never
+    called, so the compliance trail the platform is careful to record could only be
+    reached with psql. This is that endpoint.
+
+    Scoped to the caller's projects rather than to everything. Platform-level rows
+    carry no project - a login, a user being created - and ``filtered`` includes
+    those deliberately: they are exactly what an investigation starts from.
+    """
+    project_ids = await resolve_scope_for_project(project_id, scope)
+    if not project_ids:
+        return Paginated.build(items=[], page=pagination.page, size=pagination.size, total=0)
+
+    stmt = AuditRepository(db).filtered(
+        project_ids=project_ids,
+        user_id=user_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        succeeded=succeeded,
+    )
+
+    total = await _scalar(db, select(func.count()).select_from(stmt.subquery()))
+    rows = (
+        (
+            await db.execute(
+                # Newest first: an audit trail is read from the incident backwards.
+                stmt.order_by(AuditLog.created_at.desc())
+                .offset((pagination.page - 1) * pagination.size)
+                .limit(pagination.size)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return Paginated.build(
+        items=[_audit_entry(row) for row in rows],
+        page=pagination.page,
+        size=pagination.size,
+        total=total,
+    )
+
+
+def _audit_entry(row: AuditLog) -> AuditEntryResponse:
+    return AuditEntryResponse(
+        id=row.id,
+        created_at=row.created_at,
+        action=row.action.value if hasattr(row.action, "value") else str(row.action),
+        entity_type=row.entity_type,
+        entity_id=row.entity_id,
+        entity_label=row.entity_label,
+        project_id=row.project_id,
+        user_id=row.user_id,
+        user_email=row.user_email,
+        succeeded=bool(row.succeeded),
+        error_code=row.error_code,
+        ip=row.ip,
+        route=row.route,
+        request_id=row.request_id,
+        trace_id=row.trace_id,
+        before=row.before,
+        after=row.after,
+    )
+
+
 def _alert_rule(row: AlertRule) -> AlertRuleResponse:
     return AlertRuleResponse(
         id=row.id,
@@ -952,4 +1060,4 @@ def _alert_rule(row: AlertRule) -> AlertRuleResponse:
     )
 
 
-__all__ = ["alert_router", "clause_master_router", "dashboard_router"]
+__all__ = ["alert_router", "audit_router", "clause_master_router", "dashboard_router"]

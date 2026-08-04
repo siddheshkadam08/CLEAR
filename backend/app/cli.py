@@ -16,6 +16,8 @@ Every command follows the same two rules:
 from __future__ import annotations
 
 import asyncio
+import os
+import socket
 import sys
 import uuid
 from pathlib import Path
@@ -173,7 +175,9 @@ def scheduler(
       the contract sits in "processing" with nothing working on it. The heartbeat is
       what distinguishes that from a genuinely slow parse.
     * **Alert evaluation.** Renewal and expiry deadlines are time-based, so something
-      has to notice them passing.
+      has to notice them passing. Runs on its own cadence
+      (``ALERT_EVALUATOR_INTERVAL_MINUTES``, hourly by default) rather than every
+      sweep - see ``evaluate-alerts`` to run one pass by hand.
     * **Stalled-export recovery.** An export runs as a background task, which dies
       with its process; the row is what survives, and a row stuck in "running" is a
       progress bar the user watches forever.
@@ -193,7 +197,18 @@ def scheduler(
 
 
 async def _scheduler_loop(stalled_timeout_minutes: int, interval_seconds: int) -> None:
+    from app.core.config import get_settings
     from app.db.session import session_scope, shutdown_engine
+
+    # The alert sweep runs on its own, much slower cadence. Reclamation has to be
+    # prompt because a stalled job blocks a user; alert conditions move by the
+    # calendar, and re-deriving every contract's deadlines once a minute would be
+    # a full-table scan per minute to reach the same answer.
+    #
+    # Due immediately on the first tick, so a freshly started scheduler populates
+    # the Alerts screen rather than leaving it empty for an hour.
+    alert_interval = get_settings().alerts.evaluator_interval_minutes * 60
+    next_alert_sweep = 0.0
 
     try:
         while True:
@@ -204,6 +219,26 @@ async def _scheduler_loop(stalled_timeout_minutes: int, interval_seconds: int) -
                     logger.info("scheduler_reclaimed_jobs", count=reclaimed)
             except Exception as exc:
                 logger.exception("scheduler_sweep_failed", error=str(exc))
+
+            # Stage-queue leases. The job-level reclamation above notices a
+            # contract whose worker went quiet; this notices the queue *row* it
+            # was holding. Without it a worker killed mid-stage leaves its row
+            # `claimed` forever and nothing else will ever pick that stage up.
+            #
+            # Only meaningful for the Postgres driver - BullMQ has its own
+            # visibility handling - so it is skipped rather than made conditional
+            # inside the driver.
+            try:
+                if get_settings().queue.driver == "postgres":
+                    from app.orchestrator.queue import PostgresQueueDriver
+
+                    leases = await PostgresQueueDriver().reclaim_stale(
+                        lease_seconds=stalled_timeout_minutes * 60
+                    )
+                    if leases:
+                        logger.info("scheduler_reclaimed_leases", count=leases)
+            except Exception as exc:
+                logger.exception("scheduler_lease_sweep_failed", error=str(exc))
 
             # Export sweeps run in their own session and their own try block: a
             # failure here must not stop the pipeline reclamation above from
@@ -219,6 +254,21 @@ async def _scheduler_loop(stalled_timeout_minutes: int, interval_seconds: int) -
                     logger.info("scheduler_export_sweep", recovered=recovered, purged=purged)
             except Exception as exc:
                 logger.exception("scheduler_export_sweep_failed", error=str(exc))
+
+            # Alert evaluation. Expiries, renewal notice windows, obligation
+            # deadlines, risk scores and review backlogs - none of which anything
+            # pushes, so this is the only thing that notices them.
+            if asyncio.get_running_loop().time() >= next_alert_sweep:
+                next_alert_sweep = asyncio.get_running_loop().time() + alert_interval
+                try:
+                    async with session_scope() as db:
+                        from app.services.alert_evaluator import AlertEvaluator
+
+                        outcome = await AlertEvaluator(db).run()
+                    if outcome.changed():
+                        logger.info("scheduler_alert_sweep", **outcome.as_log_fields())
+                except Exception as exc:
+                    logger.exception("scheduler_alert_sweep_failed", error=str(exc))
 
             await asyncio.sleep(interval_seconds)
     finally:
@@ -255,6 +305,195 @@ async def _reclaim_stalled(db: Any, timeout_minutes: int) -> int:
             ),
         )
     return len(stalled)
+
+
+@app.command(name="evaluate-alerts")
+def evaluate_alerts(
+    project_id: str = typer.Option(
+        "", help="Limit the sweep to one project. Omit to evaluate every project."
+    ),
+    as_of: str = typer.Option(
+        "", help="Evaluate as though today were this date (YYYY-MM-DD). For demos and tests."
+    ),
+) -> None:
+    """Run one alert-evaluation pass now.
+
+    The same sweep the scheduler runs hourly, on demand. Useful after importing
+    contracts (the scheduler would otherwise take up to an hour to notice them),
+    after retuning a rule, and for checking what a threshold change would do
+    before leaving it in place.
+
+    Writes are committed only if the whole pass succeeds.
+    """
+    configure_logging()
+
+    scope: uuid.UUID | None = None
+    if project_id:
+        try:
+            scope = uuid.UUID(project_id)
+        except ValueError:
+            _fail(f"'{project_id}' is not a valid project id.")
+
+    today = None
+    if as_of:
+        from datetime import date as _date
+
+        try:
+            today = _date.fromisoformat(as_of)
+        except ValueError:
+            _fail(f"'{as_of}' is not a valid date. Use YYYY-MM-DD.")
+
+    # Reports from inside the coroutine rather than returning the outcome: `_run`
+    # discards its result, and it is the thing that turns a failure into a
+    # non-zero exit, which is what a scripted run depends on.
+    async def _run_once() -> None:
+        from app.db.session import session_scope, shutdown_engine
+        from app.services.alert_evaluator import AlertEvaluator
+
+        try:
+            async with session_scope() as db:
+                outcome = await AlertEvaluator(db, today=today).run(project_id=scope)
+        finally:
+            await shutdown_engine()
+
+        _echo(
+            f"Examined {outcome.contracts_examined} contracts and "
+            f"{outcome.obligations_examined} obligations against {outcome.rules_applied} rules."
+        )
+        _echo(
+            f"Raised {outcome.raised}, refreshed {outcome.refreshed}, "
+            f"retired {outcome.retired}, escalated {outcome.escalated}."
+        )
+
+    _run(_run_once())
+
+
+# =============================================================================
+# Worker
+# =============================================================================
+@app.command()
+def worker(
+    poll_seconds: float = typer.Option(
+        1.0, help="Idle wait between polls when there was nothing to claim."
+    ),
+    lease_seconds: int = typer.Option(
+        1800, help="How long a claim is honoured before the scheduler reclaims it."
+    ),
+    name: str = typer.Option("", help="Worker id recorded on claimed rows. Defaults to host:pid."),
+) -> None:
+    """Run stages from the Postgres queue.
+
+    The counterpart to ``QUEUE_DRIVER=postgres`` - it replaces the Node BullMQ
+    dispatcher *and* its workers, so neither Redis nor the queue service is
+    needed. Run as many of these as you like; ``FOR UPDATE SKIP LOCKED`` is what
+    lets them share one table without coordinating.
+
+    Stop with ctrl-c. In-flight stages are allowed to finish; their rows are only
+    marked done once they actually are, so a stage interrupted harder than that
+    is recovered by the lease timeout rather than lost.
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if settings.queue.driver != "postgres":
+        _fail(
+            f"QUEUE_DRIVER is '{settings.queue.driver}'. This worker only serves the "
+            "Postgres queue; set QUEUE_DRIVER=postgres."
+        )
+
+    configure_logging()
+    worker_id = name or f"{socket.gethostname()}:{os.getpid()}"
+    _echo(f"Worker {worker_id} starting (poll {poll_seconds}s, lease {lease_seconds}s).")
+    try:
+        _run(_worker_loop(worker_id, poll_seconds, lease_seconds))
+    except KeyboardInterrupt:  # pragma: no cover - operator ctrl-c
+        _echo("Worker stopped.")
+
+
+async def _worker_loop(worker_id: str, poll_seconds: float, lease_seconds: int) -> None:
+    from app.core.config import get_settings
+    from app.core.enums import STAGE_ORDER, PipelineStage
+    from app.db.session import shutdown_engine
+    from app.orchestrator.queue import PostgresQueueDriver
+
+    settings = get_settings()
+    driver = PostgresQueueDriver()
+
+    # Claimed per stage, so a stage cannot exceed its own concurrency even while
+    # the others are idle.
+    running: dict[PipelineStage, set[asyncio.Task[None]]] = {stage: set() for stage in STAGE_ORDER}
+
+    try:
+        while True:
+            claimed_any = False
+
+            # One claim per stage rather than one claim overall. A single query
+            # with a combined limit could return a batch that is entirely
+            # `docpipeline`, blowing past that stage's cap of 4 while parser sits
+            # idle. These are indexed lookups against a partial index, so the
+            # extra round trips cost far less than the mistake would.
+            for stage in STAGE_ORDER:
+                free = settings.queue.concurrency_for(stage.value) - len(running[stage])
+                if free <= 0:
+                    continue
+
+                for item in await driver.claim(worker_id=worker_id, limit=free, stages=[stage]):
+                    task = asyncio.create_task(_run_claimed(driver, item))
+                    running[stage].add(task)
+                    task.add_done_callback(running[stage].discard)
+                    claimed_any = True
+
+            if not claimed_any:
+                await asyncio.sleep(poll_seconds)
+    finally:
+        in_flight = [task for tasks in running.values() for task in tasks]
+        if in_flight:
+            _echo(f"Finishing {len(in_flight)} in-flight stage(s)...")
+            await asyncio.gather(*in_flight, return_exceptions=True)
+        await shutdown_engine()
+
+
+async def _run_claimed(driver: Any, item: Any) -> None:
+    """Run one claimed row, then settle its lease.
+
+    The division of labour with ``run_stage`` matters and is easy to get wrong.
+    ``run_stage`` never raises for a *stage* failure: it records the error and,
+    when the stage is retryable, enqueues a **fresh** message with ``attempt+1``
+    and a backoff. That new message is a new queue row.
+
+    So a returned outcome - success or failure - means this row is finished, and
+    it is marked ``done``. Failing it here as well would schedule a second retry
+    for the same failure and double the pipeline's attempt budget.
+
+    ``fail`` is therefore reserved for ``run_stage`` *raising*, which means
+    something outside the stage broke (the database went away mid-run, the
+    process ran out of memory). That is worth retrying at the queue level,
+    because nothing else recorded it.
+    """
+    from app.orchestrator.runner import run_stage
+
+    try:
+        outcome = await run_stage(item.message)
+    except Exception as exc:
+        logger.exception(
+            "worker_stage_crashed",
+            stage=item.message.stage.value,
+            job_id=str(item.message.job_id),
+            error=str(exc),
+        )
+        await driver.fail(
+            item.row_id,
+            error={"message": str(exc), "type": type(exc).__name__, "attempt": item.attempt},
+        )
+        return
+
+    await driver.complete(item.row_id)
+    logger.info(
+        "worker_stage_settled",
+        stage=item.message.stage.value,
+        job_id=str(item.message.job_id),
+        status=outcome.status.value,
+    )
 
 
 # =============================================================================
@@ -816,17 +1055,21 @@ async def _process_doc(
         _fail(str(exc))
 
 
-@app.command("fix-cip-schema")
-def fix_cip_schema(
+@app.command("fix-embedding-dimension")
+def fix_embedding_dimension(
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the SQL without executing it."),
 ) -> None:
-    """Apply the corrective DDL for the externally-owned cip_* tables.
+    """Move `embeddings.embedding` to the configured model's width.
 
-    Idempotent: safe to re-run. See ``sql/cip_schema_fixes.sql`` for what each
-    statement fixes and why leaving it alone was not an option.
+    **Destructive**: existing vectors are deleted, not converted. Vectors from two
+    different models do not share a space, so re-running the pipeline is the only
+    way to repopulate them. See ``sql/embedding_dimension.sql``.
+
+    Replaces ``fix-cip-schema``, which also patched three externally-owned
+    ``cip_*`` tables the platform no longer reads or writes.
     """
     configure_logging()
-    script = _BACKEND_ROOT / "sql" / "cip_schema_fixes.sql"
+    script = _BACKEND_ROOT / "sql" / "embedding_dimension.sql"
     if not script.is_file():
         _fail(f"Missing {script}")
 
@@ -837,7 +1080,7 @@ def fix_cip_schema(
 
     statements = _split_sql(sql)
     _run(_apply_sql(statements))
-    _echo(f"cip_* schema fixes applied ({len(statements)} statements).")
+    _echo(f"Embedding dimension applied ({len(statements)} statements).")
 
 
 def _split_sql(sql: str) -> list[str]:

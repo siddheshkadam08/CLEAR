@@ -37,7 +37,7 @@ import { docpipeline as api } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
 import { Badge } from '@/components/common/Badge';
 import { ErrorBanner } from '@/components/common/Banner';
-import { Card, KpiSkeleton, PageHeader, SectionHeader } from '@/components/common/Card';
+import { ACCENTS, Card, KpiSkeleton, MetricCard, PageHeader, SectionHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 
 const percent = (value: number | null | undefined) =>
@@ -51,31 +51,6 @@ const coverageVariant = (value: number | null | undefined) => {
   return 'danger' as const;
 };
 
-const Kpi = ({
-  label,
-  value,
-  hint,
-  icon: Icon,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-  icon: typeof FileStack;
-}) => (
-  <Card dense>
-    <div className="flex items-start justify-between gap-3">
-      <div>
-        <p className="text-sm text-slate-500">{label}</p>
-        <p className="mt-1 text-2xl font-semibold text-slate-900">{value}</p>
-        <p className="mt-1 text-xs text-slate-400">{hint}</p>
-      </div>
-      <div className="rounded-xl bg-blue-50 p-2 text-blue-600">
-        <Icon className="h-5 w-5" />
-      </div>
-    </div>
-  </Card>
-);
-
 export const DocPipelinePage = () => {
   const { data, isLoading, error } = useQuery({
     queryKey: ['docpipeline'],
@@ -86,7 +61,7 @@ export const DocPipelinePage = () => {
 
   if (isLoading || !data) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-5">
         <PageHeader
           title="Document pipeline"
           subtitle="Clauses located and stored by the document pipeline."
@@ -104,7 +79,7 @@ export const DocPipelinePage = () => {
 
   if (totals.documents === 0) {
     return (
-      <div className="space-y-6">
+      <div className="space-y-5">
         <PageHeader
           title="Document pipeline"
           subtitle="Clauses located and stored by the document pipeline."
@@ -121,36 +96,40 @@ export const DocPipelinePage = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <PageHeader
         title="Document pipeline"
         subtitle="Read from cip_DocMaster and cip_DocContentMaster only - separate from the contract pipeline's own counts."
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Kpi
+        <MetricCard
           label="Documents"
           value={String(totals.documents)}
           hint="processed and recorded"
           icon={FileStack}
+          accent={ACCENTS[0]}
         />
-        <Kpi
+        <MetricCard
           label="Clauses located"
           value={String(totals.clauses)}
           hint={`${totals.clauses_per_document} per document on average`}
           icon={ListChecks}
+          accent={ACCENTS[1]}
         />
-        <Kpi
+        <MetricCard
           label="Average coverage"
           value={percent(totals.average_coverage)}
           hint="of the clauses the taxonomy expects"
           icon={Sparkles}
+          accent={ACCENTS[2]}
         />
-        <Kpi
+        <MetricCard
           label="Embedded"
           value={`${totals.embedded} / ${totals.clauses}`}
           hint={`${totals.clause_page_regions} page regions to highlight`}
           icon={Layers}
+          accent={ACCENTS[5]}
         />
       </div>
 
@@ -163,18 +142,18 @@ export const DocPipelinePage = () => {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
-                <th className="pb-2 pr-4">Doc</th>
-                <th className="pb-2 pr-4">Type</th>
-                <th className="pb-2 pr-4">Clauses</th>
-                <th className="pb-2 pr-4">Coverage</th>
-                <th className="pb-2">Source</th>
+              <tr className="border-b border-slate-200 dark:border-slate-700 text-left text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                <th scope="col" className="pb-2 pr-4">Doc</th>
+                <th scope="col" className="pb-2 pr-4">Type</th>
+                <th scope="col" className="pb-2 pr-4">Clauses</th>
+                <th scope="col" className="pb-2 pr-4">Coverage</th>
+                <th scope="col" className="pb-2">Source</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {documents.map((doc) => (
                 <tr key={doc.docid}>
-                  <td className="py-3 pr-4 font-medium text-slate-900">#{doc.docid}</td>
+                  <td className="py-3 pr-4 font-medium text-slate-900 dark:text-slate-100">#{doc.docid}</td>
                   <td className="py-3 pr-4">
                     <Badge variant="neutral" text={doc.doc_type ?? 'unknown'} />
                   </td>
@@ -254,7 +233,7 @@ export const DocPipelinePage = () => {
                 <li key={`${item.doc_type}-${item.clause}`} className="py-3">
                   <div className="flex items-center gap-2">
                     <Badge variant="warning" text={item.doc_type} />
-                    <span className="font-medium text-slate-900">{item.clause}</span>
+                    <span className="font-medium text-slate-900 dark:text-slate-100">{item.clause}</span>
                   </div>
                   {item.description ? (
                     <p className="mt-1 text-xs text-slate-500">{item.description}</p>
@@ -281,9 +260,9 @@ export const DocPipelinePage = () => {
           {by_doc_type.map((row) => (
             <div
               key={row.doc_type ?? 'unknown'}
-              className="rounded-xl border border-slate-200 px-4 py-3"
+              className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-3"
             >
-              <p className="text-sm font-medium text-slate-900">{row.doc_type ?? 'unknown'}</p>
+              <p className="text-sm font-medium text-slate-900 dark:text-slate-100">{row.doc_type ?? 'unknown'}</p>
               <p className="text-xs text-slate-500">
                 {row.documents} document{row.documents === 1 ? '' : 's'} ·{' '}
                 {row.clauses_expected} clauses expected

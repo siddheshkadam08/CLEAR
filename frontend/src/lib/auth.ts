@@ -70,3 +70,25 @@ export const useAuth = create<AuthState>((set) => ({
 export function useCanAdminister(): boolean {
   return useAuth((state) => state.user?.is_system_admin ?? false);
 }
+
+/**
+ * Does the user hold this permission on *any* project?
+ *
+ * For screens that span projects, where there is no single project to check
+ * against. `memberships[].permissions` is resolved server-side per request, so
+ * this reads the real grant rather than inferring one from a role name.
+ *
+ * Presentation only - it decides whether to offer a link. The endpoint behind the
+ * screen enforces the same permission and scopes rows to the caller's projects,
+ * so a stale membership list can hide a screen but never open one.
+ */
+export function useHasPermissionAnywhere(permission: string): boolean {
+  return useAuth((state) => {
+    const user = state.user;
+    if (!user) return false;
+    if (user.is_system_admin) return true;
+    return user.memberships.some((membership) =>
+      membership.permissions.includes(permission),
+    );
+  });
+}

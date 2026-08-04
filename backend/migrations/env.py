@@ -44,14 +44,24 @@ config.set_main_option("sqlalchemy.url", settings.db.sync_url.replace("%", "%%")
 target_metadata = Base.metadata
 
 
-#: Tables that live in this database but are owned elsewhere.
+#: Prefix marking tables that live in this database but are owned elsewhere.
 #:
-#: The ``cip_*`` tables are created and populated by another system; this
-#: application only reads and writes rows. They are absent from ``Base.metadata``
-#: on purpose, which means autogenerate sees them as tables to drop -
-#: ``cip_docMapping`` alone holds the clause taxonomy, so accepting that
-#: suggestion once would delete data no migration here can restore.
-EXTERNAL_TABLES = frozenset({"cip_docMapping", "cip_DocMaster", "cip_DocContentMaster"})
+#: The ``cip_*`` tables are created and populated by another system. This
+#: application no longer reads or writes any of them - the clause taxonomy now
+#: comes from ``document_profiles`` and the Clause Master - but the guard stays,
+#: and is now a prefix rather than a list of three names.
+#:
+#: The reason is unchanged and does not depend on us using them: they are absent
+#: from ``Base.metadata``, so autogenerate sees them as tables to drop. On any
+#: database where the other system still keeps them, accepting that suggestion
+#: once would delete their data, and no migration here could restore it. A prefix
+#: also covers the fourth such table nobody has told us about yet.
+EXTERNAL_TABLE_PREFIX = "cip_"
+
+
+def _is_external(name: str | None) -> bool:
+    """Is this table another system's? Case-insensitive - `cip_DocMaster` is mixed."""
+    return bool(name) and str(name).lower().startswith(EXTERNAL_TABLE_PREFIX)
 
 
 def include_object(
@@ -65,21 +75,19 @@ def include_object(
 
     Postgres-managed artefacts (extension-owned tables, the ``pg_stat_statements``
     view) would otherwise show up as spurious drops on every autogenerate run, as
-    would the externally-owned tables in :data:`EXTERNAL_TABLES`.
+    would any table carrying :data:`EXTERNAL_TABLE_PREFIX`.
     """
     if type_ == "table" and name in {"pg_stat_statements", "pg_stat_statements_info"}:
         return False
-    if type_ == "table" and name in EXTERNAL_TABLES:
+    if type_ == "table" and _is_external(name):
         return False
     # Indexes belonging to an external table arrive with their parent attached;
     # filtering the table alone still leaves the indexes proposed for drop.
-    if type_ == "index" and getattr(getattr(obj, "table", None), "name", None) in EXTERNAL_TABLES:
+    if type_ == "index" and _is_external(getattr(getattr(obj, "table", None), "name", None)):
         return False
     # Indexes created by raw SQL in a migration (expression indexes on
     # to_tsvector) are not always reproducible by autogenerate; keep them.
-    if type_ == "index" and name and name.endswith("_fts"):
-        return False
-    return True
+    return not (type_ == "index" and name and name.endswith("_fts"))
 
 
 def run_migrations_offline() -> None:

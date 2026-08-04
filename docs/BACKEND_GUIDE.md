@@ -1465,6 +1465,93 @@ make verify-pgvector  # compare the live vector schema against the live model
 make reindex          # regenerate vectors after a model change
 ```
 
+### LibreOffice (DOC/DOCX uploads)
+
+Uploads accept **PDF, DOC, DOCX and ZIP**. A ZIP is unpacked into one contract and
+one job per supported member — the archive is a delivery mechanism, never a
+contract. Word documents are converted to PDF *at upload*, and only the PDF enters
+the pipeline, so no stage downstream of upload knows what was uploaded.
+
+That conversion is not optional decoration. Evidence highlighting positions a
+bounding box against a rendered page, and a page only exists once there is a PDF;
+a natively parsed DOCX would produce clauses that could be searched but never
+*shown*.
+
+**The converter is LibreOffice, running headless as a subprocess.** It is the only
+engine that handles both legacy binary `.doc` and `.docx`, and it behaves the same
+on a Windows laptop and in the Linux container — which a Word COM automation route
+does not.
+
+| Where | Status |
+| --- | --- |
+| Docker image | Installed (`libreoffice-writer`, `libreoffice-core`, `fonts-liberation`). Nothing to configure. |
+| Local development | **Not installed by default.** PDF and ZIP-of-PDF uploads work regardless; Word uploads are rejected with an actionable message until you install it. |
+
+`LIBREOFFICE_PATH` is empty by default, which means *find it*: `PATH` first, then
+the standard install locations. LibreOffice does not add itself to `PATH` on
+Windows, so a perfectly good install looks missing without that search — set the
+variable only if yours lives somewhere unusual.
+
+`fonts-liberation` is in the image deliberately. Without a metric-compatible
+substitute for Arial and Times New Roman, LibreOffice silently falls back to
+whatever it can find and reflows the document — so the converted PDF's page breaks
+stop matching the Word original, and every evidence highlight computed against it
+lands on the wrong page.
+
+A missing binary is a **per-document rejection, not a startup failure**: PDF
+uploads are unaffected, so refusing to boot would take out the working majority of
+the feature to report a problem with part of it.
+
+### Running the tests on Windows
+
+They work out of the box. This section is here for the case where they stop.
+
+Windows caps a path at 260 characters unless long-path support is enabled
+system-wide, and a storage key is long before anything is written to it:
+
+```text
+projects/<uuid>/contracts/<uuid>/artifacts/<kind>/g1.json     ~127 characters
+```
+
+Two UUIDs are 74 of those. Put that under pytest's default temporary directory —
+`<temp>/pytest-of-<user>/pytest-<n>/<test-name>0`, another ~63 — and the total
+crosses 260 partway through the suite. The failure does not describe itself: the
+directory chain fits and is created, then the file write fails with **`[Errno 2]
+No such file or directory`** naming a directory that plainly exists. Underneath it
+is `WinError 206`, "the filename or extension is too long".
+
+Two defences, both already in place:
+
+- `app.storage.local` asks Win32 for the extended-length API (the `\\?\` prefix),
+  where the ceiling is ~32767. This covers the storage adapter wherever its root
+  lives.
+- `tests/conftest.py` roots pytest's temporary directories at `<temp>/ct` instead
+  of the default nested layout, which covers anything that builds paths some other
+  way. POSIX keeps the default numbered directories — they are useful for
+  debugging a failure days later, and there is no limit to work around.
+
+If a machine still hits it — an unusually deep `%TEMP%`, or a temp volume you do
+not want multi-hundred-megabyte PDFs written to — point the tests somewhere else:
+
+```powershell
+$env:TEST_TMP_DIR = "D:\t"
+pytest tests/integration
+```
+
+`--basetemp` takes precedence over `TEST_TMP_DIR`, so a debugging session that
+passes it explicitly still gets its own directory.
+
+Enabling long paths system-wide is **not** required, and is deliberately not
+suggested as the fix: it needs administrator rights and a reboot, and it would
+make the suite pass on one machine while still failing on a colleague's. Should
+you want it anyway, it is `LongPathsEnabled` under
+`HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem`.
+
+Application code that writes to the OS temp directory (only the `pdfextract`
+parser adapter, which stages the PDF for its CLI) produces ~82-character paths and
+needs none of this. `tempfile` already honours `TMPDIR`/`TEMP`/`TMP`, so relocating
+it needs no new setting.
+
 ## 14.4 The operator CLI (`python -m app.cli`)
 
 | Command | What it does |

@@ -42,8 +42,19 @@ async def healthz() -> dict[str, Any]:
 
 @router.get("/readyz", response_model=HealthStatus, summary="Readiness probe")
 async def readyz(response: Response) -> HealthStatus:
-    """Dependency readiness: database, required extensions, Redis, storage."""
-    from app.core.cache import redis_healthy
+    """Dependency readiness: database, required extensions, storage.
+
+    **Redis is deliberately absent.** Nothing this service does requires it: every
+    cache and rate-limit call fails open by design (``app.core.cache``), and the
+    one component that genuinely depended on it - the BullMQ dispatcher - has been
+    replaced by the ``stage_queue`` table. A deployment now runs with no Redis at
+    all, so probing for it could only ever report a problem that is not one, and
+    reporting it held the pod out of the load balancer indefinitely.
+
+    ``cip smoke`` still reports Redis, which is the right place for it: an
+    operator asking "what is reachable from here?" wants to know, whereas a load
+    balancer asking "should I send traffic?" does not.
+    """
     from app.db.session import check_extensions, database_healthy
 
     settings = get_settings()
@@ -66,9 +77,7 @@ async def readyz(response: Response) -> HealthStatus:
         # broken retrieval.
         ready &= not missing
 
-    redis_ok = await redis_healthy()
-    checks["redis"] = {"status": "ok" if redis_ok else "error"}
-    ready &= redis_ok
+    # Redis is not checked here at all - see the note on this endpoint.
 
     storage_ok = await _storage_healthy()
     checks["storage"] = {

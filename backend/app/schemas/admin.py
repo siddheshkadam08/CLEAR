@@ -116,6 +116,128 @@ class ClauseRuleCreate(BaseSchema):
 
 
 # =============================================================================
+# Clause Master, grouped by agreement type
+# =============================================================================
+class AgreementClause(ResponseSchema):
+    """One clause as it applies to one agreement type.
+
+    Flattens the category and the mapping row into the shape the screen renders:
+    what the clause *is* comes from the Clause Master, whether it applies here
+    comes from ``agreement_type_clauses``.
+    """
+
+    clause_key: str
+    name: str
+    description: str | None = None
+    group_name: str | None = None
+    synonyms: list[str] = Field(default_factory=list)
+
+    #: Applied when a document of this type is processed. Switching it off affects
+    #: **new uploads only** - already-extracted contracts keep their clauses.
+    is_active: bool = True
+    #: Its absence is a finding for this type.
+    is_mandatory: bool = False
+    display_order: int = 100
+
+    #: False when the clause exists in the Clause Master but has no mapping row for
+    #: this type. The screen offers those as "available to add" rather than hiding
+    #: them, so growing a type's coverage does not require knowing what exists.
+    is_mapped: bool = True
+
+
+class AgreementTypeClauses(ResponseSchema):
+    """Every clause configured for one agreement type."""
+
+    agreement_type: str
+    #: The profile's display name where one exists, else the humanised type.
+    label: str
+    clauses: list[AgreementClause] = Field(default_factory=list)
+
+    @property
+    def active_count(self) -> int:
+        return sum(1 for clause in self.clauses if clause.is_active and clause.is_mapped)
+
+
+class AgreementClauseUpsert(BaseSchema):
+    """Attach a clause to an agreement type, or change how it applies there."""
+
+    clause_key: str = Field(min_length=2, max_length=64)
+    is_active: bool = True
+    is_mandatory: bool = False
+    display_order: int | None = Field(default=None, ge=0, le=9999)
+
+
+class ClauseDefinitionUpsert(BaseSchema):
+    """Create or edit a clause in the Clause Master itself.
+
+    Deliberately small. The old screen also surfaced ``ui_config``,
+    ``output_schema``, ``extraction_rule``, rule versions and a confidence slider -
+    none of which a person maintaining a clause list can act on, and two of which
+    were raw JSON in a read-only ``<pre>``. Those keep their existing endpoints;
+    this is the everyday surface.
+    """
+
+    key: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+        description="Required on create, ignored on update - the key is the identity.",
+    )
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    group_name: str | None = Field(default=None, max_length=100)
+    #: Alternative headings. The strongest signal the detector has, which is why
+    #: this is on the everyday form and `output_schema` is not.
+    synonyms: list[str] = Field(default_factory=list)
+
+
+class ClauseImportRow(BaseSchema):
+    """One row of an uploaded sheet.
+
+    Mirrors the export columns exactly, so a round trip is lossless and the file a
+    user downloads is the file they can edit and send back.
+    """
+
+    agreement_type: str = Field(min_length=1, max_length=64)
+    clause_key: str = Field(min_length=2, max_length=64)
+    name: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    group_name: str | None = Field(default=None, max_length=100)
+    synonyms: list[str] = Field(default_factory=list)
+    is_active: bool = True
+    is_mandatory: bool = False
+    display_order: int | None = Field(default=None, ge=0, le=9999)
+
+
+class ClauseImportRequest(BaseSchema):
+    """A parsed sheet, plus how to treat rows it does not mention."""
+
+    rows: list[ClauseImportRow] = Field(min_length=1, max_length=5000)
+    #: When true, mappings absent from the file are deactivated rather than left
+    #: alone. Off by default: a partial sheet is the common case, and silently
+    #: switching off everything it omits is the kind of surprise that costs a
+    #: reprocessing run.
+    deactivate_missing: bool = False
+    #: When true, a clause_key with no Clause Master entry is created from the
+    #: row's name/description rather than rejected.
+    create_missing_clauses: bool = True
+
+
+class ClauseImportResult(ResponseSchema):
+    """What the import actually did, per outcome."""
+
+    clauses_created: int = 0
+    clauses_updated: int = 0
+    mappings_created: int = 0
+    mappings_updated: int = 0
+    mappings_deactivated: int = 0
+    #: Rows that were not applied, each with the reason. Reported rather than
+    #: raised: one bad row in a 400-row sheet should not discard the other 399.
+    skipped: list[dict[str, str]] = Field(default_factory=list)
+
+
+# =============================================================================
 # Dashboards
 # =============================================================================
 class KpiTile(ResponseSchema):
@@ -240,15 +362,53 @@ class AlertRuleUpdate(BaseSchema):
     notify_channels: list[str] | None = None
 
 
+class AuditEntryResponse(ResponseSchema):
+    """One audit record, as the activity viewer renders it.
+
+    ``before``/``after`` are already sanitised on write - ``audit.sanitize``
+    redacts password hashes, tokens and secrets before the row is stored - so what
+    is served here is what was recorded. Nothing is redacted at read time, because
+    a viewer that hides fields the row does contain would misrepresent the trail.
+    """
+
+    id: uuid.UUID
+    created_at: datetime
+    action: str
+    entity_type: str
+    entity_id: uuid.UUID | None = None
+    entity_label: str | None = None
+    project_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
+    #: Denormalised on write, so a deleted user's actions stay attributable.
+    user_email: str | None = None
+    succeeded: bool = True
+    error_code: str | None = None
+    ip: str | None = None
+    route: str | None = None
+    #: Correlates a row with the request that produced it, and with the logs.
+    request_id: str | None = None
+    trace_id: str | None = None
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+
+
 __all__ = [
+    "AgreementClause",
+    "AgreementClauseUpsert",
+    "AgreementTypeClauses",
     "AlertResponse",
     "AlertRuleCreate",
     "AlertRuleResponse",
     "AlertRuleUpdate",
     "AlertUpdateRequest",
+    "AuditEntryResponse",
     "ClauseCategoryCreate",
     "ClauseCategoryResponse",
     "ClauseCategoryUpdate",
+    "ClauseDefinitionUpsert",
+    "ClauseImportRequest",
+    "ClauseImportResult",
+    "ClauseImportRow",
     "ClauseRuleCreate",
     "ClauseRuleResponse",
     "DashboardResponse",

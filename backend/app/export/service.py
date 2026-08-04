@@ -70,6 +70,15 @@ class ExportService:
         fields: dict[str, Any] | None,
     ) -> ExportJob:
         """Record the request. Raises before queueing if the format has no renderer."""
+        # Coerced, not trusted. `BaseSchema` sets `use_enum_values`, so a request
+        # payload hands these over as plain strings however the signature is typed
+        # - and this method both reads `.value` off them and compares them with
+        # `is`. Left as strings, `export_format.value` raises AttributeError and
+        # every `scope is SearchScope.X` check silently answers False, so the
+        # project_id and scope_ref guards below never fire.
+        export_format = ExportFormat(export_format)
+        scope = SearchScope(scope)
+
         # Resolving the exporter now rather than in the worker: "xlsx is spelled
         # wrong" should be a 400 the user sees immediately, not a job that sits in
         # the queue and fails four minutes later.

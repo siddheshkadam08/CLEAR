@@ -355,7 +355,7 @@ def _profile(
     key: str,
     name: str,
     category: str,
-    contract_type: str,
+    agreement_type: str,
     mandatory: list[ClauseType],
     risk_weights: dict[str, str],
     optional: list[str] | None = None,
@@ -373,7 +373,7 @@ def _profile(
         "version": PROFILE_SEED_VERSION,
         "name": name,
         "category": category,
-        "contract_type": contract_type,
+        "agreement_type": agreement_type,
         "description": f"Processing profile for {name}.",
         "supported_languages": ["en"],
         "is_active": True,
@@ -473,7 +473,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="commercial_msa",
         name="Commercial Master Services Agreement",
         category="Commercial",
-        contract_type="msa",
+        agreement_type="msa",
         mandatory=[
             *_TOP_PRIORITY_MANDATORY,
             ClauseType.TERMINATION_FOR_CAUSE,
@@ -492,7 +492,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="vendor_agreement",
         name="Vendor Agreement",
         category="Procurement",
-        contract_type="vendor_agreement",
+        agreement_type="vendor_agreement",
         mandatory=[
             *_TOP_PRIORITY_MANDATORY,
             ClauseType.TERMINATION_FOR_CAUSE,
@@ -514,7 +514,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="nda",
         name="Non-Disclosure Agreement",
         category="Legal",
-        contract_type="nda",
+        agreement_type="nda",
         mandatory=[
             ClauseType.CONFIDENTIALITY,
             ClauseType.TERM,
@@ -549,7 +549,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="employment_agreement",
         name="Employment Agreement",
         category="HR",
-        contract_type="employment_agreement",
+        agreement_type="employment_agreement",
         mandatory=[
             ClauseType.TERM,
             ClauseType.TERMINATION_FOR_CAUSE,
@@ -581,7 +581,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="lease",
         name="Lease Agreement",
         category="Real Estate",
-        contract_type="lease",
+        agreement_type="lease",
         mandatory=[
             ClauseType.TERM,
             ClauseType.PAYMENT_TERMS,
@@ -610,7 +610,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="consulting_agreement",
         name="Consulting Agreement",
         category="Professional Services",
-        contract_type="consulting_agreement",
+        agreement_type="consulting_agreement",
         mandatory=[
             ClauseType.SCOPE_OF_WORK,
             ClauseType.PAYMENT_TERMS,
@@ -631,7 +631,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="government_contract",
         name="Government Contract",
         category="Public Sector",
-        contract_type="government_contract",
+        agreement_type="government_contract",
         mandatory=[
             ClauseType.SCOPE_OF_WORK,
             ClauseType.PAYMENT_TERMS,
@@ -668,7 +668,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="healthcare_agreement",
         name="Healthcare Agreement",
         category="Healthcare",
-        contract_type="healthcare_agreement",
+        agreement_type="healthcare_agreement",
         mandatory=[
             *_TOP_PRIORITY_MANDATORY,
             ClauseType.DATA_PROTECTION,
@@ -697,7 +697,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="insurance_policy",
         name="Insurance Policy",
         category="Insurance",
-        contract_type="insurance_policy",
+        agreement_type="insurance_policy",
         mandatory=[
             ClauseType.TERM,
             ClauseType.PAYMENT_TERMS,
@@ -725,7 +725,7 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
         key="research_collaboration",
         name="Research Collaboration Agreement",
         category="Research",
-        contract_type="research_collaboration",
+        agreement_type="research_collaboration",
         mandatory=[
             ClauseType.SCOPE_OF_WORK,
             ClauseType.INTELLECTUAL_PROPERTY,
@@ -747,6 +747,103 @@ PROFILE_SEEDS: tuple[dict[str, Any], ...] = (
             "title_patterns": ["research", "collaboration agreement", "joint development"],
             "required_phrases": ["research", "collaboration", "publication"],
             "min_score": 0.45,
+        },
+    ),
+    # --- the three document types the retired taxonomy knew and this list did not ---
+    #
+    # The vendor's `docType` had six values: MSA, NDA, License Agreement, Contract
+    # cum Order Form, Addendum and Others. Only the first two had a profile, so
+    # `agreement_type_for` mapped the rest onto AgreementType values -
+    # license_agreement, purchase_order, amendment - that matched no
+    # `agreement_type` here, and every one of them fell through to the default
+    # (commercial_msa) and was scored against an MSA's mandatory clauses.
+    #
+    # That is exactly the failure that retired the old classifier: a License
+    # Agreement judged by another type's clause list finds none of them.
+    _profile(
+        key="license_agreement",
+        name="License and Services Agreement",
+        category="Commercial",
+        agreement_type="license_agreement",
+        mandatory=[
+            ClauseType.LICENSE_GRANT,
+            ClauseType.INTELLECTUAL_PROPERTY,
+            ClauseType.PAYMENT_TERMS,
+            ClauseType.TERM,
+            # `ClauseType.TERMINATION` was here, and no such Clause Master category
+            # exists - the taxonomy splits termination into for-cause and
+            # for-convenience. Extraction filters the Clause Master down to the
+            # profile's key set, so the key matched nothing: it could never be
+            # extracted, and every License Agreement reported it permanently
+            # missing. The two real keys are named instead.
+            ClauseType.TERMINATION_FOR_CAUSE,
+            ClauseType.TERMINATION_FOR_CONVENIENCE,
+            ClauseType.LIMITATION_OF_LIABILITY,
+            ClauseType.CONFIDENTIALITY,
+            ClauseType.GOVERNING_LAW,
+        ],
+        risk_weights={
+            "ip_assignment_risk": "critical",
+            "unlimited_liability": "critical",
+            "missing_mandatory_clause": "high",
+            "auto_renewal": "medium",
+            "unfavourable_governing_law": "medium",
+        },
+        retain_years=7,
+        classification_hints={
+            "title_patterns": ["license agreement", "licence agreement", "license and services"],
+            "required_phrases": ["license", "grant"],
+            "min_score": 0.45,
+        },
+    ),
+    _profile(
+        key="purchase_order",
+        name="Contract cum Order Form",
+        category="Commercial",
+        agreement_type="purchase_order",
+        mandatory=[
+            ClauseType.SCOPE_OF_WORK,
+            ClauseType.PAYMENT_TERMS,
+            ClauseType.TERM,
+            ClauseType.GOVERNING_LAW,
+        ],
+        risk_weights={
+            "missing_mandatory_clause": "high",
+            "payment_terms_unfavourable": "medium",
+            "auto_renewal": "medium",
+        },
+        # Order forms are largely tabular - quantities, rates, line items - so the
+        # table-preserving strategy keeps a rate card in one piece.
+        chunk_strategy=ChunkStrategy.TABLE_PRESERVING,
+        retain_years=7,
+        classification_hints={
+            "title_patterns": ["order form", "contract cum order", "purchase order"],
+            "required_phrases": ["order"],
+            "min_score": 0.4,
+        },
+    ),
+    _profile(
+        key="amendment",
+        name="Addendum / Amendment",
+        category="Commercial",
+        agreement_type="amendment",
+        # An addendum amends another agreement, so it legitimately contains very
+        # few clauses of its own. A long mandatory list here would flag every one
+        # for review - see the docpipeline stage's note that finding nothing is a
+        # result rather than a failure.
+        mandatory=[
+            ClauseType.TERM,
+            ClauseType.GOVERNING_LAW,
+        ],
+        risk_weights={
+            "missing_mandatory_clause": "low",
+            "ambiguous_scope": "medium",
+        },
+        retain_years=7,
+        classification_hints={
+            "title_patterns": ["addendum", "amendment", "amending agreement"],
+            "required_phrases": ["amend"],
+            "min_score": 0.4,
         },
     ),
 )

@@ -35,8 +35,14 @@ CDM_VERSION = "1.0.0"
 PARSER_FRAMEWORK_VERSION = "1.0.0"
 
 #: Per-parser adapter versions - bump when an adapter's normalisation changes.
+#:
+#: ``idoc`` is absent and is left that way deliberately: its parses have always
+#: recorded ``unknown`` here, and adding it now would change the version stamped on
+#: every checkpoint and force a re-parse of the whole estate to fix a label. Worth
+#: correcting alongside a change that invalidates those checkpoints anyway.
 PARSER_ADAPTER_VERSIONS: dict[str, str] = {
     "adi": "1.0.0",
+    "pdfextract": "1.0.0",
     "pymupdf": "1.0.0",
     "textract": "1.0.0",
     "googledocai": "1.0.0",

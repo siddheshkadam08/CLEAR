@@ -38,7 +38,7 @@ export const Markdown = ({ children }: { children: string }) => (
         h2: ({ children: content }) => <Heading>{content}</Heading>,
         h3: ({ children: content }) => <Heading>{content}</Heading>,
         strong: ({ children: content }) => (
-          <strong className="font-semibold text-slate-900">{content}</strong>
+          <strong className="font-semibold text-slate-900 dark:text-slate-100">{content}</strong>
         ),
         a: ({ children: content, href }) => (
           <a
@@ -54,7 +54,7 @@ export const Markdown = ({ children }: { children: string }) => (
           </a>
         ),
         blockquote: ({ children: content }) => (
-          <blockquote className="mb-3 border-l-2 border-slate-200 pl-3 text-slate-600 last:mb-0">
+          <blockquote className="mb-3 border-l-2 border-slate-200 dark:border-slate-700 pl-3 text-slate-600 dark:text-slate-300 last:mb-0">
             {content}
           </blockquote>
         ),
@@ -79,14 +79,14 @@ export const Markdown = ({ children }: { children: string }) => (
           </div>
         ),
         th: ({ children: content }) => (
-          <th className="border-b border-slate-200 px-2 py-1.5 font-semibold text-slate-700">
+          <th className="border-b border-slate-200 dark:border-slate-700 px-2 py-1.5 font-semibold text-slate-700 dark:text-slate-200">
             {content}
           </th>
         ),
         td: ({ children: content }) => (
           <td className="border-b border-slate-100 px-2 py-1.5 align-top">{content}</td>
         ),
-        hr: () => <hr className="my-4 border-slate-200" />,
+        hr: () => <hr className="my-4 border-slate-200 dark:border-slate-700" />,
       }}
     >
       {children}
@@ -102,7 +102,7 @@ export const Markdown = ({ children }: { children: string }) => (
  * headings differently in the same answer.
  */
 const Heading = ({ children }: { children: ReactNode }) => (
-  <p className="mb-2 mt-3 font-semibold text-slate-900 first:mt-0">{children}</p>
+  <p className="mb-2 mt-3 font-semibold text-slate-900 dark:text-slate-100 first:mt-0">{children}</p>
 );
 
 export default Markdown;

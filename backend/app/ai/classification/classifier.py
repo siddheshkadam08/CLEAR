@@ -124,7 +124,7 @@ class ClassificationSignal:
 
     profile_key: str
     profile_id: str
-    contract_type: str
+    agreement_type: str
     score: float
     title_score: float = 0.0
     phrase_score: float = 0.0
@@ -139,7 +139,7 @@ class ClassificationSignal:
     def as_dict(self) -> dict[str, Any]:
         return {
             "profile_key": self.profile_key,
-            "contract_type": self.contract_type,
+            "agreement_type": self.agreement_type,
             "score": round(self.score, 4),
             "title": round(self.title_score, 4),
             "phrases": round(self.phrase_score, 4),
@@ -191,7 +191,7 @@ class ClassificationResult:
         return [
             {
                 "profile_key": signal.profile_key,
-                "contract_type": signal.contract_type,
+                "agreement_type": signal.agreement_type,
                 "score": round(signal.score, 4),
                 "matched_rules": signal.matched_rules,
                 "matched_keywords": signal.matched_keywords[:8],
@@ -280,8 +280,8 @@ class DocumentClassifier:
                 logger.info("classification_forced", profile_key=forced_profile_key)
                 return ClassificationResult(
                     profile=forced,
-                    agreement_type=forced.contract_type,
-                    agreement_subtype=forced.contract_subtype,
+                    agreement_type=forced.agreement_type,
+                    agreement_subtype=forced.agreement_subtype,
                     confidence=1.0,
                     method="forced",
                     detected_title=title,
@@ -299,13 +299,13 @@ class DocumentClassifier:
         # An uploader-supplied type is a hint, not an override: it breaks a tie in its
         # own favour but does not beat a confident contrary match.
         if hinted_type and best is not None and best.score < threshold:
-            hinted = next((p for p in profiles if p.contract_type == hinted_type), None)
+            hinted = next((p for p in profiles if p.agreement_type == hinted_type), None)
             if hinted is not None:
                 logger.info("classification_from_hint", hinted_type=hinted_type)
                 return ClassificationResult(
                     profile=hinted,
-                    agreement_type=hinted.contract_type,
-                    agreement_subtype=hinted.contract_subtype,
+                    agreement_type=hinted.agreement_type,
+                    agreement_subtype=hinted.agreement_subtype,
                     confidence=0.7,
                     method="upload_hint",
                     signals=signals,
@@ -318,8 +318,8 @@ class DocumentClassifier:
             profile = next(p for p in profiles if str(p.id) == best.profile_id)
             return ClassificationResult(
                 profile=profile,
-                agreement_type=profile.contract_type,
-                agreement_subtype=profile.contract_subtype,
+                agreement_type=profile.agreement_type,
+                agreement_subtype=profile.agreement_subtype,
                 confidence=min(best.score, 0.99),
                 method="rules",
                 signals=signals,
@@ -377,8 +377,8 @@ class DocumentClassifier:
 
         return ClassificationResult(
             profile=fallback,
-            agreement_type=fallback.contract_type,
-            agreement_subtype=fallback.contract_subtype,
+            agreement_type=fallback.agreement_type,
+            agreement_subtype=fallback.agreement_subtype,
             # Low confidence is the signal that drives human review, so it is reported
             # honestly rather than inflated to look decisive.
             confidence=round(best.score, 4) if best else 0.0,
@@ -514,7 +514,7 @@ class DocumentClassifier:
             return ClassificationSignal(
                 profile_key=profile.key,
                 profile_id=str(profile.id),
-                contract_type=profile.contract_type,
+                agreement_type=profile.agreement_type,
                 score=0.0,
                 blocked_by=blocked,
                 matched_rules=["negative_phrases"],
@@ -576,7 +576,7 @@ class DocumentClassifier:
         return ClassificationSignal(
             profile_key=profile.key,
             profile_id=str(profile.id),
-            contract_type=profile.contract_type,
+            agreement_type=profile.agreement_type,
             score=round(score, 4),
             title_score=title_score,
             phrase_score=phrase_score,
@@ -663,7 +663,7 @@ class DocumentClassifier:
         from app.core.errors import ProviderError
 
         candidates = [
-            {"key": profile.key, "name": profile.name, "type": profile.contract_type}
+            {"key": profile.key, "name": profile.name, "type": profile.agreement_type}
             for profile in profiles
         ]
 
@@ -733,8 +733,8 @@ class DocumentClassifier:
         return (
             ClassificationResult(
                 profile=profile,
-                agreement_type=profile.contract_type,
-                agreement_subtype=profile.contract_subtype,
+                agreement_type=profile.agreement_type,
+                agreement_subtype=profile.agreement_subtype,
                 confidence=min(max(confidence, 0.0), 0.95),
                 method="llm",
                 signals=signals,

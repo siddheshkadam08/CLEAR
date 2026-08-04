@@ -1,16 +1,20 @@
-"""Stage 8 - Indexing.
+"""Indexing - the last stage.
 
-The last stage. Makes everything the pipeline produced actually reachable:
+Makes what the pipeline produced actually reachable:
 
+* **The knowledge graph.** Extraction recorded what the text *says*; this resolves
+  those references into edges between real rows, and records the ones that resolve to
+  nothing. Those derived edges go into ``knowledge_relationships``, which is what
+  ``RetrievalEngine._expand_graph`` traverses - so without this stage retrieval
+  still works and quietly sees a thinner graph.
 * **Keyword search vectors.** ``chunks.search_vector`` is maintained by a database
   trigger, so this stage verifies coverage rather than computing it - a chunk with a
   null vector is invisible to the keyword leg of hybrid search, and finding that out
   here beats finding it out from a user's failed search.
-* **The knowledge graph.** Extraction recorded what the text *says*; this resolves
-  those references into edges between real rows, and records the ones that resolve to
-  nothing.
-* **Readiness.** The contract is marked READY only once its vectors and its graph
-  exist. Until then it is processing, not searchable-but-incomplete.
+
+Readiness is deliberately *not* set here. ``runner._finalise_if_last`` marks the job
+and contract ready once no stage remains, so the decision lives in one place instead
+of in whichever stage happens to be last.
 
 Nothing here calls a model. Indexing is deterministic bookkeeping over rows the
 earlier stages produced, which is why it is cheap enough to re-run freely.
@@ -20,14 +24,13 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
 
 from app.ai.graph import KnowledgeGraphBuilder
 from app.core import metrics
-from app.core.enums import ArtifactKind, ContractStatus, PipelineStage
+from app.core.enums import ArtifactKind, PipelineStage
 from app.core.errors import PipelineError
 from app.core.logging import get_logger
 from app.core.versions import (
@@ -106,15 +109,12 @@ class IndexingStage(StageHandler):
         metrics.graph_nodes_total.set(len(graph.nodes))
         metrics.graph_edges_total.set(len(graph.edges))
 
-        # The contract becomes searchable here, and only here. A contract flagged for
-        # review is still fully indexed - the flag is about trusting the extraction,
-        # not about whether the document can be found.
-        ctx.contract.status = (
-            ContractStatus.NEEDS_REVIEW if ctx.contract.needs_review else ContractStatus.READY
-        )
-        ctx.contract.processed_at = datetime.now(UTC)
-        await ctx.db.flush()
-
+        # Readiness is not set here any more. `runner._finalise_if_last` marks the
+        # job READY and the contract READY/NEEDS_REVIEW once no stage remains,
+        # which is the same decision made in one place for every stage rather
+        # than in whichever one happens to be last. Setting it here as well was
+        # harmless only while indexing *was* last; it would now be a second
+        # writer racing the runner over the same two columns.
         warnings = list(graph.warnings)
         if coverage["missing"]:
             warnings.append(
@@ -133,23 +133,21 @@ class IndexingStage(StageHandler):
             **stats,
         )
 
+        # One artifact, not two.
+        #
+        # This used to emit `RELATIONSHIPS` first, making it the checkpoint's
+        # `artifact_ref`. But `STAGE_ARTIFACTS[EXTRACTION]` already claims that
+        # kind, and `DocumentArtifactRepository.invalidate_from_stage` supersedes
+        # by kind - so two stages emitting it meant re-running one silently
+        # invalidated the other's output. `STAGE_ARTIFACTS[INDEXING]` never
+        # listed it either, which is the map's own way of saying it should not.
+        #
+        # Nothing is lost: the graph's edges are persisted as
+        # `knowledge_relationships` rows, which is what retrieval reads. The node
+        # list was only ever a debugging convenience, and its counts survive in
+        # the statistics below.
         return StageResult(
             artifacts=[
-                StageArtifact(
-                    kind=ArtifactKind.RELATIONSHIPS,
-                    payload={
-                        "nodes": [node.as_dict() for node in graph.nodes],
-                        "edges": [edge.as_dict() for edge in graph.edges],
-                        "dangling": graph.dangling,
-                        "graph_version": GRAPH_VERSION,
-                    },
-                    summary={
-                        "nodes": len(graph.nodes),
-                        "edges": len(graph.edges),
-                        "resolved": graph.resolved_edges,
-                        "dangling": len(graph.dangling),
-                    },
-                ),
                 StageArtifact(
                     kind=ArtifactKind.INDEX_STATISTICS,
                     payload={

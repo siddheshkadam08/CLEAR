@@ -15,6 +15,14 @@
     pydantic-settings reads the real environment before the dotenv file, so
     anything set here wins.
 
+    A full local stack is three processes, one per shell:
+
+        .\scripts\dev-local.ps1 -LocalStack -Serve       # API
+        .\scripts\dev-local.ps1 -LocalStack -Worker      # runs the pipeline
+        .\scripts\dev-local.ps1 -LocalStack -Scheduler   # alerts and sweeps
+
+    Without the worker an upload is accepted and then sits in the queue forever.
+
 .EXAMPLE
     .\scripts\dev-local.ps1 -Migrate -Seed
     .\scripts\dev-local.ps1 -Serve
@@ -24,7 +32,21 @@ param(
     [switch]$Migrate,
     [switch]$Seed,
     [switch]$Serve,
+    # The pipeline worker. Nothing processes an uploaded document without it -
+    # the upload succeeds, the job is queued, and then nothing happens.
+    #
+    # Run it through this script rather than calling `app.cli worker` directly:
+    # the CLI does not load `.env` itself, so a bare invocation starts with
+    # `PARSER_MODE=fixture` (the field default) and no AI credentials, and every
+    # parse fails looking for a fixture that was never recorded.
+    [switch]$Worker,
+    # Stalled-job reclamation, stage-queue leases, export sweeps and the alert
+    # evaluator. Same reason for going through this script.
+    [switch]$Scheduler,
     [switch]$EnableSso,
+    # Export traces. Off by default because a native run has no collector; see the
+    # note where OTEL_ENABLED is set.
+    [switch]$Tracing,
     # Use the throwaway podman Postgres instead of the shared Hackathon DB.
     # Off by default: the point of a local run is usually to see the same data
     # the deployed app sees.
@@ -112,9 +134,21 @@ else {
     Write-Host "  DB -> $target" -ForegroundColor Cyan
 }
 
-# Tracing off by default: without a collector the exporter retries on every
-# request and makes the logs unreadable for no benefit.
-if (-not $env:OTEL_ENABLED) { $env:OTEL_ENABLED = 'false' }
+# Tracing off unless asked for. A native run has no collector - `otel-collector`
+# is a compose service name that resolves nowhere on the host - and the exporter
+# then retries on every span.
+#
+# This used to read `if (-not $env:OTEL_ENABLED)`, which never fired: the .env
+# load above always populates the variable (it ships OTEL_ENABLED=true for the
+# compose stack, which does run a collector). The cost was not cosmetic - every
+# request blocked ~6s on the export retry, slow enough to look like the API had
+# hung.
+if ($Tracing) {
+    Write-Host "  tracing on -> $($env:OTEL_EXPORTER_OTLP_ENDPOINT)" -ForegroundColor DarkGray
+}
+else {
+    $env:OTEL_ENABLED = 'false'
+}
 
 # --- Microsoft SSO ------------------------------------------------------------
 $env:CORS_ORIGINS = "http://localhost:$WebPort,http://localhost:5173,http://localhost:3000"
@@ -169,6 +203,17 @@ try {
         Write-Host "`n== Seeding ==" -ForegroundColor Cyan
         & $python -m app.cli seed
         if ($LASTEXITCODE -ne 0) { throw "Seed failed." }
+    }
+
+    if ($Worker) {
+        Write-Host "`n== Worker ==" -ForegroundColor Green
+        Write-Host "   parser $($env:ACTIVE_PARSER) in $($env:PARSER_MODE) mode, queue $($env:QUEUE_DRIVER)"
+        & $python -m app.cli worker
+    }
+
+    if ($Scheduler) {
+        Write-Host "`n== Scheduler ==" -ForegroundColor Green
+        & $python -m app.cli scheduler
     }
 
     if ($Serve) {

@@ -10,6 +10,13 @@
  * button reports progress and then hands over a download link; it never blocks on
  * a spreadsheet that might take a minute to build.
  *
+ * That polling lives in component state, so closing this modal or leaving the page
+ * drops the reference. The job itself is unaffected - it finishes and the file
+ * lands in storage - so the modal points at `/exports`, which is the durable
+ * record. Before that screen existed, walking away mid-export lost the file for
+ * good: it built, sat unreachable, and was purged at the end of its retention
+ * window.
+ *
  * The options render in a Modal rather than a floating popover: a 320px panel
  * anchored to a toolbar button falls off the side of a phone screen.
  */
@@ -17,12 +24,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, FileSpreadsheet } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import { exports as exportsApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
 import type { ExportEntity, UUID } from '@/api/types';
 import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
+import { FilterChip } from '@/components/common/FilterChip';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Modal } from '@/components/common/Modal';
 import { formatBytes } from '@/lib/format';
@@ -184,20 +193,12 @@ export function ExportButton({ filters, projectId, label = 'Export' }: ExportBut
                 {(capabilities.data?.entities ?? []).map((entity) => {
                   const on = Boolean(entities?.includes(entity));
                   return (
-                    <button
+                    <FilterChip
                       key={entity}
-                      type="button"
-                      aria-pressed={on}
+                      label={ENTITY_LABELS[entity] ?? entity}
+                      active={on}
                       onClick={() => toggleEntity(entity)}
-                      className={[
-                        'rounded-full px-3 py-1.5 text-xs font-medium ring-1 ring-inset transition',
-                        on
-                          ? 'bg-blue-600 text-white ring-blue-600'
-                          : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
-                      ].join(' ')}
-                    >
-                      {ENTITY_LABELS[entity] ?? entity}
-                    </button>
+                    />
                   );
                 })}
               </div>
@@ -226,6 +227,22 @@ export function ExportButton({ filters, projectId, label = 'Export' }: ExportBut
           {current?.status === 'completed' && current.row_count !== null ? (
             <p className="text-xs text-slate-500">
               {current.row_count?.toLocaleString()} rows.
+            </p>
+          ) : null}
+
+          {/* Shown once a job exists, including while it builds: this is exactly
+              when someone is tempted to close the dialog and carry on. */}
+          {current ? (
+            <p className="text-xs text-slate-500">
+              You can close this — it keeps building.{' '}
+              <Link
+                to="/exports"
+                onClick={() => setOpen(false)}
+                className="font-medium text-blue-600 hover:text-blue-700"
+              >
+                All your exports
+              </Link>{' '}
+              lists every workbook you have requested, with its download link.
             </p>
           ) : null}
         </div>

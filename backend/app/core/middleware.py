@@ -262,6 +262,23 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     async def _consume(key: str, limit: int, window: int) -> tuple[bool, int]:
+        # Shares the cache's circuit breaker, and must.
+        #
+        # Failing open was already right, but it was failing open *slowly*: the
+        # client has a three-second connect timeout, and this runs on every
+        # request, so an unreachable Redis added three seconds to each one before
+        # allowing it through. Measured on a local run with no Redis, a plain
+        # `/auth/methods` took six seconds - the rate-limit probe plus a cache
+        # read - which reads as a hung API rather than a missing optional service.
+        #
+        # `cache.py` solved this for reads and writes; the rate limiter simply was
+        # not wired into it. It is the same failure and the same remedy: skip
+        # Redis while it is presumed down, retry after the cooldown.
+        from app.core.cache import _breaker_open, _record_failure, _record_success
+
+        if _breaker_open():
+            return True, 0
+
         try:
             from app.core.cache import get_redis
 
@@ -275,10 +292,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 await redis.expire(key, window)
                 ttl = window
 
+            _record_success()
             if int(count) > limit:
                 return False, max(int(ttl), 1)
             return True, 0
         except Exception as exc:  # noqa: BLE001 - fail open, see docstring
+            _record_failure("rate_limit")
             logger.debug("rate_limit_unavailable", error=str(exc))
             return True, 0
 

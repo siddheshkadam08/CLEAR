@@ -40,6 +40,7 @@ import type {
   CopilotSource,
   CopilotStreamDone,
   PlanExplanation,
+  ResponseFormat,
   UUID,
 } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
@@ -48,7 +49,7 @@ import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
-import { inputClasses } from '@/components/common/Field';
+import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { Markdown } from '@/components/common/Markdown';
 import { formatDateTime, formatPercent, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
@@ -71,13 +72,28 @@ interface Turn {
   error?: string;
 }
 
+/** Answer shapes the model is asked for. Empty means prose, the default. */
+/** Answer shapes the API will actually accept.
+ *
+ * `bullet_points` and `table` used to be offered here. Neither is a member of the
+ * backend `ResponseFormat` enum, so picking either returned 422 and the Copilot
+ * answered nothing - two of the three options were dead. `response_format` was
+ * typed as a bare `string`, which is why the compiler had nothing to say about
+ * it. An empty value sends `null`, letting the server pick from the question's
+ * intent, which is the better default for most questions. */
+const FORMATS: { value: '' | ResponseFormat; label: string }[] = [
+  { value: '', label: 'Automatic' },
+  { value: 'executive_summary', label: 'Executive summary' },
+  { value: 'risk_report', label: 'Risk report' },
+  { value: 'action_items', label: 'Action items' },
+  { value: 'timeline', label: 'Timeline' },
+];
+
 export function CopilotPage() {
   const { projectId } = useProjectScope();
   const queryClient = useQueryClient();
   const [question, setQuestion] = useState('');
-  // No control sets this any more - the format picker was removed from the
-  // markup - but the value is still sent with the question.
-  const [format] = useState('');
+  const [format, setFormat] = useState<'' | ResponseFormat>('');
   const [sessionId, setSessionId] = useState<UUID | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -324,7 +340,7 @@ export function CopilotPage() {
           {/* Sticky composer: on a phone the thread scrolls under it, so the input
               is always where the thumb already is. */}
           <form
-            className="sticky bottom-0 rounded-2xl border border-slate-200 bg-white p-3 shadow-lg sm:p-4"
+            className="sticky bottom-0 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 shadow-lg sm:p-4"
             onSubmit={(event) => {
               event.preventDefault();
               submit();
@@ -345,26 +361,21 @@ export function CopilotPage() {
               className={`${inputClasses} resize-none`}
             />
             <div className="mt-2 flex items-center gap-2">
-              {/* Disabled, not deleted. Restoring it also needs `FORMATS`,
-              `setFormat`, `selectClasses` and `SelectChevron`, which were
-              removed because nothing referenced them once this was commented
-              out and the production typecheck rejects unused declarations.
-              They are in the commit that disabled this block.
               <div className="relative w-36 sm:w-44">
-              <select
-                value={format}
-                onChange={(event) => setFormat(event.target.value)}
-                aria-label="Answer format"
-                className={selectClasses}
-              >
-                {FORMATS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <SelectChevron />
-              </div> */}
+                <select
+                  value={format}
+                  onChange={(event) => setFormat(event.target.value as '' | ResponseFormat)}
+                  aria-label="Answer format"
+                  className={selectClasses}
+                >
+                  {FORMATS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <SelectChevron />
+              </div>
               <span className="ml-auto" />
               {streaming ? (
                 <Button
@@ -441,7 +452,7 @@ function TurnView({
             ) : null}
 
             {turn.refused ? (
-              <div className="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+              <div className="mb-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 px-4 py-3 text-sm text-slate-600 dark:text-slate-300">
                 The Copilot declined to answer from the evidence available.
               </div>
             ) : null}

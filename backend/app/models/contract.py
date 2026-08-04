@@ -59,13 +59,64 @@ class Contract(Base, UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin):
     )
 
     # --- source file ---------------------------------------------------------
+    #
+    # Four paths, because "the file" stopped being one thing once Word documents
+    # were accepted. A DOC is stored as uploaded *and* as the PDF it was converted
+    # into, and different callers want different ones: the pipeline and the
+    # evidence viewer need the PDF, the download button needs what the user
+    # actually gave us.
+    #
+    # `storage_path` is kept as the pipeline's path and always equals
+    # `processing_file_path`. It is read in a dozen places - the parser stage,
+    # version rows, reprocessing - and the requirement was that no downstream
+    # service change because of this feature. Keeping it authoritative for
+    # "the bytes to process" means none had to.
     original_file_name: Mapped[str] = mapped_column(String(512), nullable=False)
     storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    #: Where the bytes the user uploaded live, whatever their format.
+    original_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    #: The PDF produced from a Word original. NULL for a PDF upload - that is the
+    #: flag for "no conversion happened", not an absent value.
+    converted_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    #: The PDF the pipeline reads. Equals `original_file_path` for a PDF upload and
+    #: `converted_file_path` for a Word one.
+    processing_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    #: What was uploaded, before any conversion. `file_type` stays as the type of
+    #: the file being *processed*, which is always PDF now, so existing filters and
+    #: parser selection keep working unchanged.
+    original_file_type: Mapped[FileType | None] = mapped_column(
+        pg_enum(FileType, "file_type"), nullable=True
+    )
     file_type: Mapped[FileType] = mapped_column(pg_enum(FileType, "file_type"), nullable=False)
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    #: Content hash. Unique per project, so re-uploading the same document to the
-    #: same project is rejected while the same document in two projects is fine.
+
+    # --- archive provenance --------------------------------------------------
+    #: Set when this contract came out of a ZIP, so the UI can group everything
+    #: that arrived in one upload. The archive itself is never a contract.
+    source_archive_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, index=True
+    )
+    #: The archive's own file name, carried so the UI can label the group without
+    #: another lookup - there is no archive table to join to.
+    source_archive_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    #: Content hash of the file *the user uploaded*. Unique per project, so
+    #: re-uploading the same document to the same project is rejected while the
+    #: same document in two projects is fine.
+    #:
+    #: Deliberately the original's, not the processed file's: LibreOffice does not
+    #: produce byte-identical output from one run to the next, so hashing the
+    #: converted PDF would let the same Word document in repeatedly.
     sha256_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    #: Content hash of the file at ``processing_file_path``, which the validation
+    #: stage re-computes to prove storage has not corrupted or swapped it.
+    #:
+    #: Equal to ``sha256_hash`` for a PDF upload; different for a converted one,
+    #: because the two columns answer different questions - "is this the same
+    #: document?" and "are these the same bytes?". Collapsing them made validation
+    #: hash the PDF and compare it against the DOCX's hash, halting every Word
+    #: upload at the first stage with an integrity error. NULL on rows predating
+    #: conversion, where the two were necessarily the same.
+    processing_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

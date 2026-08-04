@@ -4,10 +4,11 @@ Only the first few pages are read. A contract announces itself in its title,
 recitals and definitions; by page six it is reciting obligations that look much
 the same whatever the instrument. Reading further costs tokens and adds noise.
 
-The label set is not hardcoded here - it is whatever ``cip_docMapping`` says the
-document types are. That table is the join target for the clause lookup that
-follows, so a classifier emitting anything else would produce a document type
-with no clauses to look for.
+The label set is not hardcoded here - it is whatever document profiles are
+configured, read at runtime by :func:`app.ai.docpipeline.mapping.load_doc_types`.
+That label is the lookup key for the clause list that follows *and* the value
+written to ``contracts.agreement_type``, so a classifier emitting anything else
+would produce a document type with no clauses to look for and no filter to match.
 """
 
 from __future__ import annotations
@@ -17,11 +18,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.ai.docpipeline import taxonomy
 from app.ai.docpipeline.inference import call_structured
 from app.ai.docpipeline.mapping import FALLBACK_DOC_TYPE
 from app.ai.docpipeline.source import PageContent
 from app.ai.rag.providers import IInferenceProvider, get_inference_provider
 from app.ai.routing import LLMTask
+from app.core.enums import AgreementType
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,33 +33,75 @@ logger = get_logger(__name__)
 #: recitals and the start of the definitions.
 CLASSIFICATION_PAGE_WINDOW = 5
 
-#: What distinguishes each known document type. Keyed on the exact strings in
-#: ``cip_docMapping."docType"``. A type present in the table but absent here
-#: still gets classified - it just goes to the model on its name alone.
+#: What distinguishes each document type. Keyed on ``AgreementType`` values, which
+#: is what ``document_profiles.agreement_type`` holds and therefore what
+#: :func:`app.ai.docpipeline.mapping.load_doc_types` returns.
+#:
+#: A configured type absent from here still gets classified - it goes to the model
+#: on its name alone (see ``_system_prompt``). The hints are hand-written because
+#: the seeded ``document_profiles.description`` is boilerplate ("Processing profile
+#: for Lease Agreement.") and tells a model nothing it cannot read off the label.
 _TYPE_HINTS: dict[str, str] = {
-    "MSA": (
+    AgreementType.MSA.value: (
         "Master Service Agreement. A framework of terms governing future work: "
         "no specific deliverable, quantity or price on its face, and it "
         "anticipates separate statements of work or order forms."
     ),
-    "License Agreement": (
+    AgreementType.LICENSE_AGREEMENT.value: (
         "Grants a right to use software, technology or other intellectual "
         "property. Look for a grant of licence, scope or field of use, "
         "exclusivity, and restrictions on copying or sublicensing."
     ),
-    "Contract cum Order Form": (
+    AgreementType.PURCHASE_ORDER.value: (
         "Agreement terms bundled together with a concrete order on the face of "
         "the document: line items, quantities, unit prices, subscription term "
         "or effective dates filled in for this specific purchase."
     ),
-    "Addendum": (
+    AgreementType.AMENDMENT.value: (
         "Amends, supplements or extends a previously executed agreement, which "
         "it names and dates. Short, and meaningless without the parent contract."
     ),
-    "NDA": (
+    AgreementType.NDA.value: (
         "Confidentiality is the substance of the agreement, not one clause of "
         "it: definition of confidential information, permitted use, duration of "
         "the obligation, return or destruction on termination."
+    ),
+    AgreementType.VENDOR_AGREEMENT.value: (
+        "A supplier provides goods or defined services on recurring terms. "
+        "Distinguished from an MSA by naming what is supplied rather than "
+        "deferring it to a future statement of work."
+    ),
+    AgreementType.EMPLOYMENT_AGREEMENT.value: (
+        "Between an employer and one named individual: role, salary, benefits, "
+        "notice period, and usually restrictive covenants. The counterparty is a "
+        "person, not a company."
+    ),
+    AgreementType.CONSULTING_AGREEMENT.value: (
+        "An independent contractor supplies professional services. Look for a "
+        "statement that the supplier is not an employee, and for deliverables or "
+        "rates rather than a salary."
+    ),
+    AgreementType.LEASE.value: (
+        "Grants possession of property - premises, land or equipment - for a term "
+        "in exchange for rent. Look for a described premises, rent and a term."
+    ),
+    AgreementType.INSURANCE_POLICY.value: (
+        "An insurer accepts a defined risk for a premium: coverage limits, "
+        "exclusions, deductibles, and a claims procedure."
+    ),
+    AgreementType.GOVERNMENT_CONTRACT.value: (
+        "One party is a public body. Look for procurement references, statutory "
+        "flow-down clauses and compliance obligations a commercial contract "
+        "would not carry."
+    ),
+    AgreementType.HEALTHCARE_AGREEMENT.value: (
+        "Concerns clinical services, patient data or medical supply. Look for "
+        "protected health information, HIPAA or equivalent, and clinical "
+        "responsibilities."
+    ),
+    AgreementType.RESEARCH_COLLABORATION.value: (
+        "Two or more parties jointly conduct research. Look for a work plan, "
+        "allocation of foreground and background IP, and publication rights."
     ),
     FALLBACK_DOC_TYPE: (
         "Use this when the document does not clearly match any other type, "
@@ -145,10 +190,32 @@ def _normalise(raw: str, doc_types: Sequence[str]) -> tuple[str, bool]:
         if raw.casefold() == candidate.casefold():
             return candidate, False
 
+    return _fallback_label(doc_types), True
+
+
+def _fallback_label(doc_types: Sequence[str]) -> str:
+    """The label set's own "I could not tell" bucket.
+
+    Matched by meaning rather than by string, so a caller passing the retired
+    ``"Others"`` spelling still gets its own bucket back rather than a different
+    document type.
+
+    Returning ``FALLBACK_DOC_TYPE`` when the set contains no such bucket is
+    deliberate. This used to return ``doc_types[0]`` - the *first* type,
+    alphabetically - which turned "none of these fit" into a confident,
+    arbitrary answer, and the caller had only `fell_back` to tell them apart.
+    """
     for candidate in doc_types:
         if candidate.casefold() == FALLBACK_DOC_TYPE.casefold():
-            return candidate, True
-    return doc_types[0], True
+            return candidate
+
+    # Retired vocabularies spelled it "Others" and mapped it to AgreementType.OTHER.
+    for candidate in doc_types:
+        legacy = taxonomy.legacy_agreement_type(candidate)
+        if legacy is not None and legacy[0] == AgreementType.OTHER.value:
+            return candidate
+
+    return FALLBACK_DOC_TYPE
 
 
 def _confidence(value: Any) -> float:
