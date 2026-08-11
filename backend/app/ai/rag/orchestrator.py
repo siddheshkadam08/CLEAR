@@ -81,10 +81,18 @@ _FORMAT_INSTRUCTIONS: dict[ResponseFormat, str] = {
         "commercial shape, and the terms that carry risk. Six to ten sentences, no "
         "bullet lists."
     ),
+    # Bounded on both axes, deliberately. This asked for three things per risk and
+    # capped neither the count nor the depth, so a dense agreement produced five
+    # risks of three paragraphs each - around nine hundred words, which is a memo
+    # rather than an answer, and one nobody reads to the end of. The cap is on the
+    # *writing*, not the analysis: the reader who wants the full wording follows
+    # the citation, which is why it is there.
     ResponseFormat.RISK_REPORT: (
-        "Organise by severity, highest first. For each risk: what the wording is, "
-        "why it is a risk, and what to negotiate. Only risks the evidence supports - "
-        "do not list generic contract risks."
+        "Organise by severity, highest first. At most five risks - the five that "
+        "matter, not the five you found. Give each a short bold heading, then two "
+        "sentences: what the wording does, and what to negotiate. Cite the clause "
+        "rather than quoting it at length. Only risks the evidence supports - do "
+        "not list generic contract risks."
     ),
     ResponseFormat.COMPLIANCE_REPORT: (
         "State compliance status per requirement, citing the clause that satisfies "

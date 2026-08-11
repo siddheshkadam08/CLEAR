@@ -20,9 +20,16 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import AccessScopeDep, CurrentUserDep, DbSession, ProjectContextDep
+from app.core.deps import (
+    AccessScopeDep,
+    CurrentUserDep,
+    DbSession,
+    ProjectContextDep,
+    resolve_scope_for_project,
+)
 from app.core.enums import ExportStatus, Permission, SearchScope
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
@@ -164,18 +171,29 @@ async def _run_export(
 async def list_exports(
     user: CurrentUserDep,
     db: DbSession,
+    scope: AccessScopeDep,
     page: Annotated[int, Query(ge=1)] = 1,
     size: Annotated[int, Query(ge=1, le=100)] = 25,
     # Typed as the enum rather than coerced in the body: `ExportStatus(value)` on an
     # unknown string raises ValueError, which leaves the handler as a 500. Declaring
     # it here makes a bad filter a 422 that names the offending field.
     export_status: Annotated[list[ExportStatus] | None, Query(alias="status")] = None,
+    project_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> Paginated[ExportResponse]:
-    """Exports this user requested.
+    """Exports this user requested, optionally narrowed to one business unit.
 
     Scoped to the requester rather than to the project: an export is a copy of data
     taken by a named person, and listing other people's copies would expose what
     they have been looking at.
+
+    `project_id` narrows *within* that, and does not loosen it - the caller still
+    only ever sees their own exports. It exists because the business-unit selector
+    is meant to re-scope the whole application, and a screen that ignores it shows
+    rows belonging to a unit the header says you are not looking at. Resolved
+    through the usual scope helper, so naming a unit you cannot see is refused
+    rather than quietly ignored.
+
+    Omitted - "All Business Units" - keeps returning everything you requested.
     """
     from sqlalchemy import func, select
 
@@ -184,6 +202,9 @@ async def list_exports(
     conditions = [ExportJob.requested_by == user.id]
     if export_status:
         conditions.append(ExportJob.status.in_(export_status))
+    if project_id is not None:
+        project_ids = await resolve_scope_for_project(project_id, scope)
+        conditions.append(ExportJob.project_id.in_(project_ids))
 
     total = (
         await db.execute(select(func.count()).select_from(ExportJob).where(*conditions))
@@ -254,6 +275,81 @@ async def download_export(
         file_name=job.file_name,
         file_size=job.file_size,
         expires_in=DOWNLOAD_URL_TTL_SECONDS,
+    )
+
+
+# =============================================================================
+# Token-authenticated download
+#
+# Its own router because every other export route carries the bearer-auth and
+# forced-password-change dependencies applied in `api/v1/__init__.py`, and this one
+# cannot: it is reached by a browser navigation that sends no Authorization header,
+# so those dependencies would reject it with a 401 before the token was ever looked
+# at. Same reasoning that excludes `auth` from the password gate.
+# =============================================================================
+download_router = APIRouter(prefix="/exports", tags=["Exports"])
+
+
+@download_router.get(
+    "/{export_id}/content",
+    summary="Stream a finished export",
+    response_class=StreamingResponse,
+    responses={200: {"content": {"application/octet-stream": {}}}},
+    include_in_schema=False,
+)
+async def stream_export(
+    export_id: uuid.UUID,
+    db: DbSession,
+    token: Annotated[str, Query(description="Short-lived download token from /download.")],
+) -> StreamingResponse:
+    """Serve the export bytes to a browser navigation.
+
+    **Authenticated by the token in the URL, not by a bearer header** - deliberately,
+    and this is the only endpoint that works this way. The client reaches it by
+    navigating the tab (so a large workbook streams to disk instead of through the
+    page's memory), and a navigation sends no ``Authorization`` header. Object
+    storage answers this with a presigned URL; with the local adapter there is
+    nothing to presign, so the API mints the equivalent itself.
+
+    The token is bound to one user, one export and five minutes - see
+    ``create_download_token``. Everything that fails here returns the same 404 the
+    missing-export case returns: an export id is guessable-adjacent, and a distinct
+    403 would confirm which ids exist.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.core.errors import TokenExpiredError, TokenInvalidError
+    from app.core.security import verify_download_token
+    from app.models.export import ExportJob
+    from app.storage import get_storage
+
+    try:
+        payload = verify_download_token(token, resource="export", resource_id=export_id)
+    except (TokenExpiredError, TokenInvalidError) as exc:
+        raise NotFoundError("Export", export_id) from exc
+
+    job = (
+        await db.execute(select(ExportJob).where(ExportJob.id == export_id))
+    ).scalar_one_or_none()
+    if job is None or str(job.requested_by) != payload.get("sub"):
+        raise NotFoundError("Export", export_id)
+    if job.status is not ExportStatus.COMPLETED or not job.storage_path:
+        raise NotFoundError("Export", export_id)
+    if job.expires_at is not None and job.expires_at <= datetime.now(UTC):
+        raise NotFoundError("Export", export_id)
+
+    stream = get_storage().get_stream(job.storage_path)
+    return StreamingResponse(
+        stream,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{job.file_name}"',
+            # The token already limits the window; caching a copy of contract data
+            # in a shared proxy would outlive it.
+            "Cache-Control": "private, no-store",
+        },
     )
 
 

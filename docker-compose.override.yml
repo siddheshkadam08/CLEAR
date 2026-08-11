@@ -65,14 +65,6 @@ services:
       - --reload-dir
       - /app/app
 
-  scheduler:
-    build:
-      target: dev
-    volumes:
-      - ./backend/app:/app/app:cached
-    environment:
-      LOG_FORMAT: console
-
   queue:
     build:
       target: dev

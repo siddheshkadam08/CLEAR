@@ -23,9 +23,20 @@ from __future__ import annotations
 from app.api.v1 import api_router
 from app.core.deps import require_password_current
 
-#: The only router that must stay open. Change-password and logout are the way out
-#: of the state, so gating them would make the flag unclearable.
+#: Change-password and logout are the way out of the state, so gating them would
+#: make the flag unclearable.
 UNGATED_PREFIX = "/auth/"
+
+#: The one route outside `/auth/` that carries no bearer-auth dependency, and the
+#: reason it is safe.
+#:
+#: It is reached by a browser navigation with a signed token in the URL, so the
+#: dependencies would 401 it before the token was examined. The gate is not lost,
+#: only moved one step earlier: the token comes from `POST /exports/{id}/download`,
+#: which *is* gated, so an account with an outstanding password change cannot
+#: obtain one. A token minted before the flag was set stays valid for its five
+#: minutes, which is the same window any already-issued access token has.
+UNGATED_PATHS = frozenset({"/exports/{export_id}/content"})
 
 
 def included_routers() -> list[object]:
@@ -70,12 +81,26 @@ def test_every_non_auth_router_is_gated() -> None:
         if any(path.startswith(UNGATED_PREFIX) for path in paths):
             continue
         if not is_gated(included):
-            ungated.extend(paths)
+            ungated.extend(path for path in paths if path not in UNGATED_PATHS)
 
     assert not ungated, (
         "These routes are reachable while a forced password change is outstanding: "
         f"{sorted(ungated)}. Register the router with dependencies=_PASSWORD_CURRENT "
         "in app/api/v1/__init__.py."
+    )
+
+
+def test_the_ungated_download_route_still_exists() -> None:
+    """Stops the exemption above outliving the route it was written for.
+
+    An allow-list entry for a path that no longer exists is an exemption nobody
+    would notice becoming wrong - the next route to land on that path would
+    inherit it silently.
+    """
+    every_path = {path for included in included_routers() for path in paths_of(included)}
+    assert every_path >= UNGATED_PATHS, (
+        f"{sorted(UNGATED_PATHS - every_path)} is exempted from the password gate but "
+        "is no longer registered. Remove it from UNGATED_PATHS."
     )
 
 

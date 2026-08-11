@@ -362,6 +362,11 @@ class ContractFilterParams(BaseSchema):
     has_unlimited_liability: bool | None = None
     #: Filter to contracts missing any of these clause types (JSONB containment).
     missing_clause_types: list[str] | None = None
+    #: Filter to contracts missing *any* mandatory clause, without naming which.
+    #: `missing_clause_types` answers "which contracts lack an indemnity clause";
+    #: this answers "which contracts are incomplete", the question the dashboard
+    #: tile counts.
+    missing_mandatory: bool | None = None
     needs_review: bool | None = None
 
     tags: list[str] | None = None

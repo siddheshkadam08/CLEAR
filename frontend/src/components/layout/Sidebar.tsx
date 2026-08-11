@@ -1,41 +1,18 @@
 /**
  * Fixed 256px sidebar, collapsible below `lg`.
  *
- * Nav is ordered by workflow rather than alphabetically: upload a contract, review
- * what came out, ask questions across the repository, then watch the machinery and
- * configure it. That order is the product's own story.
- *
- * Two audiences see two different lists. An administrator governs the platform -
- * projects, people, master data - and reads everything, but does not put contracts
- * into it; a project member does the contract work. `Upload` is therefore absent
- * for an administrator rather than present-and-rejected, which would advertise a
- * screen whose every submission returns 403.
+ * The list, its order and the rules for who sees what all live in `./navigation`,
+ * which the top bar reads too. A screen named here and again there is a screen
+ * that will be renamed in one of them.
  */
 
-import {
-  AlertTriangle,
-  ChevronLeft,
-  ChevronRight,
-  FileDown,
-  FileSearch,
-  FileText,
-  FolderKanban,
-  Gauge,
-  Landmark,
-  LayoutDashboard,
-  ListChecks,
-  ScrollText,
-  Search,
-  Settings2,
-  Upload,
-  Users,
-  X,
-} from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { useAuth } from '@/lib/auth';
 import { initialsOf } from '@/lib/identity';
+import { NAV_ROUTES, navLabelOf, visibleTo } from './navigation';
+import type { NavRoute } from './navigation';
 
 const ClearLogo = ({ size = 50, className }: { size?: number; className?: string }) => (
   <img
@@ -48,104 +25,26 @@ const ClearLogo = ({ size = 50, className }: { size?: number; className?: string
   />
 );
 
-/** Who a nav item is for. `member` means "everyone except the administrator". */
-type Audience = 'all' | 'admin' | 'member';
-
-interface NavItem {
-  href: string;
-  label: string;
-  icon: LucideIcon;
-  audience?: Audience;
-  /**
-   * Show only to a holder of this permission, on any project.
-   *
-   * `audience` cannot express this: some screens are open to a role rather than
-   * to administrators, and Activity is the first - AUDIT_READ belongs to Project
-   * Manager, so `audience: 'admin'` would hide it from the people it is for.
-   */
-  permission?: string;
-  section?: string;
-}
-
-const NAV: NavItem[] = [
-  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/upload', label: 'Upload', icon: Upload, audience: 'member' },
-  { href: '/contracts', label: 'Contracts', icon: FileText },
-  // The cross-contract registers. Sits next to Contracts because it is the same
-  // corpus read the other way round: by obligation, date, risk and counterparty
-  // rather than by document.
-  { href: '/portfolio', label: 'Portfolio', icon: Landmark },
-  { href: '/search', label: 'Search', icon: Search },
-  // Disabled, not deleted - the Copilot moved into the drawer on a contract.
-  // The /copilot route still exists and still works. Restoring this entry needs
-  // the `Bot` icon import back; it was removed because this was its only use.
-  // { href: '/copilot', label: 'Copilot', icon: Bot },
-  { href: '/jobs', label: 'Processing', icon: ListChecks },
-  { href: '/doc-pipeline', label: 'Doc Pipeline', icon: FileSearch },
-  { href: '/alerts', label: 'Alerts', icon: AlertTriangle },
-  { href: '/exports', label: 'Exports', icon: FileDown },
-  {
-    href: '/admin/projects',
-    label: 'Business Unit',
-    icon: FolderKanban,
-    audience: 'admin',
-    section: 'Administration',
-  },
-  {
-    href: '/admin/users',
-    label: 'Users',
-    icon: Users,
-    audience: 'admin',
-    section: 'Administration',
-  },
-  {
-    href: '/clause-master',
-    label: 'Clause Master',
-    icon: Settings2,
-    audience: 'admin',
-    section: 'Administration',
-  },
-  {
-    href: '/admin/evaluation',
-    label: 'Retrieval Quality',
-    icon: Gauge,
-    audience: 'admin',
-    section: 'Administration',
-  },
-  {
-    href: '/admin/audit',
-    label: 'Activity',
-    icon: ScrollText,
-    permission: 'audit:read',
-    section: 'Administration',
-  },
-];
-
-const visibleTo = (item: NavItem, isAdmin: boolean, permissions: Set<string>) => {
-  if (item.permission) return isAdmin || permissions.has(item.permission);
-  if (item.audience === 'admin') return isAdmin;
-  if (item.audience === 'member') return !isAdmin;
-  return true;
-};
-
 const NavItemLink = ({
   item,
   pathname,
   onNavigate,
   isCollapsed,
 }: {
-  item: NavItem;
+  item: NavRoute;
   pathname: string;
   onNavigate: () => void;
   isCollapsed: boolean;
 }) => {
-  const { href, label, icon: Icon } = item;
-  const active = href === '/' ? pathname === '/' : pathname.startsWith(href);
+  const { path, nav } = item;
+  const Icon = nav.icon;
+  const label = navLabelOf(item);
+  const active = path === '/' ? pathname === '/' : pathname.startsWith(path);
 
   return (
     <div className="group/item relative">
       <NavLink
-        to={href}
+        to={path}
         onClick={onNavigate}
         className={[
           'flex items-center rounded-lg transition-colors',
@@ -199,10 +98,10 @@ export const Sidebar = ({
   const permissions = new Set(
     (user?.memberships ?? []).flatMap((membership) => membership.permissions),
   );
-  const items = NAV.filter((item) => visibleTo(item, isAdmin, permissions));
-  const primary = items.filter((item) => !item.section);
-  const governance = items.filter((item) => item.section);
-  const governanceHeading = governance[0]?.section;
+  const items = NAV_ROUTES.filter((route) => visibleTo(route.nav, isAdmin, permissions));
+  const primary = items.filter((route) => !route.nav.section);
+  const governance = items.filter((route) => route.nav.section);
+  const governanceHeading = governance[0]?.nav.section;
 
   return (
     <>
@@ -265,7 +164,7 @@ export const Sidebar = ({
           <div className="space-y-0.5">
             {primary.map((item) => (
               <NavItemLink
-                key={item.href}
+                key={item.path}
                 item={item}
                 pathname={pathname}
                 onNavigate={onClose}
@@ -284,7 +183,7 @@ export const Sidebar = ({
               {isCollapsed && <div className="mx-auto mb-2 h-px w-8 bg-white/10" />}
               {governance.map((item) => (
                 <NavItemLink
-                  key={item.href}
+                  key={item.path}
                   item={item}
                   pathname={pathname}
                   onNavigate={onClose}

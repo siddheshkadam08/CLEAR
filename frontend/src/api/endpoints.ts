@@ -174,9 +174,16 @@ export interface ContractFilters {
   agreement_type?: string[];
   risk_band?: string[];
   needs_review?: boolean;
-  expiring_before?: string;
-  expiring_after?: string;
+  /** Expiry window, inclusive. Named as the endpoint declares them.
+   *
+   * These were `expiring_after`/`expiring_before` - the same class of silent drop
+   * as `q` above, and it made the dashboard's "Expiring in 90 days" tile open a
+   * completely unfiltered list that still claimed one filter was active. */
+  expiry_from?: string;
+  expiry_to?: string;
   has_unlimited_liability?: boolean;
+  /** Contracts missing any mandatory clause, whichever one. */
+  missing_mandatory?: boolean;
   sort_by?: string;
   sort_dir?: string;
 }
@@ -333,7 +340,18 @@ export const copilot = {
     },
   ) => apiStream('/copilot/stream', body, handlers),
 
-  sessions: () => api.get<ChatSession[]>('/copilot/sessions'),
+  /**
+   * Your own conversations. `projectId` narrows to one business unit; `null` is
+   * "All Business Units" and returns every conversation you own.
+   *
+   * It matters more here than on other screens: a conversation is tied to the
+   * corpus it was asked against, so one from another unit opens a thread whose
+   * follow-ups would search the unit you have selected now.
+   */
+  sessions: (projectId?: UUID | null) =>
+    api.get<ChatSession[]>('/copilot/sessions', {
+      query: { project_id: projectId ?? undefined },
+    }),
   session: (id: UUID) => api.get<ChatSession>(`/copilot/sessions/${id}`),
   createSession: (body: {
     project_id?: UUID | null;
@@ -394,15 +412,21 @@ export const dashboard = {
 };
 
 /**
- * Insights over the document pipeline's own tables. Separate from `dashboard`
- * because the two count different things - see DocPipelinePage.
+ * Clause coverage: what extraction found, against what each document type's
+ * profile expects. Reads the platform's own `contracts` / `clauses` /
+ * `embeddings` tables, so it counts the same clauses `dashboard` does - it just
+ * measures them against the taxonomy instead of totalling them.
+ *
+ * The route keeps its `/docpipeline` path; only the screen was renamed.
  */
 export const docpipeline = {
   // `document(docid)` used to sit here, calling GET /docpipeline/documents/{docid}.
   // The API registers no such route - the only docpipeline endpoint is this one -
   // so it could only ever have 404'd. Nothing called it.
-  insights: (limit = 50) =>
-    api.get<DocPipelineInsights>('/docpipeline', { query: { limit } }),
+  insights: (projectId?: UUID | null, limit = 50) =>
+    api.get<DocPipelineInsights>('/docpipeline', {
+      query: { limit, project_id: projectId ?? undefined },
+    }),
 };
 
 /**
@@ -480,13 +504,25 @@ export const exports = {
   /**
    * Exports *this user* requested - the server scopes to the requester, not to
    * the project, because an export is a copy of data taken by a named person.
+   *
+   * `projectId` narrows within that, so the list follows the business-unit
+   * selector like every other screen. `null` is "All Business Units" and returns
+   * everything you requested.
    */
-  list: (filters: { page?: number; size?: number; status?: ExportStatus[] } = {}) =>
+  list: (
+    filters: {
+      page?: number;
+      size?: number;
+      status?: ExportStatus[];
+      projectId?: UUID | null;
+    } = {},
+  ) =>
     api.get<Paginated<ExportJob>>('/exports', {
       query: {
         page: filters.page ?? 1,
         size: filters.size ?? 20,
         status: filters.status?.length ? filters.status : undefined,
+        project_id: filters.projectId ?? undefined,
       },
     }),
 

@@ -6,3 +6,14 @@ import '@testing-library/jest-dom/vitest';
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
+
+// Same gap, same reason: jsdom ships no `ResizeObserver`. Anything that measures
+// itself to decide what to render - the clamped citation snippet deciding whether
+// a "Show more" is worth offering - constructs one in an effect.
+if (!('ResizeObserver' in globalThis)) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}

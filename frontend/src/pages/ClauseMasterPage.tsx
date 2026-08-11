@@ -100,7 +100,6 @@ export function ClauseMasterPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Clause Master"
         subtitle="Which clauses each agreement type is checked for. Changes apply to new uploads; contracts already processed keep the clauses they were extracted with."
         actions={
           isAdmin ? (

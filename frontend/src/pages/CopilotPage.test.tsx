@@ -14,17 +14,24 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { copilot as copilotApi } from '@/api/endpoints';
+import { copilot as copilotApi, dashboard as dashboardApi } from '@/api/endpoints';
 import type { CopilotSource, CopilotStreamDone } from '@/api/types';
 import { CopilotPage } from './CopilotPage';
 
 vi.mock('@/api/endpoints', () => ({
   copilot: {
     sessions: vi.fn(async () => []),
-    createSession: vi.fn(),
+    // Resolves, because the page now opens a session on the first question rather
+    // than waiting for "New chat" - a bare `vi.fn()` returns undefined and every
+    // test dies reading `.id` off it.
+    createSession: vi.fn(async () => ({ id: '33333333-3333-3333-3333-333333333333' })),
     session: vi.fn(),
     stream: vi.fn(),
   },
+  // The page checks whether this scope has anything indexed before offering a
+  // question box. Non-zero by default so the composer is live in these tests;
+  // the zero case has its own test at the bottom.
+  dashboard: { overview: vi.fn(async () => ({ kpis: [{ key: 'clauses_extracted', value: 135 }] })) },
 }));
 
 vi.mock('@/lib/scope', () => ({ useProjectScope: () => ({ projectId: null }) }));
@@ -242,5 +249,73 @@ describe('CopilotPage', () => {
 
     await waitFor(() => expect(screen.getByText(/interrupted/i)).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
+
+  it('opens a session on the first question, without being told to', async () => {
+    // Sent `session_id: null`, the API answers happily from *no history*, so the
+    // first reply looked right and every follow-up was silently stateless. The
+    // session also has to exist for the transcript to be saved at all.
+    answersWith('Thirty days.');
+    renderPage();
+
+    await ask('What is the notice period?');
+
+    await waitFor(() => expect(copilotApi.createSession).toHaveBeenCalledTimes(1));
+    const body = vi.mocked(copilotApi.stream).mock.calls[0]?.[0] as { session_id?: string };
+    expect(body.session_id).toBe('33333333-3333-3333-3333-333333333333');
+  });
+
+  it('offers starter questions as whole sentences, not keywords', async () => {
+    // The search matches on meaning, so a keyword carries almost none of it - a
+    // bare "Key risks?" scores 0.2936 against a 0.35 floor and is refused. Every
+    // starter must therefore read as a question a person would actually type.
+    renderPage();
+
+    const starter = await screen.findByRole('button', {
+      name: /what are the key risks across these agreements\?/i,
+    });
+    expect(starter).toBeInTheDocument();
+
+    for (const label of [
+      /what confidentiality obligations do these agreements impose\?/i,
+      /which obligations fall due under these agreements\?/i,
+      /what notice deadlines apply under these agreements\?/i,
+    ]) {
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it('sends a starter with the answer format it advertises', async () => {
+    // Clicking sets the dropdown and asks in one go. `setFormat` is asynchronous,
+    // so reading component state here would send the *previous* format - which is
+    // why `ask` takes an explicit override.
+    answersWith('Uncapped indemnity in the MSA.');
+    renderPage();
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole('button', {
+        name: /what are the key risks across these agreements\?/i,
+      }),
+    );
+
+    await waitFor(() => expect(copilotApi.stream).toHaveBeenCalled());
+    const body = vi.mocked(copilotApi.stream).mock.calls[0]?.[0] as { response_format?: string };
+    expect(body.response_format).toBe('risk_report');
+  });
+
+  it('says so when the business unit has nothing indexed, rather than taking a question it cannot answer', async () => {
+    // A scope whose contracts have not finished processing refuses every question -
+    // correctly, and in wording indistinguishable from broken retrieval. Two of the
+    // four business units on the dev box are in exactly this state.
+    vi.mocked(dashboardApi.overview).mockResolvedValue({
+      kpis: [{ key: 'clauses_extracted', value: 0 }],
+    } as never);
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByText(/nothing to search here yet/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(/your question/i)).toBeDisabled();
   });
 });

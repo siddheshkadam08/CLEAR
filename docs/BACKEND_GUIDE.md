@@ -1157,10 +1157,10 @@ Scale one independently:
 podman compose up -d --scale worker-ai=4
 ```
 
-## 10.5 The scheduler
+## 10.5 The maintenance sweeps
 
-A separate small service (`python -m app.cli scheduler`) sweeps every 60 seconds. It
-exists because several things can be silently left behind:
+Every 60 seconds, inside each worker, a sweep runs. It exists because several things
+can be silently left behind:
 
 | Sweep | What it fixes |
 | --- | --- |
@@ -1169,7 +1169,20 @@ exists because several things can be silently left behind:
 | **Expired-export purge** | Deletes export files past their retention window, so an export does not become a permanent second copy of contract data. |
 
 Time-based alerts (renewal and expiry deadlines) are evaluated on the same schedule —
-something has to notice a deadline passing.
+something has to notice a deadline passing. That is the sweep whose absence is hardest
+to spot: nothing errors, the Alerts screen simply stays empty.
+
+**These used to be a separate `scheduler` container.** They now run in the worker
+processes, guarded by a Postgres advisory lock (`pg_try_advisory_lock`) taken on a
+dedicated connection, so exactly one worker performs them per tick however many are
+running. That removes a container, and removes a single point of failure with it: a
+lost scheduler took alert evaluation with it silently, whereas the sweeps now survive
+as long as any worker does.
+
+Set `WORKER_MAINTENANCE=false` and run `python -m app.cli scheduler` to split them
+back into their own process. Note this is **not** BullMQ's `QueueScheduler`, which
+this queue has never used and which BullMQ v5 does not have — that promoted delayed
+jobs inside the broker; these sweeps are about the application's own state.
 
 ## 10.6 Dead letters
 
@@ -1438,7 +1451,6 @@ host, which is the right default for a stack holding contract text.
 | `queue` | The Node BullMQ dispatcher + workers. |
 | `worker-parser` | Python worker pool for stages 1–5. |
 | `worker-ai` | Python worker pool for stages 6–8. |
-| `scheduler` | Reclaims stalled jobs; evaluates time-based alerts. |
 | `frontend` | The React app. |
 | `otel-collector`, `prometheus`, `grafana`, `jaeger` | Observability. |
 | `embedding-check` | **Not a service — a gate.** Run under the `nvidia` profile; it probes the provider and exits non-zero if credentials are rejected or the dimension disagrees with the schema, so a bad config fails in seconds instead of on stage 7 of the first upload. |
@@ -1560,7 +1572,7 @@ it needs no new setting.
 | `downgrade <rev>` | Roll back. |
 | `current` | Show the current migration revision. |
 | `seed` | Seed roles, admin, clause master and profiles. |
-| `scheduler` | Run the stalled-job sweeper loop. |
+| `scheduler` | Run the maintenance sweeps standalone. Not needed normally — the workers run them. |
 | `reprocess --job <id> --from-stage <stage>` | Re-run a pipeline stage. |
 | `stages` | Show which stage handlers loaded, and why any failed. |
 | `embeddings` | Probe the embedding provider; print the configuration. |

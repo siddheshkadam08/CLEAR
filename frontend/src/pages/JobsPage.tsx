@@ -34,7 +34,7 @@ import { Badge } from '@/components/common/Badge';
 import { formatStatusLabel, getStatusVariant } from '@/lib/badges';
 import { ErrorBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
-import { ACCENTS, Card, MetricCard, PageHeader, SectionHeader } from '@/components/common/Card';
+import { ACCENTS, Card, MetricCard, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { FilterChip } from '@/components/common/FilterChip';
 import { selectClasses, SelectChevron } from '@/components/common/Field';
@@ -102,7 +102,6 @@ export function JobsPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Processing"
         subtitle="Six stages per contract. Each stage checkpoints, so a retry resumes rather than restarts."
       />
 
@@ -160,49 +159,10 @@ export function JobsPage() {
         </div>
       ) : null}
 
-      {health && health.queues.length ? (
-        <Card className="overflow-hidden">
-          <SectionHeader
-            title="Queues"
-            subtitle="Depth per stage. Delayed rows are waiting out a retry backoff, not stuck."
-            icon={ListChecks}
-          />
-          <div className="-mx-6 overflow-x-auto px-6">
-            <table className="w-full min-w-[34rem] text-left text-sm">
-              <thead className="border-b border-slate-200 dark:border-slate-700 text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                <tr>
-                  <th scope="col" className="py-2 pr-4 font-semibold">Queue</th>
-                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Waiting</th>
-                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Active</th>
-                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Delayed</th>
-                  <th scope="col" className="py-2 pr-4 text-right font-semibold">Failed</th>
-                  <th scope="col" className="py-2 text-right font-semibold">Completed</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {health.queues.map((queue) => (
-                  <tr key={queue.queue}>
-                    <td className="py-2 pr-4 font-mono text-xs text-slate-700">
-                      {queue.queue}
-                    </td>
-                    <td className="py-2 pr-4 text-right tabular-nums">{queue.waiting}</td>
-                    <td className="py-2 pr-4 text-right tabular-nums">{queue.active}</td>
-                    <td className="py-2 pr-4 text-right tabular-nums">{queue.delayed}</td>
-                    <td
-                      className={`py-2 pr-4 text-right tabular-nums ${queue.failed ? 'font-semibold text-rose-600' : ''}`}
-                    >
-                      {queue.failed}
-                    </td>
-                    <td className="py-2 text-right tabular-nums text-slate-500">
-                      {queue.completed}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      ) : null}
+      {/* A per-queue depth table used to sit here. It described the broker rather
+          than the work: the counts below and the job list already say what is in
+          flight, stalled or dead, and in the terms this screen is about. The
+          endpoint still returns `queues` for anything that wants it. */}
 
       <Card dense>
         <div className="flex flex-wrap gap-2">

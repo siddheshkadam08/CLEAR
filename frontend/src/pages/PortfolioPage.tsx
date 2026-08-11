@@ -111,7 +111,6 @@ export function PortfolioPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Portfolio"
         subtitle="Obligations, dates, risks and counterparties across every contract you can see."
       />
 

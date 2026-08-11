@@ -255,9 +255,12 @@ export function ContractDetailPage() {
 
       <header className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
-          <h1 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
+          {/* An `h2`, under the shell's "Contracts": this is the one heading the
+              layout cannot know, so it sits below the screen's name rather than
+              competing with it. */}
+          <h2 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
             {contract.title ?? contract.original_file_name}
-          </h1>
+          </h2>
           
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
             <span>{formatAgreementType(contract.agreement_type)}</span>

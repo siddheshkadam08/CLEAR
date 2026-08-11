@@ -315,6 +315,26 @@ class ExportService:
             download_filename=job.file_name,
         )
 
+        # An adapter that cannot sign returns an API path instead of a URL, and the
+        # one the local adapter builds - `/api/v1/files/{container}/{key}` - has no
+        # route behind it. Nothing serves it and nothing ever did, so on local
+        # storage every export download 404'd while the export itself was fine.
+        #
+        # `/exports/{id}/content` streams the same bytes. The token is what makes it
+        # reachable: the UI follows this URL by navigating the tab to it, so it
+        # carries no Authorization header and has to authenticate itself - the same
+        # job a presigned URL does for object storage.
+        if url.startswith("/api/"):
+            from app.core.security import create_download_token
+
+            token = create_download_token(
+                user_id,
+                resource="export",
+                resource_id=job.id,
+                ttl_seconds=DOWNLOAD_URL_TTL_SECONDS,
+            )
+            url = f"/api/v1/exports/{job.id}/content?token={token}"
+
         job.downloaded_at = datetime.now(UTC)
         job.download_count += 1
 

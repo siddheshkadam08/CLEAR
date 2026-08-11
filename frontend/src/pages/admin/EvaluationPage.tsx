@@ -14,7 +14,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Activity, AlertTriangle, CheckCircle2, TrendingDown, TrendingUp } from 'lucide-react';
 
 import { evaluation as evaluationApi } from '@/api/endpoints';
-import { errorMessage } from '@/api/errors';
+import { ApiError, errorMessage } from '@/api/errors';
 import type { EvaluationLatest, EvaluationRun } from '@/api/types';
 import { Badge } from '@/components/common/Badge';
 import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
@@ -40,17 +40,32 @@ export function EvaluationPage() {
   const runs = runsQuery.data?.runs ?? [];
   const latest = latestQuery.data;
 
+  // A 404 from `latest` is the expected shape of "no runs yet", not a failure.
+  // Anything else is: a 403, a 500 and an unreachable API all used to fall
+  // through to the empty state below, so "the backend is down" was indis-
+  // tinguishable from "nobody has run the benchmark" - the one message that
+  // makes you stop looking.
+  const failure = [runsQuery.error, latestQuery.error].find(
+    (error) => error && !(error instanceof ApiError && error.isNotFound),
+  );
+
+  if (failure) {
+    return (
+      <div className="space-y-5">
+        <PageHeader subtitle="Benchmark results for the Copilot's retrieval and answering pipeline." />
+        <ErrorBanner message={errorMessage(failure)} onRetry={() => void runsQuery.refetch()} />
+      </div>
+    );
+  }
+
   if (!latest || !runs.length) {
     return (
       <div className="space-y-5">
-        <PageHeader
-          title="Retrieval quality"
-          subtitle="Benchmark results for the Copilot's retrieval and answering pipeline."
-        />
+        <PageHeader subtitle="Benchmark results for the Copilot's retrieval and answering pipeline." />
         <EmptyState
           icon={Activity}
           title="No benchmark has been recorded"
-          description="Run `python -m app.evaluation.cli benchmark` and point EVALUATION_RESULTS_DIR at the directory it writes. Until then there is nothing to compare against, and every threshold in the pipeline is unmeasured."
+          description="Run `python -m app.evaluation.cli benchmark --dataset <name>`. It writes to EVALUATION_RESULTS_DIR, which is the directory this screen reads. Until then there is nothing to compare against, and every threshold in the pipeline is unmeasured."
         />
       </div>
     );
@@ -64,12 +79,10 @@ export function EvaluationPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Retrieval quality"
-        subtitle={`${latest.summary.dataset} · ${latest.summary.cases} cases · ${latest.summary.label}`}
-      />
-
-      {runsQuery.isError ? <ErrorBanner message={errorMessage(runsQuery.error)} /> : null}
+      {/* Run metadata moved into the gate banner below, where it labels the
+          verdict it belongs to. As the page's only description it read as an
+          orphaned breadcrumb. */}
+      <PageHeader subtitle="Benchmark results for the Copilot's retrieval and answering pipeline." />
 
       <div
         className={[
@@ -86,6 +99,9 @@ export function EvaluationPage() {
         )}
         <div>
           <p className="font-semibold">{latest.summary.summary}</p>
+          <p className="mt-1 text-sm opacity-80">
+            {latest.summary.dataset} · {latest.summary.cases} cases · {latest.summary.label}
+          </p>
           {latest.summary.failures ? (
             <p className="mt-1 text-sm">
               {latest.summary.failures} case(s) failed to execute and were excluded from every

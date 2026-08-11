@@ -167,23 +167,21 @@ def scheduler(
     ),
     interval_seconds: int = typer.Option(60, help="Sweep interval."),
 ) -> None:
-    """Run the background scheduler.
+    """Run the maintenance sweeps as a standalone process.
 
-    Four jobs, each of which exists because something can be left behind:
+    **Not required in a normal deployment.** Every worker runs the same sweeps itself
+    (see ``app.orchestrator.maintenance``), which is what removes the ``scheduler``
+    service from compose. This command exists for deployments that would rather run
+    them apart from the pipeline, and for running a sweep by hand.
 
-    * **Stalled-job reclamation.** A crashed worker leaves a job running forever, and
-      the contract sits in "processing" with nothing working on it. The heartbeat is
-      what distinguishes that from a genuinely slow parse.
-    * **Alert evaluation.** Renewal and expiry deadlines are time-based, so something
-      has to notice them passing. Runs on its own cadence
-      (``ALERT_EVALUATOR_INTERVAL_MINUTES``, hourly by default) rather than every
-      sweep - see ``evaluate-alerts`` to run one pass by hand.
-    * **Stalled-export recovery.** An export runs as a background task, which dies
-      with its process; the row is what survives, and a row stuck in "running" is a
-      progress bar the user watches forever.
-    * **Expired-export purge.** An export file is a second copy of contract data in
-      object storage. Keeping it past its retention window turns every export into a
-      permanent copy outside the contract's own lifecycle.
+    Running both is safe: the sweeps take a Postgres advisory lock, so only one
+    process anywhere performs them per tick. Set ``WORKER_MAINTENANCE=false`` on the
+    workers if the sweeps are split out this way, so they stop trying for a lock they
+    will never need.
+
+    Not to be confused with BullMQ's ``QueueScheduler``, which this queue has never
+    used and which BullMQ v5 does not have - that promoted delayed jobs inside the
+    broker, whereas these sweeps are about the application's own state.
     """
     configure_logging()
     _echo(
@@ -191,120 +189,22 @@ def scheduler(
         f"stalled after {stalled_timeout_minutes}m)."
     )
     try:
-        _run(_scheduler_loop(stalled_timeout_minutes, interval_seconds))
+        _run(_standalone_scheduler(stalled_timeout_minutes, interval_seconds))
     except KeyboardInterrupt:  # pragma: no cover - operator ctrl-c
         _echo("Scheduler stopped.")
 
 
-async def _scheduler_loop(stalled_timeout_minutes: int, interval_seconds: int) -> None:
-    from app.core.config import get_settings
-    from app.db.session import session_scope, shutdown_engine
-
-    # The alert sweep runs on its own, much slower cadence. Reclamation has to be
-    # prompt because a stalled job blocks a user; alert conditions move by the
-    # calendar, and re-deriving every contract's deadlines once a minute would be
-    # a full-table scan per minute to reach the same answer.
-    #
-    # Due immediately on the first tick, so a freshly started scheduler populates
-    # the Alerts screen rather than leaving it empty for an hour.
-    alert_interval = get_settings().alerts.evaluator_interval_minutes * 60
-    next_alert_sweep = 0.0
+async def _standalone_scheduler(stalled_timeout_minutes: int, interval_seconds: int) -> None:
+    from app.db.session import shutdown_engine
+    from app.orchestrator.maintenance import maintenance_loop
 
     try:
-        while True:
-            try:
-                async with session_scope() as db:
-                    reclaimed = await _reclaim_stalled(db, stalled_timeout_minutes)
-                if reclaimed:
-                    logger.info("scheduler_reclaimed_jobs", count=reclaimed)
-            except Exception as exc:
-                logger.exception("scheduler_sweep_failed", error=str(exc))
-
-            # Stage-queue leases. The job-level reclamation above notices a
-            # contract whose worker went quiet; this notices the queue *row* it
-            # was holding. Without it a worker killed mid-stage leaves its row
-            # `claimed` forever and nothing else will ever pick that stage up.
-            #
-            # Only meaningful for the Postgres driver - BullMQ has its own
-            # visibility handling - so it is skipped rather than made conditional
-            # inside the driver.
-            try:
-                if get_settings().queue.driver == "postgres":
-                    from app.orchestrator.queue import PostgresQueueDriver
-
-                    leases = await PostgresQueueDriver().reclaim_stale(
-                        lease_seconds=stalled_timeout_minutes * 60
-                    )
-                    if leases:
-                        logger.info("scheduler_reclaimed_leases", count=leases)
-            except Exception as exc:
-                logger.exception("scheduler_lease_sweep_failed", error=str(exc))
-
-            # Export sweeps run in their own session and their own try block: a
-            # failure here must not stop the pipeline reclamation above from
-            # running on the next tick, and vice versa.
-            try:
-                async with session_scope() as db:
-                    from app.export.service import ExportService
-
-                    service = ExportService(db)
-                    recovered = await service.recover_stalled()
-                    purged = await service.purge_expired()
-                if recovered or purged:
-                    logger.info("scheduler_export_sweep", recovered=recovered, purged=purged)
-            except Exception as exc:
-                logger.exception("scheduler_export_sweep_failed", error=str(exc))
-
-            # Alert evaluation. Expiries, renewal notice windows, obligation
-            # deadlines, risk scores and review backlogs - none of which anything
-            # pushes, so this is the only thing that notices them.
-            if asyncio.get_running_loop().time() >= next_alert_sweep:
-                next_alert_sweep = asyncio.get_running_loop().time() + alert_interval
-                try:
-                    async with session_scope() as db:
-                        from app.services.alert_evaluator import AlertEvaluator
-
-                        outcome = await AlertEvaluator(db).run()
-                    if outcome.changed():
-                        logger.info("scheduler_alert_sweep", **outcome.as_log_fields())
-                except Exception as exc:
-                    logger.exception("scheduler_alert_sweep_failed", error=str(exc))
-
-            await asyncio.sleep(interval_seconds)
+        await maintenance_loop(
+            stalled_timeout_minutes=stalled_timeout_minutes,
+            interval_seconds=interval_seconds,
+        )
     finally:
         await shutdown_engine()
-
-
-async def _reclaim_stalled(db: Any, timeout_minutes: int) -> int:
-    """Fail jobs whose worker stopped reporting.
-
-    Marked failed rather than requeued: the stage may have been part-way through
-    writing rows, and re-running it blindly could duplicate work that the stage's own
-    cleanup would otherwise have handled. A failed job is visible and can be
-    reprocessed deliberately.
-    """
-    from app.core.enums import JobState
-    from app.repositories.processing import ProcessingJobRepository
-
-    repository = ProcessingJobRepository(db)
-    stalled = await repository.find_stalled(timeout_minutes=timeout_minutes)
-    for job in stalled:
-        logger.warning(
-            "job_stalled",
-            job_id=str(job.id),
-            contract_id=str(job.contract_id),
-            state=job.state.value if hasattr(job.state, "value") else str(job.state),
-            heartbeat_at=job.heartbeat_at.isoformat() if job.heartbeat_at else None,
-        )
-        await repository.update(
-            job,
-            state=JobState.FAILED,
-            error_message=(
-                f"The worker stopped reporting for more than {timeout_minutes} minutes. "
-                "Reprocess the contract to resume."
-            ),
-        )
-    return len(stalled)
 
 
 @app.command(name="evaluate-alerts")
@@ -423,6 +323,19 @@ async def _worker_loop(worker_id: str, poll_seconds: float, lease_seconds: int) 
     # the others are idle.
     running: dict[PipelineStage, set[asyncio.Task[None]]] = {stage: set() for stage in STAGE_ORDER}
 
+    # The maintenance sweeps, same as `worker_app` starts for the BullMQ pools. Both
+    # entry points run them because either can be the only worker a deployment has -
+    # this one is what `docker-compose.vm.yml` runs. The advisory lock inside makes
+    # running several of them, of either kind, safe.
+    #
+    # Beside the claim loop, not inside it: a sweep must not delay claiming, and a
+    # claim loop busy with eight stages must not delay a sweep.
+    maintenance: asyncio.Task[None] | None = None
+    if settings.worker_maintenance:
+        from app.orchestrator.maintenance import maintenance_loop
+
+        maintenance = asyncio.create_task(maintenance_loop())
+
     try:
         while True:
             claimed_any = False
@@ -446,6 +359,12 @@ async def _worker_loop(worker_id: str, poll_seconds: float, lease_seconds: int) 
             if not claimed_any:
                 await asyncio.sleep(poll_seconds)
     finally:
+        # Cancelled first, and awaited: the sweep holds an advisory lock on its own
+        # connection, and tearing the engine down underneath it would leak both.
+        if maintenance is not None:
+            maintenance.cancel()
+            await asyncio.gather(maintenance, return_exceptions=True)
+
         in_flight = [task for tasks in running.values() for task in tasks]
         if in_flight:
             _echo(f"Finishing {len(in_flight)} in-flight stage(s)...")

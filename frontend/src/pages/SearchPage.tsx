@@ -10,7 +10,7 @@
 
 import { useMutation } from '@tanstack/react-query';
 import { Route, SearchX, Search as SearchIcon, Sparkles } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { search as searchApi } from '@/api/endpoints';
@@ -48,6 +48,15 @@ export function SearchPage() {
     onSuccess: setResult,
   });
 
+  // Results live in component state, filled by a mutation, so react-query's key
+  // does not invalidate them the way it does every other screen - switching
+  // business unit left the previous unit's hits on screen, still citing contracts
+  // the new scope does not contain. Stale rows that look current are worse than
+  // no rows: nothing about them says they are from somewhere else.
+  useEffect(() => {
+    setResult(null);
+  }, [projectId]);
+
   function submit(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -58,7 +67,6 @@ export function SearchPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Search"
         subtitle="Ask in plain language, or search for exact wording. Results are scoped to the projects you belong to."
       />
 

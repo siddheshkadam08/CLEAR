@@ -17,6 +17,7 @@ implementation to drift.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -69,9 +70,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             detail="This worker can run nothing. Check WORKER_ROLE and the import errors.",
         )
 
+    # The periodic sweeps that used to be their own `scheduler` container: stalled-job
+    # reclamation, export recovery and purge, alert evaluation. They live here rather
+    # than in the API because they are pipeline housekeeping, and because a worker is
+    # already sized for background work while the API is sized for request latency.
+    #
+    # Every worker in every pool starts one of these. That is safe, and deliberate: the
+    # sweep takes a Postgres advisory lock, so exactly one of them performs the work per
+    # tick and the rest return immediately. It also means the sweeps survive losing any
+    # single worker, which a dedicated container did not.
+    maintenance: asyncio.Task[None] | None = None
+    if settings.worker_maintenance:
+        from app.orchestrator.maintenance import maintenance_loop
+
+        maintenance = asyncio.create_task(maintenance_loop())
+        logger.info("worker_maintenance_started")
+
     yield
 
     from app.db.session import shutdown_engine
+
+    # Cancelled and awaited before the engine goes: the sweep holds an advisory lock on
+    # a connection of its own, and disposing the engine underneath it would leak both.
+    if maintenance is not None:
+        maintenance.cancel()
+        await asyncio.gather(maintenance, return_exceptions=True)
 
     await shutdown_engine()
     shutdown_telemetry()

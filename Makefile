@@ -63,7 +63,7 @@ ps: ## Show service status
 
 .PHONY: restart-backend
 restart-backend: ## Rebuild + restart backend only
-	$(COMPOSE) up -d --build backend worker-parser worker-ai scheduler
+	$(COMPOSE) up -d --build backend worker-parser worker-ai
 
 # ------------------------------------------------------------------ database
 .PHONY: migrate

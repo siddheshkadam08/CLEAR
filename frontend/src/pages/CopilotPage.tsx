@@ -22,6 +22,7 @@ import {
   Bot,
   Check,
   Copy,
+  FileQuestion,
   MessageSquarePlus,
   PanelLeft,
   RotateCcw,
@@ -31,7 +32,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import { copilot as copilotApi } from '@/api/endpoints';
+import { copilot as copilotApi, dashboard as dashboardApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
 import type {
   ChatMessage,
@@ -51,6 +52,7 @@ import { Card, PageHeader } from '@/components/common/Card';
 import { EmptyState } from '@/components/common/EmptyState';
 import { inputClasses, selectClasses, SelectChevron } from '@/components/common/Field';
 import { Markdown } from '@/components/common/Markdown';
+import { SourceSnippet } from '@/components/common/SourceSnippet';
 import { formatDateTime, formatPercent, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
@@ -89,6 +91,36 @@ const FORMATS: { value: '' | ResponseFormat; label: string }[] = [
   { value: 'timeline', label: 'Timeline' },
 ];
 
+/**
+ * Starter questions - one per answer format, shown and sent verbatim.
+ *
+ * Whole sentences, because the search matches on meaning and two words carry very
+ * little of it: a bare "Key risks?" scores 0.2936 against a 0.35 floor and is
+ * refused, while the sentence below clears it comfortably. Offering keywords would
+ * teach exactly the habit that makes the product look broken.
+ *
+ * Each is paired with the format it suits and *sets that dropdown when clicked*, so
+ * the control is discovered by using it rather than by reading five labels and
+ * guessing which changes what.
+ *
+ * Every one was asked against the live corpus before being listed, and all five came
+ * back answered with citations. That check is the point: a suggested question that
+ * refuses is the product proposing something it cannot do. Two earlier drafts were
+ * cut by it - "When do these agreements expire?" (no expiry dates extracted) and
+ * "What obligations do these agreements place on us?", which fails on the word *us*:
+ * the evidence never says which party the reader is.
+ *
+ * They are phrased across the corpus - "these agreements", not "this agreement" -
+ * because that is what this page does and the contract drawer does not.
+ */
+const SUGGESTIONS: { question: string; format: '' | ResponseFormat }[] = [
+  { question: 'What confidentiality obligations do these agreements impose?', format: '' },
+  { question: 'Summarise the commercial terms of these agreements.', format: 'executive_summary' },
+  { question: 'What are the key risks across these agreements?', format: 'risk_report' },
+  { question: 'Which obligations fall due under these agreements?', format: 'action_items' },
+  { question: 'What notice deadlines apply under these agreements?', format: 'timeline' },
+];
+
 export function CopilotPage() {
   const { projectId } = useProjectScope();
   const queryClient = useQueryClient();
@@ -102,9 +134,37 @@ export function CopilotPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const sessionsQuery = useQuery({
-    queryKey: ['copilot-sessions'],
-    queryFn: () => copilotApi.sessions(),
+    // Keyed on the business unit, which is what makes the list refetch when the
+    // header changes. Without it you keep the previous unit's conversations, and
+    // opening one gives a thread whose follow-ups search a different corpus.
+    queryKey: ['copilot-sessions', projectId],
+    queryFn: () => copilotApi.sessions(projectId),
   });
+
+  /**
+   * Whether this scope has anything to answer from.
+   *
+   * A business unit whose contracts have not finished processing has nothing
+   * indexed, so every question is refused - correctly, and in wording that reads
+   * exactly like broken retrieval. Better to say so before the question than to
+   * take one and answer it with a shrug.
+   *
+   * Deliberately the *same* query key the dashboard uses, so this is usually
+   * served from cache rather than costing a request. `clauses_extracted` is the
+   * signal: no clause was extracted from anything here, so nothing was embedded
+   * either. It is a proxy - clause detection can succeed where embedding failed -
+   * which is why the message below talks about processing rather than promising
+   * anything about the index. In that case this simply does not fire and the
+   * user gets the ordinary refusal.
+   */
+  const { data: scopeOverview } = useQuery({
+    queryKey: ['dashboard', projectId],
+    queryFn: () => dashboardApi.overview(projectId),
+    staleTime: 60_000,
+  });
+  const nothingIndexed =
+    scopeOverview !== undefined &&
+    (scopeOverview.kpis.find((kpi) => kpi.key === 'clauses_extracted')?.value ?? 0) === 0;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -139,8 +199,13 @@ export function CopilotPage() {
    * question further down the thread.
    */
   const ask = useCallback(
-    async (text: string, retryTurnId?: string) => {
+    async (text: string, retryTurnId?: string, formatOverride?: '' | ResponseFormat) => {
       if (!text || streaming) return;
+
+      // `formatOverride` exists for the starter questions, which set the dropdown
+      // and ask in the same click: `setFormat` is asynchronous, so reading `format`
+      // here would send the format selected *before* the click.
+      const chosenFormat = formatOverride ?? format;
 
       const turnId = retryTurnId ?? `${Date.now()}:${text.slice(0, 24)}`;
       const blank: Turn = {
@@ -171,12 +236,26 @@ export function CopilotPage() {
         );
 
       try {
+        // Open a session on the first question rather than waiting for "New chat".
+        //
+        // Without one the API is sent `session_id: null`, which it accepts and
+        // answers - from *no history*. So the first answer looked right and every
+        // follow-up was silently stateless: "what notice period does that require?"
+        // resolved against nothing, and the transcript was never saved. Failing
+        // visibly would have been better; answering plausibly is the bad case.
+        let sid = sessionId;
+        if (!sid) {
+          sid = (await copilotApi.createSession({ project_id: projectId })).id;
+          setSessionId(sid);
+          await queryClient.invalidateQueries({ queryKey: ['copilot-sessions'] });
+        }
+
         await copilotApi.stream(
           {
             query: text,
             project_id: projectId,
-            session_id: sessionId,
-            response_format: format || null,
+            session_id: sid,
+            response_format: chosenFormat || null,
           },
           {
             signal: controller.signal,
@@ -276,8 +355,7 @@ export function CopilotPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        // title="Copilot"
-        // subtitle="Answers come only from your contracts, with a citation for every claim. When the contracts do not say, the answer says so."
+        subtitle="Answers come only from your contracts, with a citation for every claim. When the contracts do not say, the answer says so."
         actions={
           <>
             <Button
@@ -318,12 +396,48 @@ export function CopilotPage() {
 
         <div className="min-w-0 space-y-4">
           <div className="space-y-4">
-            {turns.length === 0 ? (
+            {turns.length === 0 && nothingIndexed ? (
               <EmptyState
-                icon={Bot}
-                title="Ask about your contracts"
-                description="Try: “Which agreements let the counterparty terminate for convenience?” or “Summarise the indemnities in the Acme MSA.” Answers are drawn only from contracts in the projects you belong to."
+                icon={FileQuestion}
+                title="Nothing to search here yet"
+                description="No contract in this business unit has finished processing, so there is nothing for the Copilot to read. Switch business unit, or upload a contract and wait for it to finish."
               />
+            ) : turns.length === 0 ? (
+              <Card className="text-center">
+                <Bot className="mx-auto h-8 w-8 text-slate-300 dark:text-slate-600" aria-hidden />
+                <p className="mt-2 text-sm font-medium text-slate-700 dark:text-slate-200">
+                  Ask across every contract in this business unit
+                </p>
+                <p className="mx-auto mt-1 max-w-md text-xs text-slate-500 dark:text-slate-400">
+                  Whole questions work better than keywords — the search matches on meaning,
+                  and two words carry very little of it. Answers are drawn only from
+                  contracts in the projects you belong to.
+                </p>
+                {/* Stacked rows rather than pills: these are sentences, and a pill
+                    that wraps to three lines stops looking like one control. Each
+                    shows exactly what it will ask, so the advice above and the
+                    buttons below say the same thing. */}
+                <div className="mx-auto mt-4 flex max-w-md flex-col gap-2">
+                  {SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion.question}
+                      type="button"
+                      onClick={() => {
+                        setFormat(suggestion.format);
+                        void ask(suggestion.question, undefined, suggestion.format);
+                      }}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-xs font-medium leading-5 text-slate-600 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    >
+                      <span className="min-w-0">{suggestion.question}</span>
+                      {/* The format each one will switch to, so the dropdown is
+                          explained by using it rather than by guesswork. */}
+                      <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                        {FORMATS.find((f) => f.value === suggestion.format)?.label}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </Card>
             ) : (
               turns.map((turn) => (
                 <TurnView
@@ -346,10 +460,18 @@ export function CopilotPage() {
               submit();
             }}
           >
+            {/* Disabled when there is nothing indexed: the only honest action in
+                that state is to change business unit or wait for processing, and
+                offering a question box implies one of them would be answered. */}
             <textarea
               rows={2}
-              placeholder="Ask a question about your contracts"
+              placeholder={
+                nothingIndexed
+                  ? 'No processed contracts in this business unit'
+                  : 'Ask a question about your contracts'
+              }
               aria-label="Your question"
+              disabled={nothingIndexed}
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
               onKeyDown={(event) => {
@@ -358,7 +480,7 @@ export function CopilotPage() {
                   submit();
                 }
               }}
-              className={`${inputClasses} resize-none`}
+              className={`${inputClasses} resize-none disabled:cursor-not-allowed disabled:bg-slate-50 dark:disabled:bg-slate-900`}
             />
             <div className="mt-2 flex items-center gap-2">
               <div className="relative w-36 sm:w-44">
@@ -386,7 +508,11 @@ export function CopilotPage() {
                   Stop
                 </Button>
               ) : (
-                <Button type="submit" icon={SendHorizonal} disabled={!question.trim()}>
+                <Button
+                  type="submit"
+                  icon={SendHorizonal}
+                  disabled={!question.trim() || nothingIndexed}
+                >
                   Ask
                 </Button>
               )}
@@ -604,7 +730,7 @@ function SourceList({ turn }: { turn: Turn }) {
                   </span>
                 ) : null}
               </p>
-              <p className="mt-1 text-xs leading-6 text-slate-500">{row.text}</p>
+              <SourceSnippet text={row.text} className="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400" />
             </div>
           </li>
         ))}

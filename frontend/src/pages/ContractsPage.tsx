@@ -78,9 +78,11 @@ export function ContractsPage() {
     risk_band: params.getAll('risk_band'),
     agreement_type: params.getAll('agreement_type'),
     needs_review: params.get('needs_review') === 'true' ? true : undefined,
-    expiring_before: params.get('expiring_before') ?? undefined,
+    expiry_from: params.get('expiry_from') ?? undefined,
+    expiry_to: params.get('expiry_to') ?? undefined,
     has_unlimited_liability:
       params.get('has_unlimited_liability') === 'true' ? true : undefined,
+    missing_mandatory: params.get('missing_mandatory') === 'true' ? true : undefined,
     sort_by: params.get('sort_by') ?? undefined,
     sort_dir: params.get('sort_dir') ?? undefined,
   };
@@ -104,10 +106,13 @@ export function ContractsPage() {
   if (filters.has_unlimited_liability !== undefined) {
     exportFilters.has_unlimited_liability = filters.has_unlimited_liability;
   }
-  if (filters.expiring_before || filters.expiring_after) {
+  if (filters.missing_mandatory !== undefined) {
+    exportFilters.missing_mandatory = filters.missing_mandatory;
+  }
+  if (filters.expiry_from || filters.expiry_to) {
     exportFilters.expiration_date = {
-      from: filters.expiring_after ?? null,
-      to: filters.expiring_before ?? null,
+      from: filters.expiry_from ?? null,
+      to: filters.expiry_to ?? null,
     };
   }
 
@@ -181,7 +186,8 @@ export function ContractsPage() {
     (filters.search ? 1 : 0) +
     (filters.needs_review ? 1 : 0) +
     (filters.has_unlimited_liability ? 1 : 0) +
-    (filters.expiring_before ? 1 : 0);
+    (filters.missing_mandatory ? 1 : 0) +
+    (filters.expiry_from || filters.expiry_to ? 1 : 0);
 
   const needle = searchInput.trim().toLowerCase();
   const filteredItems = needle && data?.items
@@ -199,11 +205,15 @@ export function ContractsPage() {
 
   return (
     <div className="space-y-5">
+      {/* The filter count is appended, not substituted: it used to replace the
+          description, so the one sentence saying what this screen is disappeared
+          exactly when the list stopped being self-explanatory. */}
       <PageHeader
-        // title="Contracts"
-        subtitle={activeFilterCount ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : 'Your contract repository'}
-        title=""
-        // subtitle=""
+        subtitle={
+          activeFilterCount
+            ? `Your contract repository · ${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active`
+            : 'Your contract repository'
+        }
         actions={
           <>
             <Button
@@ -330,6 +340,11 @@ export function ContractsPage() {
               label="Unlimited liability"
               checked={Boolean(filters.has_unlimited_liability)}
               onChange={(checked) => toggleFlag('has_unlimited_liability', checked)}
+            />
+            <Toggle
+              label="Missing mandatory clauses"
+              checked={Boolean(filters.missing_mandatory)}
+              onChange={(checked) => toggleFlag('missing_mandatory', checked)}
             />
             {activeFilterCount > 0 ? (
               <Button

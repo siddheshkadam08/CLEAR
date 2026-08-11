@@ -1379,6 +1379,19 @@ class Settings(BaseSettings):
     # Which stage endpoints this process serves; "all" for a monolithic run.
     worker_role: Annotated[str, Field(validation_alias="WORKER_ROLE")] = "all"
 
+    #: Run the periodic maintenance sweeps inside each worker process.
+    #:
+    #: On by default, and that default is what removes the `scheduler` container from
+    #: a deployment: stalled-job reclamation, export recovery and purge, and alert
+    #: evaluation all run in the worker. A Postgres advisory lock means only one
+    #: worker performs them per tick however many are running, so scaling a pool does
+    #: not multiply the sweeps.
+    #:
+    #: Turn it off only when a standalone `app.cli scheduler` runs them instead.
+    #: Turning it off with nothing else running them loses alert evaluation
+    #: altogether - expiry and renewal deadlines are noticed by nothing else.
+    worker_maintenance: Annotated[bool, Field(validation_alias="WORKER_MAINTENANCE")] = True
+
     #: Where benchmark artefacts are written and read from.
     #:
     #: The scheduled evaluation run and the API that serves its results are

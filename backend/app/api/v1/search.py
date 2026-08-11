@@ -35,6 +35,7 @@ from app.core.deps import (
 from app.core.enums import AuditAction, ChatRole
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
+from app.db.session import session_scope
 from app.schemas.common import BoundingBox, MessageResponse
 from app.schemas.copilot import (
     CopilotQueryMetadata,
@@ -362,6 +363,7 @@ async def ask_stream(
             # text is fixed and no model was asked for it.
             result = service.guardrail_result(preparation)
             yield {"event": "token", "data": json.dumps({"text": result.answer})}
+            await _save_stream_turn(payload=payload, user=user, result=result)
             yield {"event": "done", "data": json.dumps(_stream_done(result))}
             return
 
@@ -383,6 +385,7 @@ async def ask_stream(
         # Validate only now: a citation is checkable once its text exists.
         answer = engine.validate_text("".join(collected), preparation.package, prompt)
         result = service.finish(preparation, answer)
+        await _save_stream_turn(payload=payload, user=user, result=result)
         payload_out = _stream_done(result)
         payload_out.update(
             {
@@ -442,22 +445,37 @@ async def create_session(
 async def list_sessions(
     user: CurrentUserDep,
     db: DbSession,
+    scope: AccessScopeDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    project_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> list[ChatSessionResponse]:
-    """Your own conversations only.
+    """Your own conversations, optionally narrowed to one business unit.
 
     Scoped to the caller rather than the project: a chat history is personal, and
     another project member has no business reading the questions you asked.
+
+    `project_id` narrows *within* that and never loosens it. It matters more here
+    than on most screens: a conversation is tied to the corpus it was asked against,
+    so opening one from another business unit gives a thread whose follow-ups search
+    the *current* unit - answering from different contracts than the ones already
+    above them in the conversation.
+
+    Omitted - "All Business Units" - keeps returning every conversation you own.
     """
     from sqlalchemy import select
 
     from app.models.chat import ChatSession
 
+    conditions = [ChatSession.user_id == user.id, ChatSession.deleted_at.is_(None)]
+    if project_id is not None:
+        project_ids = await resolve_scope_for_project(project_id, scope)
+        conditions.append(ChatSession.project_id.in_(project_ids))
+
     rows = (
         (
             await db.execute(
                 select(ChatSession)
-                .where(ChatSession.user_id == user.id, ChatSession.deleted_at.is_(None))
+                .where(*conditions)
                 .order_by(ChatSession.updated_at.desc().nullslast())
                 .limit(limit)
             )
@@ -650,9 +668,12 @@ async def _persist_turn(
 
 
 async def _persist_query_turn(
-    db: Any, *, payload: CopilotQueryRequest, user: Any, result: Any
+    db: Any, *, payload: CopilotQueryRequest | AskRequest, user: Any, result: Any
 ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
-    """Store a ``/query`` turn when it belongs to a conversation.
+    """Store a ``/query`` or streamed turn when it belongs to a conversation.
+
+    Takes either request type because it needs only ``session_id`` and ``query``
+    from them, and both carry a Copilot result of the same shape.
 
     Separate from :func:`_persist_turn` only because the two receive different
     objects. What is *stored* is deliberately identical: ``chat_messages.citations``
@@ -691,6 +712,35 @@ async def _persist_query_turn(
 
     await db.flush()
     return session.id, assistant.id
+
+
+async def _save_stream_turn(*, payload: AskRequest, user: Any, result: Any) -> None:
+    """Store a streamed turn, in a database session of its own.
+
+    Streaming persisted nothing at all until this existed. ``/ask`` and ``/query``
+    both call a persist helper; ``/copilot/stream`` did not, and both front ends use
+    streaming - so every conversation on the platform was a session row with zero
+    messages. The session list showed titles that opened onto an empty thread, and
+    no follow-up could ever see what had been asked before it.
+
+    It needs its own session rather than the request's. The handler returns the
+    moment this generator is handed to Starlette, so by the time a turn is ready to
+    write, the request-scoped session from ``get_db`` has been committed and closed.
+    ``session_scope`` is the documented shape for work that outlives its request.
+
+    Failure is logged and swallowed. The user already has the answer on screen;
+    turning a history write that did not land into an error event would replace a
+    good answer with a broken one, which is a worse outcome than a lost transcript.
+    """
+    if payload.session_id is None:
+        return
+    try:
+        async with session_scope() as db:
+            await _persist_query_turn(db, payload=payload, user=user, result=result)
+    except Exception as exc:  # noqa: BLE001 - never break a delivered answer
+        logger.warning(
+            "copilot_turn_not_persisted", session_id=str(payload.session_id), error=str(exc)
+        )
 
 
 def _stream_done(result: Any) -> dict[str, Any]:

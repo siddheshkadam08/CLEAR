@@ -77,6 +77,12 @@ api_router.include_router(search.copilot_router, dependencies=_PASSWORD_CURRENT)
 api_router.include_router(exports.router, dependencies=_PASSWORD_CURRENT)
 api_router.include_router(exports.project_export_router, dependencies=_PASSWORD_CURRENT)
 
+# No gate, and the second deliberate exclusion after `auth`: this route is reached
+# by a browser navigation carrying a signed token in the URL rather than a bearer
+# header, so the dependencies above would 401 it before the token was examined. It
+# authenticates itself - see `create_download_token`.
+api_router.include_router(exports.download_router)
+
 # The redesigned Clause Master, grouped by agreement type. Registered *before*
 # the legacy router: both live under `/clause-master`, and this one's literal
 # segments (`/by-agreement-type`, `/clauses`, `/export`, `/import`) would

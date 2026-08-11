@@ -8,10 +8,33 @@
  * each side was self-consistent, and only the pair was wrong.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { contracts } from './endpoints';
+import type { ContractFilters } from './endpoints';
 import type { JobState } from './types';
+
+/** Capture the URL a client method puts on the wire, without a server. */
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+async function urlFor(filters: ContractFilters): Promise<string> {
+  const seen: string[] = [];
+  globalThis.fetch = ((input: RequestInfo | URL) => {
+    seen.push(String(input));
+    return Promise.resolve(
+      new Response('{"items":[],"total":0,"page":1,"size":20}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+  }) as typeof fetch;
+  await contracts.list(null, filters);
+  return seen[0] ?? '';
+}
 
 describe('JobState casing', () => {
   it('is upper case, matching the backend StrEnum', () => {
@@ -56,5 +79,32 @@ describe('contract list free-text parameter', () => {
 
     expect(seen[0]).toContain('search=sponsorship');
     expect(seen[0]).not.toContain('q=sponsorship');
+  });
+});
+
+describe('dashboard drilldown parameters', () => {
+  // Every "Needs attention" tile links to the Contracts list. Two of the four
+  // sent names the endpoint does not declare, so the tile opened an entirely
+  // unfiltered repository while the page still reported "1 filter active" - the
+  // most misleading possible outcome, because the count vouches for the list.
+
+  it('sends the expiry window as `expiry_from` / `expiry_to`', async () => {
+    const url = await urlFor({ expiry_from: '2026-08-11', expiry_to: '2026-11-09' });
+    expect(url).toContain('expiry_from=2026-08-11');
+    expect(url).toContain('expiry_to=2026-11-09');
+    // The names that were silently dropped.
+    expect(url).not.toContain('expiring_after');
+    expect(url).not.toContain('expiring_before');
+  });
+
+  it('sends `missing_mandatory`, which the endpoint now declares', async () => {
+    const url = await urlFor({ missing_mandatory: true });
+    expect(url).toContain('missing_mandatory=true');
+  });
+
+  it('sends the two flags that always worked, unchanged', async () => {
+    const url = await urlFor({ needs_review: true, has_unlimited_liability: true });
+    expect(url).toContain('needs_review=true');
+    expect(url).toContain('has_unlimited_liability=true');
   });
 });

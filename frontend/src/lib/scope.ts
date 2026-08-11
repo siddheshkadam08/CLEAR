@@ -35,7 +35,12 @@ export function useProjectScope() {
   const { projectId, setProjectId } = useScopeStore();
   const { data } = useQuery({
     queryKey: ['projects'],
-    queryFn: () => projectsApi.list(),
+    // Every project, not the server's default first page of 25. The selector is
+    // a complete list or it is wrong twice over: a user in more than 25 projects
+    // could not choose the ones past the cap, and - worse - the reset below
+    // would read their stored selection as stale and clear it, *widening* their
+    // view from one project to all of them.
+    queryFn: () => projectsApi.list({ size: 200 }),
     staleTime: 5 * 60_000,
   });
 

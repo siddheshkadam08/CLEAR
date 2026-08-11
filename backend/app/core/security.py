@@ -34,7 +34,7 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-TokenType = Literal["access", "refresh", "oidc_state", "password_reset"]
+TokenType = Literal["access", "refresh", "oidc_state", "password_reset", "download"]
 
 _ARGON2_PREFIX = "$argon2"
 _BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
@@ -288,6 +288,66 @@ def create_signed_state(data: dict[str, Any], ttl_seconds: int = 600) -> str:
 
 def verify_signed_state(token: str) -> dict[str, Any]:
     return decode_token(token, expected_type="oidc_state")
+
+
+def create_download_token(
+    subject: uuid.UUID | str,
+    *,
+    resource: str,
+    resource_id: uuid.UUID | str,
+    ttl_seconds: int = 300,
+) -> str:
+    """Mint a short-lived credential that travels *in a URL*.
+
+    This exists because a download is a browser navigation, not an XHR: the tab is
+    sent to the URL and carries no ``Authorization`` header, so a bearer token
+    cannot authenticate it. Object storage solves this with a presigned URL; on the
+    local filesystem adapter there is nothing to presign, and the API has to issue
+    the equivalent itself.
+
+    Bound to three things, so a leaked URL is worth as little as possible: the user
+    it was minted for, the exact object it addresses, and five minutes. The route
+    checks all three - a token for one export cannot fetch another, and one user's
+    token cannot be replayed by someone else.
+
+    ``type`` is ``download`` rather than reusing ``oidc_state``: distinct types are
+    what stop a token minted for one purpose being accepted for the other, and
+    :func:`decode_token` enforces it.
+    """
+    issued_at = _now()
+    payload = {
+        "sub": str(subject),
+        "type": "download",
+        "res": resource,
+        "rid": str(resource_id),
+        "iat": int(issued_at.timestamp()),
+        "exp": int((issued_at + timedelta(seconds=ttl_seconds)).timestamp()),
+        "jti": secrets.token_urlsafe(12),
+    }
+    return _encode(payload)
+
+
+def verify_download_token(
+    token: str,
+    *,
+    resource: str,
+    resource_id: uuid.UUID | str,
+) -> dict[str, Any]:
+    """Validate a download token and confirm it addresses this exact object.
+
+    Raises :class:`TokenInvalidError` on a mismatch, which is deliberately the same
+    error a forged token produces: the caller maps both onto the same 404, so a
+    token for someone else's export cannot be used to prove that export exists.
+    """
+    payload = decode_token(token, expected_type="download")
+    if payload.get("res") != resource or payload.get("rid") != str(resource_id):
+        logger.info(
+            "download_token_resource_mismatch",
+            expected=f"{resource}:{resource_id}",
+            actual=f"{payload.get('res')}:{payload.get('rid')}",
+        )
+        raise TokenInvalidError("This download link is not valid for this item.")
+    return payload
 
 
 # =============================================================================

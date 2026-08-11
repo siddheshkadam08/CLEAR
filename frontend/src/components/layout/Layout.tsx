@@ -1,8 +1,13 @@
 /**
  * App shell: sidebar + sticky header + main.
  *
- * The page title is resolved here from a route map by longest-prefix match, never
- * hardcoded inside a page. A title that lives in two places drifts in one of them.
+ * The page title comes from `./navigation`, which the sidebar reads too, by
+ * longest-prefix match - never hardcoded inside a page. A title that lives in two
+ * places drifts in one of them; it lived in three.
+ *
+ * The title is this shell's `h1`. Pages render a description and their actions;
+ * the one heading the shell cannot know - a contract's name - is written by the
+ * page that knows it, below this one.
  *
  * Z-index ladder: header 20 · mobile scrim 30 · sidebar 40 · modals 50.
  */
@@ -13,32 +18,11 @@ import type { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 
 import { useAuth } from '@/lib/auth';
-import { APP_NAME, initialsOf } from '@/lib/identity';
+import { initialsOf } from '@/lib/identity';
 import { useProjectScope } from '@/lib/scope';
 import { useTheme } from '@/lib/theme';
+import { titleFor } from './navigation';
 import { Sidebar } from './Sidebar';
-
-const TITLES: Record<string, string> = {
-  '/': 'Dashboard',
-  '/upload': 'Upload contracts',
-  '/contracts': 'Contracts',
-  // '/search': 'Search',
-  '/copilot': 'Copilot',
-  '/jobs': 'Processing',
-  '/doc-pipeline': 'Document pipeline',
-  '/alerts': 'Alerts',
-  '/clause-master': 'Clause Master',
-  '/admin/projects': 'Business Unit',
-  '/admin/users': 'Users',
-};
-
-const titleFor = (pathname: string) => {
-  if (pathname === '/') return TITLES['/'];
-  const match = Object.keys(TITLES)
-    .filter((key) => key !== '/' && pathname.startsWith(key))
-    .sort((a, b) => b.length - a.length)[0];
-  return match ? TITLES[match] : APP_NAME;
-};
 
 const NOTIFICATIONS = [
   {
@@ -209,9 +193,9 @@ export const Layout = ({ children }: { children: ReactNode }) => {
                 <p className="hidden font-mono text-[10px] font-semibold uppercase tracking-[1.2px] text-[#94A0B4] sm:block">
                   Workspace
                 </p>
-                <h2 className="truncate text-[18px] font-semibold text-[#0F172A] dark:text-slate-100 sm:text-[20px]">
+                <h1 className="truncate text-[18px] font-semibold text-[#0F172A] dark:text-slate-100 sm:text-[20px]">
                   {titleFor(pathname)}
-                </h2>
+                </h1>
               </div>
             </div>
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.evaluation.benchmark.baseline import (
     DEFAULT_GATES,
@@ -32,8 +33,17 @@ from app.evaluation.runner.runner import EvaluationRunner, RunnerOptions
 
 logger = get_logger(__name__)
 
-#: Where a run's artefacts land by default.
-DEFAULT_OUTPUT_ROOT = Path("evaluation-results")
+#: Where a run's artefacts land by default, when `--output` is not given.
+#:
+#: Read from the same setting the API reads, `EVALUATION_RESULTS_DIR`, so the
+#: writer and the reader agree by construction. It used to be the bare relative
+#: `Path("evaluation-results")`, resolved against whatever directory the CLI
+#: happened to run in - which the API then could not find unless it had been
+#: started from that same directory. The dashboard reported "no benchmark has
+#: been recorded" with the files sitting one directory away, and neither side
+#: had anything to log, because from each one's point of view nothing was wrong.
+def default_output_root() -> Path:
+    return Path(get_settings().evaluation_results_dir)
 
 
 @dataclass(slots=True)
@@ -80,7 +90,7 @@ async def run_benchmark(options: BenchmarkOptions) -> BenchmarkOutcome:
         dataset = dataset.filter(tags=options.tags or None, limit=options.limit)
 
     label = options.label or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    output_dir = options.output_dir or (DEFAULT_OUTPUT_ROOT / label)
+    output_dir = options.output_dir or (default_output_root() / label)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(
@@ -197,7 +207,7 @@ def load_run(path: str | Path) -> RunResult:
 
 
 __all__ = [
-    "DEFAULT_OUTPUT_ROOT",
+    "default_output_root",
     "BenchmarkOptions",
     "BenchmarkOutcome",
     "load_run",

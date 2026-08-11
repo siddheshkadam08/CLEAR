@@ -122,14 +122,16 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-5">
+      {/* The scope is the description: with the title in the shell, this line is
+          the only thing telling you whether you are reading one business unit or
+          all of them - which changes what every number below it means. */}
       <PageHeader
-        title="Overview"
         subtitle={
           projectId
-            ? 'This project'
+            ? 'Contracts, risk and deadlines for this business unit.'
             : data
-              ? `Across ${data.project_ids.length} project${data.project_ids.length === 1 ? '' : 's'} you can see`
-              : 'Your contract repository at a glance'
+              ? `Contracts, risk and deadlines across the ${data.project_ids.length} business unit${data.project_ids.length === 1 ? '' : 's'} you can see.`
+              : 'Contracts, risk and deadlines across the business units you can see.'
         }
       />
 

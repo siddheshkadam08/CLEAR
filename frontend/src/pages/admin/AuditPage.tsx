@@ -88,7 +88,6 @@ export function AuditPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Activity"
         subtitle="Who did what, when. Scoped to the projects you can see, plus platform-level events."
       />
 

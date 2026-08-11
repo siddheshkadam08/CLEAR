@@ -21,7 +21,7 @@ import {
   UploadCloud,
   XCircle,
 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { contracts as contractsApi } from '@/api/endpoints';
@@ -91,6 +91,21 @@ export function UploadPage() {
   const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
+
+  // Follow the header.
+  //
+  // `useState` above seeds the target once, on the first render - so changing the
+  // business unit afterwards left it pointing at whatever was selected when the
+  // page mounted. The header said one unit and the upload posted to another, which
+  // is the one bug on this screen that *writes* rather than merely showing the
+  // wrong thing: the file lands in the wrong business unit and looks fine.
+  //
+  // Only follows the header, never the in-page selector: picking a different
+  // destination below is a deliberate choice for this batch, and clobbering it on
+  // re-render would make that control unusable.
+  useEffect(() => {
+    if (scopedProject) setTarget(scopedProject);
+  }, [scopedProject]);
 
   function addFiles(files: FileList | File[]) {
     const next: UploadItem[] = [];
@@ -233,7 +248,7 @@ export function UploadPage() {
   if (projects.length === 0) {
     return (
       <div className="space-y-5">
-        <PageHeader title="Upload contracts" subtitle="Add documents to a project." />
+        <PageHeader subtitle="Add documents to a business unit you belong to." />
         <EmptyState
           icon={FolderOpen}
           title="You are not a member of any project"
@@ -246,8 +261,7 @@ export function UploadPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        // title="Upload contracts"
-        // subtitle="Processing starts automatically: validation, parsing, enrichment, classification, chunking, extraction, embedding and indexing."
+        subtitle="Processing starts automatically: validation, parsing, clause detection, extraction, embedding and indexing."
         actions={
           uploaded.length && !busy ? (
             <Button variant="secondary" onClick={() => navigate('/jobs')}>

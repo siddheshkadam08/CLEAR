@@ -11,6 +11,8 @@ import { getRiskVariant } from '@/lib/badges';
 import { ErrorBanner, NoticeBanner } from '@/components/common/Banner';
 import { Button } from '@/components/common/Button';
 import { inputClasses } from '@/components/common/Field';
+import { Markdown } from '@/components/common/Markdown';
+import { SourceSnippet } from '@/components/common/SourceSnippet';
 import { formatPercent, humanise } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
 
@@ -315,11 +317,26 @@ export function CopilotDrawer({ open, onClose, contractId, contractTitle }: Copi
                             </p>
                           </div>
                         ) : (
-                          <div className="whitespace-pre-wrap text-sm leading-7 text-slate-800">
-                            {turn.answer}
-                            {turn.streaming && turn.answer ? (
-                              <span aria-hidden className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-blue-600 align-middle" />
-                            ) : null}
+                          <div>
+                            {/* Markdown, not pre-wrapped text. Answers come back
+                                as headed lists and the occasional table; printed
+                                raw, a lawyer sees literal asterisks and reads it
+                                as a broken product. The full page has rendered
+                                markdown since it was built - this drawer was
+                                simply never migrated with it.
+
+                                While streaming, the partial text is still shown
+                                raw: half-written markdown reflows on every chunk
+                                as a `**` finds its closing pair, and the answer
+                                visibly rewrites itself as it arrives. */}
+                            {turn.streaming ? (
+                              <div className="whitespace-pre-wrap text-sm leading-7 text-slate-800 dark:text-slate-200">
+                                {turn.answer}
+                                <span aria-hidden className="ml-0.5 inline-block h-4 w-[2px] animate-pulse bg-blue-600 align-middle" />
+                              </div>
+                            ) : (
+                              <Markdown>{turn.answer}</Markdown>
+                            )}
                           </div>
                         )}
 
@@ -343,7 +360,10 @@ export function CopilotDrawer({ open, onClose, contractId, contractTitle }: Copi
                                   <Link to={`/contracts/${c.contract_id}`} className="text-xs font-medium text-blue-600 hover:text-blue-700">
                                     {c.contract_title ?? 'Contract'}{c.clause_number ? ` · ${c.clause_number}` : ''}{c.page_range ? ` · p${c.page_range}` : ''}
                                   </Link>
-                                  <p className="mt-0.5 text-[11px] leading-5 text-slate-500">{c.text}</p>
+                                  <SourceSnippet
+                                    text={c.text}
+                                    className="mt-0.5 text-[11px] leading-5 text-slate-500 dark:text-slate-400"
+                                  />
                                 </div>
                               </li>
                             ))}

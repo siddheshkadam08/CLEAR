@@ -1396,11 +1396,11 @@ export interface AuditFilters {
 
 
 // =============================================================================
-// Document pipeline
+// Clause coverage  (route: /docpipeline)
 // =============================================================================
-// Sourced entirely from cip_DocMaster / cip_DocContentMaster. `coverage` is
-// clauses found divided by the number cip_docMapping expects for that document
-// type, and is null when the type has no taxonomy entry.
+// Read from `contracts`, `clauses`, `embeddings` and `document_profiles`.
+// `coverage` is clauses found divided by the number that document type's profile
+// expects, and is null when the type has no profile entry.
 export interface DocPipelineTotals {
   documents: number;
   clauses: number;
@@ -1411,7 +1411,8 @@ export interface DocPipelineTotals {
 }
 
 export interface DocPipelineDocumentRow {
-  docid: number;
+  /** Contract id. A UUID string - it was an integer under the old tables. */
+  docid: string;
   doc_type: string | null;
   doc_path: string | null;
   json_path: string | null;

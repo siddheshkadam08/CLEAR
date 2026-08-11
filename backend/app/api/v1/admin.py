@@ -412,7 +412,12 @@ async def get_dashboard(
             value=float(expiring),
             # The tile links to the filter that produced it, so "12 expiring" is
             # clickable rather than a number the user then has to reconstruct.
-            drilldown={"expiring_before": horizon.isoformat(), "expiring_after": today.isoformat()},
+            #
+            # These are the names the contracts endpoint declares. They used to be
+            # `expiring_before`/`expiring_after`, which it does not declare - and
+            # FastAPI drops an undeclared query parameter without complaining, so
+            # the tile opened an unfiltered list that claimed to be filtered.
+            drilldown={"expiry_from": today.isoformat(), "expiry_to": horizon.isoformat()},
         ),
         KpiTile(
             key="high_risk",

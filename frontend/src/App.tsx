@@ -60,8 +60,8 @@ const ExportsPage = lazy(() =>
   import('@/pages/ExportsPage').then((m) => ({ default: m.ExportsPage })),
 );
 const JobsPage = lazy(() => import('@/pages/JobsPage').then((m) => ({ default: m.JobsPage })));
-const DocPipelinePage = lazy(() =>
-  import('@/pages/DocPipelinePage').then((m) => ({ default: m.DocPipelinePage })),
+const ClauseCoveragePage = lazy(() =>
+  import('@/pages/ClauseCoveragePage').then((m) => ({ default: m.ClauseCoveragePage })),
 );
 const PortfolioPage = lazy(() =>
   import('@/pages/PortfolioPage').then((m) => ({ default: m.PortfolioPage })),
@@ -203,7 +203,10 @@ export default function App() {
           {/* Not admin-gated: the endpoint scopes rows to the requester, so this
               screen only ever shows the caller their own exports. */}
           <Route path="exports" element={<ExportsPage />} />
-          <Route path="doc-pipeline" element={<DocPipelinePage />} />
+          <Route path="clause-coverage" element={<ClauseCoveragePage />} />
+          {/* Was `/doc-pipeline`. A bookmark is a promise; see LEGACY_PATHS in
+              components/layout/navigation.ts. */}
+          <Route path="doc-pipeline" element={<Navigate to="/clause-coverage" replace />} />
           <Route path="alerts" element={<AlertsPage />} />
           {/* Not under AdminRoute: AUDIT_READ belongs to Project Manager as
               well, so admin-only here would withdraw a permission the seeded

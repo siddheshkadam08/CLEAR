@@ -41,6 +41,7 @@ import { FilterChip } from '@/components/common/FilterChip';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { Pagination } from '@/components/common/Pagination';
 import { formatBytes, formatDateTime, formatNumber, humanise } from '@/lib/format';
+import { useProjectScope } from '@/lib/scope';
 
 const PAGE_SIZE = 20;
 const STATUSES: ExportStatus[] = ['queued', 'running', 'completed', 'failed', 'expired'];
@@ -65,14 +66,17 @@ const ENTITY_LABELS: Record<string, string> = {
 export function ExportsPage() {
   const [params, setParams] = useSearchParams();
   const queryClient = useQueryClient();
+  const { projectId } = useProjectScope();
   const [actionError, setActionError] = useState<string | null>(null);
 
   const page = Number(params.get('page') ?? 1);
   const statuses = params.getAll('status') as ExportStatus[];
 
   const query = useQuery({
-    queryKey: ['exports', page, statuses.join(',')],
-    queryFn: () => exportsApi.list({ page, size: PAGE_SIZE, status: statuses }),
+    // `projectId` in the key is what makes this follow the header. The list is
+    // still scoped to the requester by the server - this narrows within that.
+    queryKey: ['exports', projectId, page, statuses.join(',')],
+    queryFn: () => exportsApi.list({ page, size: PAGE_SIZE, status: statuses, projectId }),
     placeholderData: keepPreviousData,
     // Polls only while something is actually building, and stops the moment the
     // last job settles. A finished export never changes again.
@@ -107,7 +111,6 @@ export function ExportsPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Exports"
         subtitle="Workbooks you have requested. Files are kept for a limited window, then purged."
         actions={
           <Button

@@ -48,7 +48,6 @@ export function AlertsPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Alerts"
         subtitle="Expiries, renewal notice windows and obligation deadlines across your projects."
       />
 

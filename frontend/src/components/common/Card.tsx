@@ -52,42 +52,31 @@ export const SectionHeader = ({
 );
 
 /**
- * Page title row.
+ * Page description and actions.
  *
- * `title` and `subtitle` are optional because the page title moved into the
- * layout chrome: most screens now pass only `actions` and let the shell name
- * them. Both are still accepted, so a screen that wants its own heading - or a
- * heading the layout cannot know, like a contract's name - keeps one.
+ * No title: the shell names the screen, from the one table in
+ * `components/layout/navigation.ts`. This used to accept a `title` too, and the
+ * result was four screens printing their name twice - once in the top bar and
+ * once in an `h1` a few pixels below it - and four more with the prop commented
+ * out mid-migration. The prop is gone rather than deprecated, so a page that
+ * tries to name itself does not compile.
  *
- * When neither is given the heading block is not rendered at all rather than
- * rendered empty, so the actions sit flush right instead of being pushed down
- * by a blank `h1`.
+ * `subtitle` is required for the same reason it is called a description: with
+ * the title gone it is the only sentence saying why the screen exists. A screen
+ * whose description is hard to write is usually a screen that needs one.
+ *
+ * A heading the shell cannot know - a contract's name - is the page's own job;
+ * `ContractDetailPage` writes its own `header` element and does not come here.
  */
 export const PageHeader = ({
-  title,
   subtitle,
   actions,
 }: {
-  title?: string;
-  subtitle?: string;
+  subtitle: string;
   actions?: ReactNode;
 }) => (
-  <div
-    className={[
-      'flex flex-col gap-2 sm:flex-row sm:items-center',
-      title || subtitle ? 'sm:justify-between' : 'sm:justify-end',
-    ].join(' ')}
-  >
-    {title || subtitle ? (
-      <div>
-        {title ? (
-          <h1 className="text-[21px] font-semibold text-[#0F172A] dark:text-slate-100">{title}</h1>
-        ) : null}
-        {subtitle ? (
-          <p className="mt-0.5 text-[13px] text-[#5B6478] dark:text-slate-400">{subtitle}</p>
-        ) : null}
-      </div>
-    ) : null}
+  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <p className="text-[13px] text-[#5B6478] dark:text-slate-400">{subtitle}</p>
     {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
   </div>
 );
@@ -95,7 +84,7 @@ export const PageHeader = ({
 /** KPI tile. Accent rotates through the tint sequence so a grid reads as a series.
  *
  *  `hint` and `alarm` exist because the pages that used to hand-roll their own
- *  tile needed them: Doc Pipeline puts a qualifier under the number ("per
+ *  tile needed them: Clause Coverage puts a qualifier under the number ("per
  *  document on average"), and Jobs turns a count red once it means something is
  *  wrong. Folding both in here is what let those pages drop their private
  *  versions, which had drifted to a different radius, padding and border - and

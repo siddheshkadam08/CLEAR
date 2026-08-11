@@ -13,7 +13,7 @@ from app.evaluation.benchmark.baseline import (
     save_baseline,
 )
 from app.evaluation.benchmark.benchmark import (
-    DEFAULT_OUTPUT_ROOT,
+    default_output_root,
     BenchmarkOptions,
     BenchmarkOutcome,
     load_run,
@@ -33,7 +33,7 @@ from app.evaluation.benchmark.sweep import (
 
 __all__ = [
     "DEFAULT_GATES",
-    "DEFAULT_OUTPUT_ROOT",
+    "default_output_root",
     "DEFAULT_SWEEPS",
     "AblationArm",
     "AblationResult",

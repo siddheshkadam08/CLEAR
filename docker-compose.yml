@@ -14,7 +14,7 @@
 #   and non-SELinux hosts ignore the flag.
 # * Every published port is above 1024, so rootless Podman can bind them all
 #   without extra privilege.
-# * The API, workers and scheduler run as an unprivileged user inside the image,
+# * The API and the workers run as an unprivileged user inside the image,
 #   which composes correctly with Podman's user-namespace mapping.
 #
 # * Every published host port is overridable (REDIS_PORT, BACKEND_PORT, ...).
@@ -110,6 +110,14 @@ x-backend-env: &backend-env
   PARSER_FIXTURE_DIR: ${PARSER_FIXTURE_DIR:-/app/storage/fixtures/parser}
   IDOC_ENDPOINT: ${IDOC_ENDPOINT:-https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json}
 
+  # Absolute, and under the shared storage volume, deliberately. The default is
+  # the relative `evaluation-results`, which the benchmark CLI writes relative to
+  # *its* working directory and the API reads relative to *its* own - so running
+  # the two from different directories makes the Retrieval Quality screen report
+  # "no benchmark has been recorded" while the files sit one directory away, with
+  # no error anywhere. An absolute path removes the whole class of confusion.
+  EVALUATION_RESULTS_DIR: ${EVALUATION_RESULTS_DIR:-/app/storage/evaluation-results}
+
   # `ACTIVE_PARSER=pdfextract` runs a local pdf_text_extractor checkout instead of
   # the layout service. It emits the same Azure prebuilt-layout payloads, so the
   # document pipeline is unaffected by the swap.
@@ -122,6 +130,18 @@ x-backend-env: &backend-env
   PDFEXTRACT_BACKEND: ${PDFEXTRACT_BACKEND:-baseline}
   PDFEXTRACT_DPI: ${PDFEXTRACT_DPI:-300}
   PDFEXTRACT_TIMEOUT_SECONDS: ${PDFEXTRACT_TIMEOUT_SECONDS:-1800}
+  # Reaches the extractor over HTTP instead of running it as a subprocess. Absent
+  # from this block, `PDFEXTRACT_URL` in .env never reached the container and the
+  # adapter silently fell back to the subprocess path it could not run - the same
+  # allow-list trap as the OIDC block above.
+  PDFEXTRACT_URL: ${PDFEXTRACT_URL:-}
+
+  # The iDoc layout service. `IDOC_ENDPOINT` was forwarded but its API key was not,
+  # so a deployment needing one authenticated against nothing and every parse 401'd.
+  IDOC_API_KEY: ${IDOC_API_KEY:-}
+  IDOC_API_KEY_HEADER: ${IDOC_API_KEY_HEADER:-X-API-Key}
+  IDOC_TIMEOUT_SECONDS: ${IDOC_TIMEOUT_SECONDS:-600}
+  IDOC_VERIFY_TLS: ${IDOC_VERIFY_TLS:-true}
 
   # --- inference and embeddings ---
   # This stack runs end to end with no LLM vendor account and no API key: both
@@ -271,6 +291,9 @@ x-backend-env: &backend-env
   # Left empty the adapter searches PATH and the usual install locations, so an
   # image that installs libreoffice needs nothing set here.
   ALLOWED_FILE_TYPES: ${ALLOWED_FILE_TYPES:-pdf,doc,docx,zip}
+  # Was missing here, so the API accepted files the parser would later refuse -
+  # stored and queued, then failed at the extractor, which caps uploads at 50MB.
+  MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-50}
   LIBREOFFICE_PATH: ${LIBREOFFICE_PATH:-}
   CONVERSION_TIMEOUT_SECONDS: ${CONVERSION_TIMEOUT_SECONDS:-180}
   MAX_ARCHIVE_MEMBERS: ${MAX_ARCHIVE_MEMBERS:-500}
@@ -322,6 +345,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
     logging: *default-logging
 
   redis:
@@ -337,6 +361,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    restart: unless-stopped
     logging: *default-logging
 
   minio:
@@ -356,6 +381,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
     logging: *default-logging
 
   minio-init:
@@ -426,6 +452,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    restart: unless-stopped
     logging: *default-logging
 
   # -------------------------------------------------------- queue dispatcher
@@ -464,6 +491,7 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+    restart: unless-stopped
     logging: *default-logging
 
   # ---------------------------------------------------------- worker services
@@ -498,6 +526,7 @@ services:
       timeout: 5s
       start_period: 25s
       retries: 3
+    restart: unless-stopped
     logging: *default-logging
 
   worker-ai:
@@ -516,34 +545,21 @@ services:
         condition: service_healthy
     command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
     healthcheck: *worker-healthcheck
+    restart: unless-stopped
     logging: *default-logging
 
-  # Periodic evaluator: alerts, expiry windows, DLQ sweep, index maintenance.
-  scheduler:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-      target: runtime
-    container_name: ${COMPOSE_PROJECT:-cip}-scheduler
-    environment:
-      <<: *backend-env
-      OTEL_SERVICE_NAME: cip-scheduler
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    command: ["python", "-m", "app.cli", "scheduler"]
-    # The scheduler is a bare sweep loop with no HTTP server, so the image's
-    # HEALTHCHECK - an HTTP probe - cannot ever succeed. Disabled rather than
-    # replaced with a process check: podman/docker already restart the container
-    # if the process exits, which is the only failure mode a liveness probe on a
-    # single-loop process could detect anyway.
-    healthcheck:
-      disable: true
-    logging: *default-logging
+  # There was a `scheduler` service here - a bare sweep loop running
+  # `python -m app.cli scheduler` for alerts, stalled jobs and export retention.
+  #
+  # Those sweeps now run inside the worker pools above (see `worker_app.lifespan` and
+  # `app.orchestrator.maintenance`), behind a Postgres advisory lock that keeps them to
+  # one worker per tick however many are running. That removes a container and, more
+  # usefully, removes a single point of failure: a lost scheduler took alert evaluation
+  # with it silently, whereas the sweeps now survive as long as any worker does.
+  #
+  # `WORKER_MAINTENANCE=false` plus `python -m app.cli scheduler` splits them back out
+  # if a deployment prefers that. Nothing about this is BullMQ's `QueueScheduler`, which
+  # this queue has never used and which v5 does not have.
 
   # ------------------------------------------------------------ nvidia profile
   #
@@ -619,6 +635,7 @@ services:
       - "${FRONTEND_PORT:-5173}:${FRONTEND_TARGET_PORT:-5173}"
     depends_on:
       - backend
+    restart: unless-stopped
     logging: *default-logging
 
   # ------------------------------------------------------------ observability
@@ -638,6 +655,7 @@ services:
       - "${OTLP_GRPC_PORT:-4317}:4317"   # OTLP gRPC
       - "${OTLP_HTTP_PORT:-4318}:4318"   # OTLP HTTP
       - "${OTEL_METRICS_PORT:-8889}:8889"   # Prometheus scrape of collector-internal metrics
+    restart: unless-stopped
     logging: *default-logging
 
   prometheus:
@@ -648,6 +666,7 @@ services:
       - promdata:/prometheus
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
+    restart: unless-stopped
     logging: *default-logging
 
   grafana:
@@ -664,6 +683,7 @@ services:
       - "${GRAFANA_PORT:-3001}:3000"
     depends_on:
       - prometheus
+    restart: unless-stopped
     logging: *default-logging
 
   jaeger:
@@ -673,6 +693,7 @@ services:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "${JAEGER_PORT:-16686}:16686"
+    restart: unless-stopped
     logging: *default-logging
 
 volumes:

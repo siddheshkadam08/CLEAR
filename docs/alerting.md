@@ -1,5 +1,10 @@
 # Operational alerting
 
+> **Looking for why a contract raised an expiry, renewal, risk or obligation alert?**
+> That is a different system — see [`PORTFOLIO_AND_ALERTS.md`](PORTFOLIO_AND_ALERTS.md).
+> Those are derived by a periodic sweep from extracted contract data. This document
+> covers alerts about the *platform*: a stage failed, a worker died.
+
 When ingestion fails, two different people need to know, and they need different
 things. A **reviewer** needs the failure to appear in the Alerts screen next to
 the document. An **operator** needs a stack trace, a worker name and a host,

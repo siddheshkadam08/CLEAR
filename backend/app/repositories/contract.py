@@ -280,6 +280,11 @@ class ContractRepository(ProjectScopedRepository[Contract]):
                     ]
                 )
             )
+        if filters.missing_mandatory is not None:
+            # The same predicate the dashboard tile counts with, so the number on
+            # the tile and the length of the filtered list agree by construction.
+            incomplete = func.jsonb_array_length(ContractMetadata.missing_mandatory_clauses) > 0
+            conditions.append(incomplete if filters.missing_mandatory else ~incomplete)
 
         if conditions:
             stmt = stmt.where(and_(*conditions))

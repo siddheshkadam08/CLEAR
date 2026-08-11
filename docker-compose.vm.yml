@@ -92,10 +92,21 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  # One worker for every stage. The compose file splits parser and AI workers so
-  # a slow parse cannot starve extraction, which is right on a machine with room
-  # for it; here a second worker would cost more memory than the isolation is
-  # worth. WORKER_ROLE=all is the supported single-pool mode.
+  # One worker for every stage. The main compose file splits parser and AI workers
+  # so a slow parse cannot starve extraction, which is right on a machine with room
+  # for it; here a second worker would cost more memory than the isolation is worth.
+  #
+  # `app.cli worker`, NOT `uvicorn app.worker_app:app`, and the difference is the
+  # whole reason this deployment processed nothing. `worker_app` *serves* the
+  # internal stage endpoints for the BullMQ dispatcher to POST to - it polls no
+  # queue. This host runs `QUEUE_DRIVER=postgres` (it has ~1G free and cannot also
+  # carry Redis and a Node dispatcher), so there is no dispatcher to call it: the
+  # container sat healthy on 8001 while every upload stayed `pending` in
+  # `clear.stage_queue` for ever. `app.cli worker` is the process that claims rows.
+  #
+  # It also runs the maintenance sweeps, so this file needs no scheduler either. On
+  # a single worker that means a crash stops reclamation too - recovered when it
+  # restarts, which on this host is the right trade against a second container.
   worker:
     build: { context: ./backend, dockerfile: Dockerfile, target: runtime }
     container_name: cip-worker
@@ -103,7 +114,12 @@ services:
       <<: *env
       WORKER_ROLE: all
       OTEL_SERVICE_NAME: cip-worker
-    command: ["uvicorn", "app.worker_app:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: ["python", "-m", "app.cli", "worker"]
+    # No HTTP server to probe, so the image's HEALTHCHECK - which requests
+    # localhost:8000 - could only ever report `unhealthy` while the worker ran
+    # perfectly well.
+    healthcheck:
+      disable: true
     volumes:
       - /datadrive/blob/CIP_Demo:/var/lib/cip/storage:z
     depends_on: [backend]

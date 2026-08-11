@@ -75,7 +75,6 @@ export function AdminProjectsPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        title="Business Units"
         subtitle="Create Business Units and decide who works in them."
         actions={
           <Button icon={FolderPlus} onClick={() => setCreateOpen(true)}>

@@ -68,7 +68,6 @@ export function AdminUsersPage() {
   return (
     <div className="space-y-5">
       <PageHeader
-        // title="Users"
         subtitle="Create accounts and assign them to the projects they work on."
         actions={
           <Button icon={UserPlus} onClick={() => setCreateOpen(true)}>
