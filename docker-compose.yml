@@ -454,7 +454,8 @@ services:
       start_period: 20s
     restart: unless-stopped
     logging: *default-logging
-
+    volumes:
+      - storagedata:/var/lib/cip/storage
   # -------------------------------------------------------- queue dispatcher
   # Node/BullMQ is a logic-free dispatch shim: it pulls a job and calls the
   # Python stage service over internal HTTP (see §1.2).
@@ -528,7 +529,8 @@ services:
       retries: 3
     restart: unless-stopped
     logging: *default-logging
-
+    volumes:
+      - storagedata:/var/lib/cip/storage
   worker-ai:
     build:
       context: ./backend
@@ -547,7 +549,8 @@ services:
     healthcheck: *worker-healthcheck
     restart: unless-stopped
     logging: *default-logging
-
+    volumes:
+      - storagedata:/var/lib/cip/storage
   # There was a `scheduler` service here - a bare sweep loop running
   # `python -m app.cli scheduler` for alerts, stalled jobs and export retention.
   #
@@ -697,6 +700,11 @@ services:
     logging: *default-logging
 
 volumes:
+  # Document bytes when STORAGE_PROVIDER=local. Without it the files live in the
+  # container's writable layer and every recreate loses them - and `storage_path`
+  # in the database still points at them, so the viewer 404s on documents the row
+  # says exist.
+  storagedata:
   pgdata:
   redisdata:
   miniodata:
