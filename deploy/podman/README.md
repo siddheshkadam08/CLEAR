@@ -62,8 +62,15 @@ stages by importing the modules the API imports, so a second image would be ~2.5
 duplicated and a way for the two to drift apart between builds.
 
 `clear-queue` and `clear-frontend` are genuinely separate deployables and have
-their own images. Redis is an upstream image, pulled unmodified. The PDF
-extractor (`clear-extractor`) is built and released from a separate repository.
+their own images. Redis is an upstream image, pulled unmodified.
+
+The PDF extractor (`clear-extractor`) is **built** in a separate repository but
+**run** here: it has a Quadlet unit, `pull-images.sh` fetches it, and `start.sh`
+brings it up before the workers that parse through it. Its image comes from
+`EXTRACTOR_IMAGE` in `images.env` so it can be pinned independently of the CLEAR
+release. It keeps its own data on the `pdfx-blob` volume at
+`/datadrive/blob/CIP_Extraction` — deliberately separate from `clear-storage`, so
+the two projects share no filesystem state.
 
 ## Document storage is the local filesystem
 

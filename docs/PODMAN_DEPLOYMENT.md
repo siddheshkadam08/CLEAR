@@ -181,8 +181,9 @@ deploy/podman/
 ├── quadlet/                     Podman Quadlet units (long-running containers)
 │   ├── clear.network
 │   ├── clear-storage.volume     THE document store
+│   ├── pdfx-blob.volume         the extractor's own, kept separate
 │   ├── clear-redis-data.volume
-│   ├── clear-redis.container
+│   ├── clear-redis.container    clear-extractor.container
 │   ├── clear-backend.container  clear-queue.container
 │   ├── clear-worker-parser.container  clear-worker-ai.container
 │   └── clear-frontend.container
@@ -462,6 +463,11 @@ PREVIOUS_IMAGE_TAG=
 
 REDIS_IMAGE=docker.io/library/redis:7-alpine
 
+# The PDF extractor, released from its own repository. Omit this line and it
+# defaults to <registry>/<project>/clear-extractor:<IMAGE_TAG> - convenient while
+# the two projects are cut together, wrong as soon as they are not.
+# EXTRACTOR_IMAGE=
+
 # Where documents live. STORAGE_LOCAL_ROOT in clear.env must match the second
 # value; start.sh refuses to start if they disagree.
 STORAGE_VOLUME=clear-storage
@@ -514,21 +520,30 @@ podman manifest inspect ghcr.io/your-org/clear/clear-backend:v1.0.0 | head -20
 
 This deployment runs `ACTIVE_PARSER=pdfextract` against `clear-extractor`.
 
-**It is not built, started or supervised by anything in this repository.** The
-extractor is released from a separate repository; these scripts and units do not
-reference it, and `start.sh` will not bring it up. Deploy and manage it
-separately, and make sure it is running before the parser stage is exercised.
-
-What this deployment requires of it:
+**It is not BUILT by this repository** — the extractor is a separate project with
+its own repository and its own release cadence, so `build-images.sh` never touches
+it. It **is** run and supervised here: `clear-extractor.container` is a Quadlet
+unit like any other, `pull-images.sh` fetches its image, and `start.sh` brings it
+up second, right after Redis and before the workers that depend on it.
 
 | | |
 |---|---|
+| Unit | `deploy/podman/quadlet/clear-extractor.container` |
+| Image | `EXTRACTOR_IMAGE` in `images.env`, defaulting to `<registry>/<project>/clear-extractor:<tag>` |
 | Container name | `clear-extractor` |
-| Network | attached to `clear-net`, so `PDFEXTRACT_URL` resolves |
+| Network | `clear.network` (`clear-net`), so `PDFEXTRACT_URL` resolves |
 | Port inside `clear-net` | `8000` — what `PDFEXTRACT_URL=http://clear-extractor:8000` uses |
 | Host port | `127.0.0.1:58001` for operator checks — **not** what the backend uses |
-| Health | `GET /health` |
-| Its own data path | `/datadrive/blob/CIP_Extraction`, unchanged by this work |
+| Health | `GET /health` on port 8000 |
+| Storage | `pdfx-blob` volume → `/datadrive/blob/CIP_Extraction`, matching `PDFX_BLOB_DIR` |
+
+**Pin it independently once the two projects stop being cut together.** The
+default ties the extractor's tag to the CLEAR release, which is convenient at
+first and wrong later:
+
+```bash
+echo 'EXTRACTOR_IMAGE=<registry>/<project>/clear-extractor:v1.2.3' >> /etc/clear/images.env
+```
 
 ```bash
 # From the host:
@@ -538,10 +553,23 @@ podman exec clear-backend curl -fsS http://clear-extractor:8000/health
 ```
 
 If the first succeeds and the second does not, the extractor is running but is not
-attached to `clear-net`:
+attached to `clear-net` — which happens when a container started by hand is still
+holding the name instead of the unit's:
 
 ```bash
-podman network connect clear-net clear-extractor
+podman ps --filter name=clear-extractor --format '{{.Names}} {{.Networks}}'
+podman network connect clear-net clear-extractor      # patch a hand-started one
+```
+
+**Migrating from a hand-started extractor.** The unit uses `ContainerName=clear-extractor`,
+so it cannot start while a container of that name already exists — it fails on the
+name collision rather than replacing anything. Stop and remove the old container
+first, then let systemd own it. Its data is on the `pdfx-blob` volume, not in the
+container, so this costs nothing:
+
+```bash
+podman stop clear-extractor && podman rm clear-extractor
+systemctl --user start clear-extractor.service
 ```
 
 Alternatives, if the extractor is unavailable: `ACTIVE_PARSER=idoc` with
@@ -598,6 +626,7 @@ To create the volumes by hand instead:
 
 ```bash
 podman volume create clear-storage
+podman volume create pdfx-blob
 podman volume create clear-redis-data
 podman volume ls
 ```
@@ -613,11 +642,11 @@ names the service that failed rather than a dependency chain that gave up:
 
 ```text
 PostgreSQL (host, already running)
-clear-extractor (already running, see §20)
       │
       ├─► clear-redis
+      ├─► clear-extractor   (depends on nothing; the parser stage needs it)
       │
-      └─► clear-migrate  (oneshot: systemd waits for exit 0)
+      └─► clear-migrate     (oneshot: systemd waits for exit 0)
                    │
                    ▼
              clear-backend ──► clear-worker-parser
@@ -855,6 +884,7 @@ ssh -L 9100:127.0.0.1:9100 -L 8000:127.0.0.1:8000 <user>@<vm>
 | Volume | Mounted at | Holds | Persistent | If the container is deleted |
 |---|---|---|---|---|
 | `clear-storage` | `/var/lib/cip/storage` in backend + **both workers** | every uploaded contract and generated export, plus benchmark results and parser fixtures | **critical** | survives; `podman volume rm` does not |
+| `pdfx-blob` | `/datadrive/blob/CIP_Extraction` in `clear-extractor` | the extractor's working data (`PDFX_BLOB_DIR`) | regenerable | survives |
 | `clear-redis-data` | `/data` in `clear-redis` | BullMQ queue state | minutes | survives |
 | PostgreSQL | `/var/lib/postgresql/17/main` **on the VM** | everything else | **critical** | not a container; unaffected |
 | container temp | image writable layer | LibreOffice conversions, pdfextract scratch | no | recreated |
@@ -1333,7 +1363,7 @@ will fail visibly rather than silently.
 [ ] Database migrations completed         [ ] File upload tested
 [ ] Seed admin created                    [ ] Document processing tested end to end
 [ ] Redis configured                      [ ] Document download via /content tested
-[ ] clear-extractor running on clear-net  [ ] Export generated and downloaded
+[ ] clear-extractor unit started          [ ] Export generated and downloaded
 [ ] Registry authentication configured    [ ] Copilot streams token by token
 [ ] Images built                          [ ] Alert sweeps observed (exactly one worker)
 [ ] Images tested                         [ ] Firewall configured (22/80/443 only)
@@ -1356,6 +1386,14 @@ will fail visibly rather than silently.
 [ ] Writable by the runtime user (uid 10001) in all three containers
 [ ] A worker's write is visible to the API (upload, then view the document)
 [ ] Files survive a container recreate (restart.sh, then re-open the document)
+
+--- extractor -----------------------------------------------------------------
+[ ] EXTRACTOR_IMAGE resolves and pulls
+[ ] pdfx-blob volume created
+[ ] Mounted at /datadrive/blob/CIP_Extraction, matching PDFX_BLOB_DIR
+[ ] Reachable as clear-extractor:8000 from the backend container
+[ ] Answers /health on 127.0.0.1:58001 from the host
+[ ] pdfx-blob and clear-storage are separate volumes, not merged
 ```
 
 ---

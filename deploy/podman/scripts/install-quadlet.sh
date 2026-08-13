@@ -25,6 +25,13 @@ require_image_coordinates
 require_podman
 require_user_systemd
 
+# Defaulted here rather than in lib.sh, because it is composed from three values
+# that are only guaranteed to be set after require_image_coordinates has run.
+# Setting EXTRACTOR_IMAGE in images.env overrides this and pins the extractor
+# independently of the CLEAR release, which is usually what you want once the two
+# stop being cut at the same time.
+: "${EXTRACTOR_IMAGE:=$REGISTRY/$REGISTRY_PROJECT/clear-extractor:$IMAGE_TAG}"
+
 QUADLET_DIR="$HOME/.config/containers/systemd"
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$QUADLET_DIR" "$UNIT_DIR"
@@ -43,6 +50,7 @@ render() {
     -e "s|@PROJECT@|$REGISTRY_PROJECT|g" \
     -e "s|@TAG@|$IMAGE_TAG|g" \
     -e "s|@REDIS_IMAGE@|$REDIS_IMAGE|g" \
+    -e "s|@EXTRACTOR_IMAGE@|$EXTRACTOR_IMAGE|g" \
     -e "s|@ENV_FILE@|$ENV_FILE|g" \
     -e "s|@STORAGE_LOCAL_ROOT@|$STORAGE_LOCAL_ROOT|g" \
     -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" \
@@ -62,6 +70,7 @@ log "  registry  $REGISTRY/$REGISTRY_PROJECT"
 log "  tag       $IMAGE_TAG"
 log "  env file  $ENV_FILE"
 log "  storage   volume $STORAGE_VOLUME -> $STORAGE_LOCAL_ROOT"
+log "  extractor $EXTRACTOR_IMAGE"
 echo
 
 for src in "$DEPLOY_DIR"/quadlet/*.network "$DEPLOY_DIR"/quadlet/*.volume "$DEPLOY_DIR"/quadlet/*.container; do

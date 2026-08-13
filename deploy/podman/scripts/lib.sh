@@ -61,6 +61,16 @@ IMAGES_ENV="${IMAGES_ENV:-$CLEAR_CONF_DIR/images.env}"
 # quietly installs a different major version.
 : "${REDIS_IMAGE:=docker.io/library/redis:7-alpine}"
 
+# The PDF extractor. Built and released from its OWN repository, so it is not in
+# APP_IMAGES below and build-images.sh never tries to build it - but it is pulled
+# and run like any other container.
+#
+# Left empty here so install-quadlet.sh can default it to the same
+# registry/project/tag as the application images, while images.env can override it
+# to pin the extractor independently. That independence is the point: the
+# extractor's release cadence is not CLEAR's.
+: "${EXTRACTOR_IMAGE:=}"
+
 # The single env file every container is started with. Every script reads it and
 # every unit references it, so losing this default makes `set -u` abort the whole
 # suite with `ENV_FILE: unbound variable` - a failure that names none of them.
@@ -111,6 +121,10 @@ image_ref() { printf '%s/%s/%s:%s' "$REGISTRY" "$REGISTRY_PROJECT" "$1" "${2:-$I
 # walks it backwards.
 CLEAR_UNITS=(
   clear-redis.service
+  # Early, and before the workers: the parser stage sends every document here, so
+  # a worker that comes up first has nothing to parse with. It depends on nothing
+  # itself, so there is no reason to start it any later.
+  clear-extractor.service
   clear-migrate.service
   clear-backend.service
   clear-worker-parser.service
@@ -123,6 +137,7 @@ CLEAR_UNITS=(
 # to inspect once it has exited.
 CLEAR_CONTAINERS=(
   clear-redis
+  clear-extractor
   clear-backend
   clear-worker-parser
   clear-worker-ai

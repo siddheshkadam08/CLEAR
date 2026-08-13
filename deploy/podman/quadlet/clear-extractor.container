@@ -1,0 +1,76 @@
+# The PDF layout extractor.
+#
+# A SEPARATE project. Its image is built and released from its own repository, not
+# by deploy/podman/scripts/build-images.sh - which is why its coordinates come from
+# `EXTRACTOR_IMAGE` in images.env rather than from the three application images.
+# That also lets it be pinned and rolled independently of the CLEAR release, which
+# is the whole reason for keeping it separate.
+#
+# It is a hard dependency of the parser stage all the same: `ACTIVE_PARSER=pdfextract`
+# sends every uploaded document here, so nothing gets past validation without it.
+#
+# Two addresses, and using the wrong one is the classic failure
+# -------------------------------------------------------------
+#   clear-extractor:8000     what the BACKEND and WORKERS use. Container name on
+#                            the clear-net network, resolved by netavark's
+#                            embedded DNS. This is what PDFEXTRACT_URL is set to.
+#   127.0.0.1:58001          what an OPERATOR uses, from the VM's own shell.
+#
+# Putting the host address in PDFEXTRACT_URL fails every parse with a connection
+# refused naming the loopback - which reads as "the extractor is down" when it is
+# running perfectly well and simply is not at 127.0.0.1 from inside a container.
+#
+# Storage
+# -------
+# Its own volume, not the application's. PDFX_BLOB_DIR and the mount below must
+# agree; see the header of pdfx-blob.volume for why the two are kept apart.
+#
+# Installed to:  ~/.config/containers/systemd/clear-extractor.container
+# Generates:     clear-extractor.service
+[Unit]
+Description=CLEAR PDF extractor
+# No dependency on Postgres, Redis or the migration: it holds no application state
+# and answers a single HTTP endpoint. Starting early means it is ready by the time
+# the first document reaches the parser stage.
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=@EXTRACTOR_IMAGE@
+ContainerName=clear-extractor
+Network=clear.network
+
+# Where it keeps its working data, inside the container. Must match the mount
+# below, or it writes into the container's own layer and loses everything on the
+# next recreate.
+Environment=PDFX_BLOB_DIR=/datadrive/blob/CIP_Extraction
+Volume=pdfx-blob.volume:/datadrive/blob/CIP_Extraction
+
+# 127.0.0.1 only. The extractor accepts whole contracts by upload and has no
+# authentication of its own, so it must not be reachable from outside this host.
+# The port differs from the container's because 8000 is already published on
+# loopback by the API.
+PublishPort=127.0.0.1:58001:8000
+
+# Probed on the container's OWN port, 8000 - not the published 58001, which does
+# not exist inside the container's network namespace.
+HealthCmd=curl -fsS http://127.0.0.1:8000/health
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=30s
+
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+# A parse in flight is a document part-way through extraction. Let it finish; the
+# stage that called it is waiting on the response and would otherwise retry the
+# whole thing.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

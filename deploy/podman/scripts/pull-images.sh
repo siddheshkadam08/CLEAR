@@ -30,10 +30,17 @@ for spec in "${APP_IMAGES[@]}"; do
 done
 
 echo
-# Redis only. There is no object store to pull: documents live on the
+# Redis, plus the PDF extractor. No object store to pull: documents live on the
 # `clear-storage` podman volume and are served by the API.
-log "Third-party images"
-for ref in "$REDIS_IMAGE"; do
+#
+# The extractor is released from its own repository, so it is not among the images
+# build-images.sh produces - but the VM still needs it locally to run the
+# container. Defaulted to the same registry/project/tag as the application images;
+# set EXTRACTOR_IMAGE in images.env to pin it independently.
+: "${EXTRACTOR_IMAGE:=$REGISTRY/$REGISTRY_PROJECT/clear-extractor:$IMAGE_TAG}"
+
+log "Third-party and sibling images"
+for ref in "$REDIS_IMAGE" "$EXTRACTOR_IMAGE"; do
   log "Pulling $ref"
   podman pull "$ref" || die "Could not pull $ref."
   ok "$ref"

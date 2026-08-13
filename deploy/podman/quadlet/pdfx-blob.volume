@@ -1,0 +1,35 @@
+# The PDF extractor's own storage. Mounted at /datadrive/blob/CIP_Extraction in
+# clear-extractor, which reads that path from PDFX_BLOB_DIR.
+#
+# Deliberately SEPARATE from clear-storage, and the separation is the point.
+#
+#   clear-storage  ->  /var/lib/cip/storage           the application's documents
+#   pdfx-blob      ->  /datadrive/blob/CIP_Extraction  the extractor's working data
+#
+# They are two different projects with two different lifecycles. The extractor is
+# released from its own repository and can be redeployed, cleared or resized
+# without touching a single contract; merging the two would couple them, and would
+# put a service that rewrites its own scratch data on the same volume as the only
+# copy of every uploaded agreement.
+#
+# The application never reads this volume. Contract bytes reach CLEAR over HTTP,
+# in the extractor's response - not by both sides sharing a directory.
+#
+# If the container is deleted: the data survives. Only `podman volume rm` removes
+# it. Losing it costs the extractor its cached working data, not any contract.
+#
+# Not in scripts/backup.sh, deliberately: it holds regenerable intermediate output,
+# whereas clear-storage holds the documents themselves.
+#
+# Installed to:  ~/.config/containers/systemd/pdfx-blob.volume
+# Generates:     pdfx-blob-volume.service
+[Unit]
+Description=CLEAR PDF extractor blob storage
+
+[Volume]
+# Explicit, because the default would be `systemd-pdfx-blob` - and this name is
+# what `podman volume inspect pdfx-blob` in the guide expects to find.
+VolumeName=pdfx-blob
+
+[Install]
+WantedBy=default.target
