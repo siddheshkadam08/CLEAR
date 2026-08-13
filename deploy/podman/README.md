@@ -13,7 +13,7 @@ This file is only an index of what is here.
 |---|---|
 | `.env.production.example` | every setting the deployment reads, annotated. Copy to `/etc/clear/clear.env`. |
 | `quadlet/` | Podman Quadlet units for the seven long-running containers, plus the network and three volumes. Installed to `~/.config/containers/systemd/`. |
-| `systemd/` | plain units for the two run-once jobs (migrate, bucket provisioning). Installed to `~/.config/systemd/user/`. |
+| `systemd/` | plain unit for the run-once migration job. Installed to `~/.config/systemd/user/`. |
 | `nginx/clear.conf` | the host's nginx: TLS on 443, proxy to the frontend container on `127.0.0.1:8080`. |
 | `scripts/` | build, push, pull, install, start, stop, update, rollback, health-check, backup. |
 
@@ -62,4 +62,19 @@ stages by importing the modules the API imports, so a second image would be ~2.5
 duplicated and a way for the two to drift apart between builds.
 
 `clear-queue` and `clear-frontend` are genuinely separate deployables and have
-their own images. Redis and MinIO are upstream images, pulled unmodified.
+their own images. Redis is an upstream image, pulled unmodified. The PDF
+extractor (`clear-extractor`) is built and released from a separate repository.
+
+## Document storage is the local filesystem
+
+`STORAGE_PROVIDER=local`, `STORAGE_LOCAL_ROOT=/var/lib/cip/storage`. There is no
+object store: contract bytes live on the `clear-storage` podman volume, mounted
+into the API and both worker pools, and the browser reaches them through
+`GET /api/v1/contracts/{contract_id}/content` — already covered by the frontend's
+`/api/` proxy, so downloads are same-origin with no second upstream.
+
+That makes `clear-storage` as critical as the database. `documents.storage_path`
+is a path *into* it, so the volume and the Postgres dump are one backup: restore
+either without the other and the application looks healthy while every download
+404s. `scripts/backup.sh` takes both together and refuses to run if the volume is
+missing.

@@ -1,10 +1,17 @@
 # The application network. Every container that talks to another one joins it.
 #
 # Container-to-container traffic resolves by container name over netavark's
-# embedded DNS - `clear-backend`, `clear-redis`, `clear-minio` - which is why the
+# embedded DNS - `clear-backend`, `clear-redis`, `clear-extractor`, `clear-queue`,
+# `clear-frontend`, `clear-worker-parser`, `clear-worker-ai` - which is why the
 # names in clear.env are those and not addresses. Podman assigns a fresh IP on
 # every restart, so an address written anywhere goes stale the first time a
 # container is replaced.
+#
+# The published host ports are a different namespace and do not work here. The
+# extractor is published on 127.0.0.1:58001 for operators, but a container reaches
+# it as `clear-extractor:8000` - its port INSIDE this network. Using the host
+# address from a container fails with a connection refusal that names the loopback
+# rather than the mistake.
 #
 # Nothing on this network is reachable from outside the host except through a
 # PublishPort, and the only container that publishes anything beyond 127.0.0.1 is

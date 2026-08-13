@@ -30,9 +30,9 @@
 # Generates:     clear-worker-parser.service
 [Unit]
 Description=CLEAR worker pool (parser stages)
-After=network-online.target clear-migrate.service clear-redis.service clear-minio-init.service
+After=network-online.target clear-migrate.service clear-redis.service
 Requires=clear-migrate.service
-Wants=clear-redis.service clear-minio-init.service
+Wants=clear-redis.service
 
 [Container]
 Image=@REGISTRY@/@PROJECT@/clear-backend:@TAG@

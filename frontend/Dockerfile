@@ -56,19 +56,13 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
 # =============================================================================
 FROM nginx:1.27-alpine AS runtime
 
+# The API upstream, substituted into nginx.conf at container start. The only
+# runtime wiring this image needs: document bytes are served by the API from local
+# filesystem storage, so there is no object-storage upstream to configure.
 ARG API_HOST=api
 ARG API_PORT=8000
-# Object storage, proxied same-origin so presigned download URLs need no second
-# public port. STORAGE_BUCKET becomes the nginx location, so it must not collide
-# with a route the SPA owns - see the note in nginx.conf.
-ARG STORAGE_HOST=minio
-ARG STORAGE_PORT=9000
-ARG STORAGE_BUCKET=cip-documents
 ENV API_HOST=$API_HOST \
-    API_PORT=$API_PORT \
-    STORAGE_HOST=$STORAGE_HOST \
-    STORAGE_PORT=$STORAGE_PORT \
-    STORAGE_BUCKET=$STORAGE_BUCKET
+    API_PORT=$API_PORT
 
 # Opts into the stock `15-local-resolvers.envsh`, which exports the
 # NGINX_LOCAL_RESOLVERS that the `resolver` directive in nginx.conf depends on.

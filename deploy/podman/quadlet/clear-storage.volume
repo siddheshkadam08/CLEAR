@@ -1,33 +1,50 @@
-# Shared application storage: mounted at /var/lib/cip/storage on the backend and
-# on both worker pools.
+# THE document store. Mounted at /var/lib/cip/storage in clear-backend,
+# clear-worker-parser and clear-worker-ai.
+#
+# This deployment has no object store: STORAGE_PROVIDER=local, and the bytes of
+# every uploaded contract and every generated export live here. That makes this
+# volume as critical as the database, and for a reason worth stating plainly -
+# `documents.storage_path` in Postgres is a path INTO this volume. Lose the volume
+# and you do not get an empty-looking application; you get a full-looking one whose
+# every document download 404s while the row insists the file exists.
 #
 # What lives here
 # ---------------
+#   contracts/            uploaded documents and their converted PDFs. The
+#                         subdirectory name is STORAGE_CONTAINER, and it is part of
+#                         every stored path - changing it after the first upload
+#                         strands everything already written.
 #   evaluation-results/   benchmark reports the admin Retrieval Quality screen
-#                         reads. Written by `cip benchmark`, read by the API - so
-#                         both must see the same directory, which is why
+#                         reads. Written by `cip benchmark`, read by the API, so
+#                         both must see the same directory - which is why
 #                         EVALUATION_RESULTS_DIR is absolute and points here.
 #   fixtures/parser/      only written when PARSER_RECORD_FIXTURES=true, which
 #                         production sets to false.
 #
-# What does NOT live here: document bytes. STORAGE_PROVIDER=minio puts those in
-# object storage (production refuses STORAGE_PROVIDER=local outright). If a
-# deployment ever switches to a local provider, this volume becomes the primary
-# document store and its backup becomes as critical as the database's.
+# Shared read-write by three containers, deliberately: a worker writes the
+# converted PDF that the API later streams to the viewer. They are separate
+# processes on one host, so this is ordinary filesystem sharing, not a distributed
+# write - but it does mean all three must mount the same volume at the same path,
+# and STORAGE_LOCAL_ROOT in clear.env must agree with all of them.
 #
-# If the container is deleted: nothing here is lost. The volume outlives every
-# container that mounts it and is only removed by an explicit `podman volume rm`.
+# If a container is deleted: nothing here is lost. The volume outlives every
+# container that mounts it and goes only to an explicit `podman volume rm`.
 #
-# Backup:  podman volume export clear-storage --output clear-storage-$(date +%F).tar
+# Backup - see deploy/podman/scripts/backup.sh, which takes this and the Postgres
+# dump together, because restoring one without the other leaves the database and
+# the files disagreeing about what exists:
+#   podman volume export clear-storage --output clear-storage-$(date +%F).tar
+# Restore:
+#   podman volume import clear-storage clear-storage-2026-08-13.tar
 #
 # Installed to:  ~/.config/containers/systemd/clear-storage.volume
 # Generates:     clear-storage-volume.service
 [Unit]
-Description=CLEAR shared application storage
+Description=CLEAR document storage (local filesystem)
 
 [Volume]
-# Without this the volume would be named `systemd-clear-storage`, which no backup
-# command in the guide would find.
+# Explicit. Without it the volume would be named `systemd-clear-storage`, which no
+# backup or inspect command in the guide would find.
 VolumeName=clear-storage
 
 [Install]

@@ -58,23 +58,16 @@ read_env() {
 
 VITE_API_BASE_URL="${VITE_API_BASE_URL:-$(read_env VITE_API_BASE_URL)}"
 VITE_ENABLE_MICROSOFT_SSO="${VITE_ENABLE_MICROSOFT_SSO:-$(read_env VITE_ENABLE_MICROSOFT_SSO)}"
-STORAGE_BUCKET="${STORAGE_BUCKET:-$(read_env STORAGE_CONTAINER)}"
 : "${VITE_API_BASE_URL:=/api/v1}"
 : "${VITE_ENABLE_MICROSOFT_SSO:=false}"
-: "${STORAGE_BUCKET:=cip-documents}"
 
-# The bucket name becomes an nginx `location` in the frontend image. `contracts`
-# would shadow the SPA's own /contracts/<uuid> route, and every document download
-# would return the application's HTML with a 200.
-if [[ "$STORAGE_BUCKET" == "contracts" ]]; then
-  die "STORAGE_CONTAINER=contracts collides with the SPA route /contracts/<uuid>.
-Use something the router does not own, e.g. cip-documents, and set the same value
-in the deployed clear.env."
-fi
+# No storage build arguments. Document bytes are served by the API from local
+# filesystem storage, so the frontend's nginx has one upstream - the backend - and
+# it is set on the container at runtime rather than baked in here.
 
 log "Registry ...... $REGISTRY/$REGISTRY_PROJECT"
 log "Tag ........... $IMAGE_TAG"
-log "Frontend args . VITE_API_BASE_URL=$VITE_API_BASE_URL  SSO=$VITE_ENABLE_MICROSOFT_SSO  bucket=$STORAGE_BUCKET"
+log "Frontend args . VITE_API_BASE_URL=$VITE_API_BASE_URL  SSO=$VITE_ENABLE_MICROSOFT_SSO"
 echo
 
 cd "$REPO_ROOT"
@@ -106,9 +99,6 @@ for spec in "${APP_IMAGES[@]}"; do
     # same values keeps `podman run` of this image alone workable for debugging.
     args+=(--build-arg "API_HOST=clear-backend")
     args+=(--build-arg "API_PORT=8000")
-    args+=(--build-arg "STORAGE_HOST=clear-minio")
-    args+=(--build-arg "STORAGE_PORT=9000")
-    args+=(--build-arg "STORAGE_BUCKET=$STORAGE_BUCKET")
   fi
 
   args+=("$context")

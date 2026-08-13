@@ -30,8 +30,10 @@ for spec in "${APP_IMAGES[@]}"; do
 done
 
 echo
+# Redis only. There is no object store to pull: documents live on the
+# `clear-storage` podman volume and are served by the API.
 log "Third-party images"
-for ref in "$REDIS_IMAGE" "$MINIO_IMAGE" "$MC_IMAGE"; do
+for ref in "$REDIS_IMAGE"; do
   log "Pulling $ref"
   podman pull "$ref" || die "Could not pull $ref."
   ok "$ref"
@@ -42,7 +44,7 @@ done
 echo
 log "Local image store"
 podman images --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.Created}}" |
-  grep -E "clear-|redis|minio|REPOSITORY" || true
+  grep -E "clear-|redis|REPOSITORY" || true
 
 cat <<EOF
 

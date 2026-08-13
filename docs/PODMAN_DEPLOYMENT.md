@@ -31,7 +31,7 @@ a registry — is marked **`REQUIRES CONFIRMATION`** and is never silently inven
 │                    │                                                          │
 │                    ▼  127.0.0.1:8080                                          │
 │              ┌───────────────┐                                                │
-│              │ clear-frontend│  nginx: SPA + /api proxy + bucket proxy        │
+│              │ clear-frontend│  nginx: React SPA + /api proxy                 │
 │              └───────┬───────┘                                                │
 │                      │  clear-net (podman bridge)                             │
 │         ┌────────────┼─────────────────┬──────────────────┐                   │
@@ -39,14 +39,19 @@ a registry — is marked **`REQUIRES CONFIRMATION`** and is never silently inven
 │  ┌────────────┐ ┌──────────┐  ┌────────────────┐ ┌────────────────┐          │
 │  │clear-backend│ │clear-queue│  │clear-worker-   │ │clear-worker-ai │          │
 │  │  API :8000 │ │ BullMQ   │  │parser   :8001  │ │        :8001   │          │
-│  └─────┬──────┘ │  :9100   │  └───────┬────────┘ └───────┬────────┘          │
-│        │        └────┬─────┘          │                  │                   │
-│        │             │                │                  │                   │
-│        ├─────────────┴────────────────┴──────────────────┤                   │
-│        ▼                                                 ▼                   │
-│  ┌────────────┐                                   ┌────────────┐             │
-│  │clear-redis │  broker + cache                   │clear-minio │ documents   │
-│  └────────────┘                                   └────────────┘             │
+│  └──┬──────┬──┘ │  :9100   │  └──┬─────────────┘ └──┬─────────────┘          │
+│     │      │    └────┬─────┘     │                  │                        │
+│     │      └─────────┴───────────┴──────────────────┘                        │
+│     │                ▼                                                        │
+│     │         ┌────────────┐  ┌─────────────────┐                            │
+│     │         │clear-redis │  │ clear-extractor │  PDF layout, :8000         │
+│     │         │broker+cache│  └─────────────────┘  (host :58001)             │
+│     │         └────────────┘                                                  │
+│     ▼                                                                         │
+│  ┌──────────────────────────────────────────┐                                │
+│  │ volume clear-storage                     │  mounted /var/lib/cip/storage  │
+│  │ every contract and export, on disk       │  in API + both worker pools    │
+│  └──────────────────────────────────────────┘                                │
 │                                                                               │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
 │  │  PostgreSQL 17 + pgvector — installed on the VM, a systemd service,      │ │
@@ -54,6 +59,11 @@ a registry — is marked **`REQUIRES CONFIRMATION`** and is never silently inven
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
+
+There is **no object store**. `STORAGE_PROVIDER=local`: document bytes live on the
+`clear-storage` podman volume and the browser reaches them through
+`GET /api/v1/contracts/{contract_id}/content`, which the frontend's `/api/` proxy
+already covers.
 
 ### What each service actually is, from the code
 
@@ -65,7 +75,7 @@ a registry — is marked **`REQUIRES CONFIRMATION`** and is never silently inven
 | `clear-queue` | Node 20, BullMQ 5, Express | `node dist/index.js` | 9100 | `GET /healthz` |
 | `clear-frontend` | React 18 + Vite 6 + TypeScript, served by nginx 1.27-alpine | nginx | 8080 | `GET /health` |
 | `clear-redis` | `redis:7-alpine` | `redis-server --appendonly yes` | 6379 | `redis-cli ping` |
-| `clear-minio` | `minio/minio` | `server /data` | 9000 / 9001 | `GET /minio/health/live` |
+| `clear-extractor` | PDF layout extractor, **built from a separate repository** | its own | 8000 (host `58001`) | `GET /health` |
 | PostgreSQL | 17 + pgvector, **on the host** | `systemd` | 5432 | `pg_isready` |
 
 Liveness is `/healthz` **at the root**, not under `/api/v1`. Probe it with
@@ -98,19 +108,33 @@ promote through the registry.
 This is not "combining unrelated services into one container": there are four
 separate containers running that image, scaled and restarted independently.
 
-### 2.2 MinIO is containerised; PostgreSQL is not
+### 2.2 Documents are files on a volume, not objects in a store
 
-`APP_ENV=production` **refuses to boot** with `STORAGE_PROVIDER=local`
-(`app/core/config.py::_guard_production`). So object storage has to be MinIO, S3 or
-Azure Blob. MinIO is containerised because its data lives in a podman volume that
-outlives the container, and swapping it for a managed endpoint later is three
-environment variables and one deleted unit.
+`STORAGE_PROVIDER=local`, `STORAGE_LOCAL_ROOT=/var/lib/cip/storage`. The bytes of
+every contract and every export live on the `clear-storage` podman volume, mounted
+into the API and both worker pools.
 
-PostgreSQL is not, because the database is the one thing whose lifecycle must not
-be coupled to a container's: its data directory belongs on the VM's filesystem
-where the distribution's own backup, upgrade and monitoring tooling can see it,
-`pg_dump` runs without an `exec` into anything, and a mistyped `podman volume rm`
-cannot take it.
+The browser never touches storage. The local adapter's `signed_url()` has nothing
+to sign against, so it returns an API-relative path and `ContractService.file_access`
+rewrites it onto `GET /api/v1/contracts/{contract_id}/content` — which streams from
+the storage adapter with the request's own authorisation applied. That route is
+under `/api/`, which the frontend nginx already proxies, so downloads are
+same-origin with no second upstream, no bucket name in the URL space, and no
+presigned signature that has to survive a proxy hop intact.
+
+The application supported this all along; the only code change needed was
+deleting a production guard that refused `STORAGE_PROVIDER=local` outright.
+
+**This makes `clear-storage` as critical as the database.**
+`documents.storage_path` is a path *into* that volume, so the two are one backup
+unit — see §12. Losing the volume does not produce an empty-looking application;
+it produces a full-looking one where every download 404s.
+
+PostgreSQL is *not* on a podman volume, because the database is the one thing
+whose lifecycle must not be coupled to a container's: its data directory belongs
+on the VM's filesystem where the distribution's own backup, upgrade and monitoring
+tooling can see it, `pg_dump` runs without an `exec` into anything, and a mistyped
+`podman volume rm` cannot take it.
 
 ### 2.3 One env file per container, with no allow-list
 
@@ -156,14 +180,14 @@ deploy/podman/
 ├── README.md
 ├── quadlet/                     Podman Quadlet units (long-running containers)
 │   ├── clear.network
-│   ├── clear-storage.volume  clear-minio-data.volume  clear-redis-data.volume
-│   ├── clear-redis.container    clear-minio.container
+│   ├── clear-storage.volume     THE document store
+│   ├── clear-redis-data.volume
+│   ├── clear-redis.container
 │   ├── clear-backend.container  clear-queue.container
 │   ├── clear-worker-parser.container  clear-worker-ai.container
 │   └── clear-frontend.container
-├── systemd/                     plain units for the two run-once jobs
-│   ├── clear-migrate.service
-│   └── clear-minio-init.service
+├── systemd/                     plain unit for the run-once migration
+│   └── clear-migrate.service
 ├── nginx/clear.conf             host TLS reverse proxy
 └── scripts/
     ├── lib.sh                shared helpers, image coordinates, unit list
@@ -176,7 +200,6 @@ deploy/podman/
     ├── start.sh  stop.sh  restart.sh
     ├── update.sh  rollback.sh
     ├── health-check.sh
-    ├── minio-init.sh
     └── backup.sh
 ```
 
@@ -409,28 +432,23 @@ chmod 600 /etc/clear/clear.env
 # Secrets. The production guard refuses to boot on the shipped defaults.
 echo "JWT_SECRET=$(openssl rand -hex 32)"
 echo "INTERNAL_API_TOKEN=$(openssl rand -hex 32)"
-echo "S3_SECRET_ACCESS_KEY=$(openssl rand -base64 24 | tr -d '/+=')"
 
 $EDITOR /etc/clear/clear.env
 ```
 
 Fill in every line marked `<<< SET THIS` and every `<<< REQUIRES CONFIRMATION`.
-At minimum: `DATABASE_URL`, `POSTGRES_*`, `JWT_SECRET`, `INTERNAL_API_TOKEN`,
-`SEED_ADMIN_PASSWORD`, `NEW_USER_DEFAULT_PASSWORD`, `S3_SECRET_ACCESS_KEY`,
-`CORS_ORIGINS`, `S3_PUBLIC_ENDPOINT_URL`, and the LLM / embedding block.
+At minimum: `DATABASE_URL`, `POSTGRES_PASSWORD`, `JWT_SECRET`,
+`INTERNAL_API_TOKEN`, `SEED_ADMIN_PASSWORD`, `NEW_USER_DEFAULT_PASSWORD`,
+`CORS_ORIGINS`, and the LLM / embedding block.
 
-MinIO reads its own credentials from a separate file, so the object store does not
-receive every LLM key the backend holds. The two must agree — `start.sh` refuses
-to start if they do not.
+The storage block needs no credentials at all — `STORAGE_PROVIDER=local` writes to
+a mounted filesystem. What it does need is agreement between three places, which
+`start.sh` checks before starting anything:
 
-```bash
-umask 077
-cat > /etc/clear/minio.env <<EOF
-MINIO_ROOT_USER=$(sed -n 's/^S3_ACCESS_KEY_ID=//p' /etc/clear/clear.env)
-MINIO_ROOT_PASSWORD=$(sed -n 's/^S3_SECRET_ACCESS_KEY=//p' /etc/clear/clear.env)
-EOF
-chmod 600 /etc/clear/minio.env
-```
+| Setting | Must equal |
+|---|---|
+| `STORAGE_LOCAL_ROOT` in `clear.env` | the mount path in the backend and both worker units (`/var/lib/cip/storage`) |
+| `STORAGE_CONTAINER` in `clear.env` | itself, for ever — it is part of every stored path, so changing it after the first upload strands everything already written |
 
 ### Step 17 — Image coordinates
 
@@ -443,15 +461,13 @@ IMAGE_TAG=v1.0.0
 PREVIOUS_IMAGE_TAG=
 
 REDIS_IMAGE=docker.io/library/redis:7-alpine
-# REQUIRES CONFIRMATION: pin these to a MinIO RELEASE.* tag you have tested.
-MINIO_IMAGE=docker.io/minio/minio:latest
-MC_IMAGE=docker.io/minio/mc:latest
 
-# Must equal STORAGE_CONTAINER in clear.env and the frontend image's build arg.
-STORAGE_BUCKET=cip-documents
+# Where documents live. STORAGE_LOCAL_ROOT in clear.env must match the second
+# value; start.sh refuses to start if they disagree.
+STORAGE_VOLUME=clear-storage
+STORAGE_LOCAL_ROOT=/var/lib/cip/storage
 
 ENV_FILE=/etc/clear/clear.env
-MINIO_ENV_FILE=/etc/clear/minio.env
 INSTALL_DIR=/opt/clear/deploy/podman
 EOF
 chmod 640 /etc/clear/images.env
@@ -494,16 +510,46 @@ Verify what landed:
 podman manifest inspect ghcr.io/your-org/clear/clear-backend:v1.0.0 | head -20
 ```
 
-### Step 20 — Choose the document parser  `REQUIRES CONFIRMATION`
+### Step 20 — The document parser: `clear-extractor`
 
-This is the one external dependency with no defensible default. Pick one and set
-it in `clear.env`:
+This deployment runs `ACTIVE_PARSER=pdfextract` against `clear-extractor`.
 
-| Option | Configuration | Notes |
-|---|---|---|
-| Hosted iDoc | `ACTIVE_PARSER=idoc`, `IDOC_ENDPOINT`, `IDOC_API_KEY` | Needs egress. `IDOC_VERIFY_TLS=true` is enforced in production — contract text is uploaded to it. |
-| Self-hosted extractor | `ACTIVE_PARSER=pdfextract`, `PDFEXTRACT_URL=http://<host>:8005/extract?format=adi` | `pdf_text_extractor` lives in a **separate repository** and is not built by this deployment. Run it on the VM or another host first. |
-| `pymupdf` | `ACTIVE_PARSER=pymupdf` | **Degraded.** No layout JSON, so the document-pipeline stage cannot run and clauses lose their page coordinates. Not for production. |
+**It is not built, started or supervised by anything in this repository.** The
+extractor is released from a separate repository; these scripts and units do not
+reference it, and `start.sh` will not bring it up. Deploy and manage it
+separately, and make sure it is running before the parser stage is exercised.
+
+What this deployment requires of it:
+
+| | |
+|---|---|
+| Container name | `clear-extractor` |
+| Network | attached to `clear-net`, so `PDFEXTRACT_URL` resolves |
+| Port inside `clear-net` | `8000` — what `PDFEXTRACT_URL=http://clear-extractor:8000` uses |
+| Host port | `127.0.0.1:58001` for operator checks — **not** what the backend uses |
+| Health | `GET /health` |
+| Its own data path | `/datadrive/blob/CIP_Extraction`, unchanged by this work |
+
+```bash
+# From the host:
+curl -fsS http://127.0.0.1:58001/health
+# From inside the network, which is the one that matters:
+podman exec clear-backend curl -fsS http://clear-extractor:8000/health
+```
+
+If the first succeeds and the second does not, the extractor is running but is not
+attached to `clear-net`:
+
+```bash
+podman network connect clear-net clear-extractor
+```
+
+Alternatives, if the extractor is unavailable: `ACTIVE_PARSER=idoc` with
+`IDOC_ENDPOINT` and `IDOC_API_KEY` (needs egress; `IDOC_VERIFY_TLS=true` is
+enforced in production because contract text is uploaded to it), or
+`ACTIVE_PARSER=pymupdf`, which is **degraded** — no layout JSON, so the
+document-pipeline stage cannot run and clauses lose their page coordinates. Not
+for production.
 
 `PARSER_MODE=live`, never `fixture`: fixture replays a recorded response and in
 production fails every document it has not already seen.
@@ -546,13 +592,12 @@ It renders the templates, reloads the user manager, checks that **every** unit w
 generated, and enables them at boot. A Quadlet file with a syntax error is
 silently skipped rather than reported — the generated service simply does not
 exist, and `systemctl start` then fails with "Unit not found", which reads like a
-typo. That check is why the script looks for all nine.
+typo. That check is why the script verifies every unit in `CLEAR_UNITS`.
 
 To create the volumes by hand instead:
 
 ```bash
 podman volume create clear-storage
-podman volume create clear-minio-data
 podman volume create clear-redis-data
 podman volume ls
 ```
@@ -568,10 +613,10 @@ names the service that failed rather than a dependency chain that gave up:
 
 ```text
 PostgreSQL (host, already running)
+clear-extractor (already running, see §20)
       │
-      ├─► clear-redis ─────────────┐
-      ├─► clear-minio ─► clear-minio-init
-      │                            │
+      ├─► clear-redis
+      │
       └─► clear-migrate  (oneshot: systemd waits for exit 0)
                    │
                    ▼
@@ -590,9 +635,15 @@ deployment rather than producing a stack of 500s. It runs
 the first administrator.
 
 Before starting anything, `start.sh` refuses on: CRLF in the env file, quoted
-values, empty required secrets, `STORAGE_PROVIDER=local`,
-`STORAGE_CONTAINER=contracts`, a MinIO credential mismatch, and a PostgreSQL that
-is not accepting connections.
+values, empty required secrets, an empty `STORAGE_CONTAINER`, a
+`STORAGE_LOCAL_ROOT` that disagrees with the path the units mount the volume at,
+and a PostgreSQL that is not accepting connections.
+
+That storage check is the one worth understanding. If `STORAGE_LOCAL_ROOT` names a
+directory the volume is *not* mounted at, everything works — uploads succeed, the
+viewer renders — right up until a container is recreated, at which point every
+file written into the container's own layer is gone while `storage_path` in the
+database still points at it.
 
 ### Step 30–33 — Verify
 
@@ -600,10 +651,12 @@ is not accepting connections.
 /opt/clear/deploy/podman/scripts/health-check.sh
 ```
 
-That covers §23 of the checklist in one command — unit states, container health,
-`/healthz` and `/readyz`, both worker pools, the dispatcher, the frontend, the
-`/api/` proxy hop, Redis, PostgreSQL *from inside the backend container*, MinIO,
-and whether every pipeline stage has a handler.
+One command covers unit states, container health, `/healthz` and `/readyz`, both
+worker pools, the dispatcher, the frontend, the `/api/` proxy hop, Redis,
+PostgreSQL *from inside the backend container*, the extractor at
+`clear-extractor:8000`, whether every pipeline stage has a handler, and — for
+local storage — that `/var/lib/cip/storage` is mounted and writable **by the
+runtime user in all three containers that write to it**.
 
 By hand:
 
@@ -620,6 +673,13 @@ podman exec clear-backend python -m app.cli embeddings   # coverage and dimensio
 podman exec clear-redis redis-cli ping
 curl -fsS http://127.0.0.1:9100/healthz                  # queue depths
 curl -fsS http://127.0.0.1:8080/health                   # frontend
+curl -fsS http://127.0.0.1:58001/health                  # extractor, from the host
+
+# Local document storage: mounted, and writable by the container's own user.
+podman volume inspect clear-storage
+podman inspect clear-backend --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+podman exec clear-backend ls -ld /var/lib/cip/storage    # expect owner cip (uid 10001)
+podman exec clear-backend sh -c 'touch /var/lib/cip/storage/.probe && rm /var/lib/cip/storage/.probe && echo writable'
 ```
 
 Then the tests that separate a working deployment from a healthy-looking one:
@@ -634,9 +694,12 @@ Then the tests that separate a working deployment from a healthy-looking one:
    podman logs -f clear-queue        # the dispatcher naming each stage
    podman logs -f clear-worker-ai
    ```
-3. **Open a contract.** The PDF viewer fetches a presigned URL through the nginx
-   bucket proxy — this is the end-to-end test of `S3_PUBLIC_ENDPOINT_URL`,
-   `STORAGE_CONTAINER` and the SigV4 host header all agreeing.
+3. **Open a contract.** The PDF viewer fetches
+   `GET /api/v1/contracts/{id}/content`, which streams from the storage volume
+   through the `/api/` proxy. This is the end-to-end test that
+   `STORAGE_LOCAL_ROOT`, `STORAGE_CONTAINER` and the volume mount all agree — and
+   that a worker's write is visible to the API, which is the point of the three
+   containers sharing one volume.
 4. **Run an export and download it.**
 5. **Confirm the sweeps run with no scheduler container.** Watch both worker pools:
    exactly one logs `alert_evaluator_swept` per tick, never both. That is the
@@ -679,7 +742,6 @@ Once the certificate is confirmed good, update `clear.env` and restart:
 
 ```bash
 CORS_ORIGINS=https://<your-host>
-S3_PUBLIC_ENDPOINT_URL=https://<your-host>
 OIDC_REDIRECT_URI=https://<your-host>/api/v1/auth/oidc/callback
 OIDC_POST_LOGIN_REDIRECT=https://<your-host>/auth/callback
 ```
@@ -769,14 +831,16 @@ is not the default here. An explicit address always works.
 | 8080 | `clear-frontend` | `127.0.0.1` only | yes |
 | 8000 | `clear-backend` | `127.0.0.1` only | for operators |
 | 9100 | `clear-queue` | `127.0.0.1` only | for operators |
-| 9000 | `clear-minio` | `127.0.0.1` only | for `mc` and backups |
-| 9001 | `clear-minio` console | `127.0.0.1` only | optional |
+| 58001 | `clear-extractor` | `127.0.0.1` only | for operators |
+| 8000 | `clear-extractor` **inside** `clear-net` | **podman network only** | internal — this is the port `PDFEXTRACT_URL` uses |
 | 8001 | worker pools | **podman network only**, not published | internal |
 | 6379 | `clear-redis` | **podman network only**, not published | internal |
 | 5432 | PostgreSQL | host, `localhost` + one bridge address | internal |
 
-**Must never be public:** 5432, 6379, 9000, 9001, 8001, 8000, 9100. An exposed
-Redis with no password is a remote code execution primitive, not a database.
+No object-storage ports: there is no object store.
+
+**Must never be public:** 5432, 6379, 8000, 8001, 9100, 58001. An exposed Redis
+with no password is a remote code execution primitive, not a database.
 
 Reach a loopback port from your laptop with a tunnel, not a firewall rule:
 
@@ -790,16 +854,19 @@ ssh -L 9100:127.0.0.1:9100 -L 8000:127.0.0.1:8000 <user>@<vm>
 
 | Volume | Mounted at | Holds | Persistent | If the container is deleted |
 |---|---|---|---|---|
-| `clear-minio-data` | `/data` in `clear-minio` | every uploaded contract and generated export | **critical** | survives; `podman volume rm` does not |
-| `clear-storage` | `/var/lib/cip/storage` in backend + both workers | benchmark results, parser fixtures | yes | survives |
+| `clear-storage` | `/var/lib/cip/storage` in backend + **both workers** | every uploaded contract and generated export, plus benchmark results and parser fixtures | **critical** | survives; `podman volume rm` does not |
 | `clear-redis-data` | `/data` in `clear-redis` | BullMQ queue state | minutes | survives |
 | PostgreSQL | `/var/lib/postgresql/17/main` **on the VM** | everything else | **critical** | not a container; unaffected |
 | container temp | image writable layer | LibreOffice conversions, pdfextract scratch | no | recreated |
 
-`clear-minio-data` and PostgreSQL are **one backup**. `documents.storage_path` in
-the database points into the object store, so a database restored newer than the
-object store references files that do not exist — the application looks perfectly
-healthy while every document download 404s. Never restore one without the other.
+`clear-storage` is mounted read-write by three containers on purpose: a worker
+writes the converted PDF that the API later streams to the viewer. All three must
+mount it at the same path, and `STORAGE_LOCAL_ROOT` must equal that path.
+
+`clear-storage` and PostgreSQL are **one backup**. `documents.storage_path` in the
+database is a path into that volume, so a database restored newer than the volume
+references files that do not exist — the application looks perfectly healthy while
+every document download 404s. Never restore one without the other.
 
 `clear-redis-data` is deliberately **not** backed up: restoring a day-old queue
 would replay work already done. If it is ever lost, re-enqueue with
@@ -808,7 +875,8 @@ non-terminal state.
 
 ```bash
 podman volume ls
-podman volume inspect clear-minio-data
+podman volume inspect clear-storage
+du -sh "$(podman volume inspect clear-storage --format '{{.Mountpoint}}')"
 podman system df -v          # what is actually using the disk
 ```
 
@@ -819,11 +887,12 @@ podman system df -v          # what is actually using the disk
 | From | To | Why |
 |---|---|---|
 | `clear-backend` | PostgreSQL | everything |
-| `clear-backend` | `clear-minio` | document bytes; gates `/readyz` |
+| `clear-backend` | `clear-storage` volume | document bytes; gates `/readyz` via the adapter's own write probe. A mount, not a service, so there is nothing to start or order against — but a missing mount fails readiness |
 | `clear-backend` | `clear-redis` | cache, rate limits — **fails open**, so not gated |
 | `clear-queue` | `clear-redis` | the broker itself; hard requirement |
 | `clear-queue` | `clear-backend` / workers | POSTs each stage over internal HTTP |
-| workers | PostgreSQL, `clear-minio` | run the stages |
+| workers | PostgreSQL, `clear-storage` volume | run the stages; the parser worker writes the converted PDF the API later streams |
+| workers | `clear-extractor` | the parser stage POSTs to `PDFEXTRACT_URL` |
 | `clear-frontend` | `clear-backend` | `/api` proxy; resolved per request, so a backend restart does not need a frontend restart |
 | everything | `clear-migrate` | schema must exist first |
 
@@ -901,14 +970,14 @@ systemctl --user restart clear-backend clear-worker-parser clear-worker-ai clear
   the connection string from the same settings the application uses, so no extra
   configuration is needed. Check where you are first with
   `podman exec clear-backend python -m app.cli current`.
-* **Object storage and uploaded documents.** Nothing here touches them.
+* **Uploaded documents.** Nothing here touches the `clear-storage` volume.
 * **`clear.env`.** Configuration is not versioned with the image. If the release
   needed a new setting, remove it by hand.
 
 **When a database restore is required instead:** any release that destroyed data —
 a dropped column, an irreversible data-rewriting migration. Then the order is
-stop → restore the dump → restore the object store *from the same night* → roll
-the image back.
+stop → restore the dump → restore the `clear-storage` volume *from the same
+night* → roll the image back.
 
 ---
 
@@ -923,9 +992,13 @@ Three artefacts per run:
 
 | Artefact | Command underneath | Retention |
 |---|---|---|
-| `postgres-clear.dump` | `pg_dump -Fc --compress=6` | 14 days locally, longer offsite |
-| `minio-data.tar.gz` | `podman volume export clear-minio-data` | same |
-| `config/` | `clear.env`, `minio.env`, `images.env`, rendered units, nginx config | same |
+| `postgres-cip.dump` | `pg_dump -Fc --compress=6` | 14 days locally, longer offsite |
+| `clear-storage.tar.gz` | `podman volume export clear-storage` | same |
+| `config/` | `clear.env`, `images.env`, rendered units, nginx config | same |
+
+The second one is every contract in the system, so the script **fails** rather
+than warns if the volume is absent — a "successful" backup with no documents in it
+is only discovered during a restore, which is the worst possible moment.
 
 `-Fc`, the custom format, not plain SQL: compressed, and restorable
 table-by-table with `pg_restore`. A plain dump of a database with millions of
@@ -946,12 +1019,14 @@ Restore — both artefacts, together:
 ```bash
 /opt/clear/deploy/podman/scripts/stop.sh
 
-pg_restore --host 10.0.0.4 --username clear_app --dbname clear \
-           --clean --if-exists /var/backups/clear/<stamp>/postgres-clear.dump
+pg_restore --host 172.22.20.132 --username cip --dbname cip \
+           --clean --if-exists /var/backups/clear/<stamp>/postgres-cip.dump
 
-gunzip -c /var/backups/clear/<stamp>/minio-data.tar.gz > /tmp/minio-data.tar
-podman volume rm clear-minio-data && podman volume create clear-minio-data
-podman volume import clear-minio-data /tmp/minio-data.tar
+gunzip -c /var/backups/clear/<stamp>/clear-storage.tar.gz > /tmp/clear-storage.tar
+# DESTRUCTIVE: this discards whatever documents are on the volume now. Take a
+# fresh export of it first if the current contents matter at all.
+podman volume rm clear-storage && podman volume create clear-storage
+podman volume import clear-storage /tmp/clear-storage.tar
 
 /opt/clear/deploy/podman/scripts/start.sh
 ```
@@ -1087,28 +1162,41 @@ rebuild the image, do not edit anything on the VM.
 
 ### Uploaded files disappear when a container is replaced
 
+The signature failure of local storage. Documents upload fine, the viewer renders,
+and then a `restart.sh` or an `update.sh` loses everything written since the last
+one — because the bytes were going into the container's writable layer rather than
+onto the volume, while `storage_path` in the database still points at them.
+
 ```bash
-podman volume ls
-podman inspect clear-minio --format '{{json .Mounts}}'
-sed -n 's/^STORAGE_PROVIDER=//p' /etc/clear/clear.env    # must not be 'local'
+podman volume ls                                       # is clear-storage there?
+podman inspect clear-backend --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+sed -n 's/^STORAGE_LOCAL_ROOT=//p' /etc/clear/clear.env  # must equal the destination above
+sed -n 's/^STORAGE_PROVIDER=//p' /etc/clear/clear.env    # expect: local
+podman exec clear-backend ls -la /var/lib/cip/storage
 ```
 
-`STORAGE_PROVIDER=local` without a mounted volume puts document bytes in the
-container's writable layer, and every recreate loses them — while `storage_path`
-in the database still points at them, so the viewer 404s on documents the row says
-exist. Production refuses `local` for this reason.
+`start.sh` refuses to start on this mismatch, so it should not reach production —
+but a hand-run `podman run` without the volume flag reproduces it exactly.
 
-### Every document download 404s or returns HTML
+Check both worker pools too, not just the API: a mount present in the backend and
+missing in `clear-worker-parser` means uploads survive and converted PDFs do not.
 
-Three causes, in order of likelihood:
+### Every document download 404s
 
-1. `STORAGE_CONTAINER` **is `contracts`**, which shadows the SPA route
-   `/contracts/<uuid>` — the proxy location and the router fight, and the router
-   wins. Use `cip-documents`.
-2. `STORAGE_CONTAINER` in `clear.env` differs from the `STORAGE_BUCKET` the
-   frontend was built or started with.
-3. `S3_PUBLIC_ENDPOINT_URL` is not the origin the browser used. SigV4 signs the
-   Host header **including the port**, so a mismatch yields `SignatureDoesNotMatch`.
+1. **`STORAGE_CONTAINER` was changed after documents were uploaded.** It is part of
+   every stored path, so existing rows point into the old subdirectory. Look under
+   `/var/lib/cip/storage/` for a stale directory name — the files are usually still
+   there, under the previous value.
+2. **`STORAGE_LOCAL_ROOT` disagrees with the mount**, so the API is reading an
+   empty directory. Same checks as above.
+3. **The file was written by a worker whose mount is missing**, so it never reached
+   the volume at all.
+
+```bash
+# What the database thinks, versus what is on disk.
+podman exec clear-backend python -m app.cli shell
+podman exec clear-backend find /var/lib/cip/storage -maxdepth 2 -type d
+```
 
 ### The backend restart-loops at boot
 
@@ -1142,10 +1230,16 @@ podman logs clear-worker-parser | grep alert_evaluator_swept
 ```bash
 podman system df -v
 du -sh /var/lib/postgresql/17/main
+du -sh "$(podman volume inspect clear-storage --format '{{.Mountpoint}}')"
 journalctl --user --disk-usage
 podman image prune --all --filter 'until=168h'
 sudo journalctl --vacuum-time=14d
 ```
+
+With local storage the document volume grows without bound — it holds every
+contract ever uploaded plus every export. Watch it alongside the database, and
+note that export retention is swept by the workers while contract files are kept
+for as long as the contract row exists.
 
 Container logs go to journald (`LogDriver=journald`), so cap it in
 `/etc/systemd/journald.conf`:
@@ -1170,8 +1264,10 @@ Enforced by this deployment:
       one rule per allowed CIDR, scoped to one database and one role. A
       `0.0.0.0/0` rule makes the install script abort.
 - [x] Redis is not published at all.
-- [x] MinIO is published on `127.0.0.1` only; the bucket is explicitly private and
-      reached through presigned URLs.
+- [x] Document bytes are never served directly. Every read goes through
+      `GET /api/v1/contracts/{id}/content`, which applies the caller's own
+      authorisation — there is no public path to a file and no presigned URL that
+      outlives a session.
 - [x] Containers run rootless, and the processes inside them are non-root
       (`cip` uid 10001, `node`, `nginx`). `NoNewPrivileges=true` on every unit.
 - [x] Secrets are injected at runtime via `--env-file`, never baked into an image.
@@ -1181,8 +1277,8 @@ Enforced by this deployment:
       The Vite dev server and the `dev` image targets are not used.
 - [x] Registry credentials in `$HOME/.config/containers/auth.json`, mode 600.
 - [x] Only 22, 80, 443 are public. HTTPS with HSTS; 80 redirects.
-- [x] MinIO's credentials are in a separate env file, so the object store does not
-      receive the LLM keys.
+- [x] No object-storage credentials exist at all — local storage needs none, which
+      removes a whole class of key to leak, rotate or misconfigure.
 
 Left to you, because they are policy rather than configuration:
 
@@ -1191,9 +1287,11 @@ Left to you, because they are policy rather than configuration:
 - [ ] Rotate `JWT_SECRET` and `INTERNAL_API_TOKEN` on a schedule. Rotating the JWT
       secret invalidates every issued token — every user is logged out.
 - [ ] Decide who may read `/var/backups/clear`. Those dumps are every contract in
-      the system, in plain text.
-- [ ] Pin `MINIO_IMAGE` and `MC_IMAGE` to tested `RELEASE.*` tags, ideally by
-      digest.
+      the system, in plain text — and so is the `clear-storage` export beside them.
+- [ ] Decide who may read the `clear-storage` volume's mountpoint on the host. Any
+      account that can reach it can read every contract, bypassing the API's
+      authorisation entirely. Under rootless podman it sits under the deployment
+      user's `~/.local/share/containers`, which is the right default.
 
 ---
 
@@ -1205,15 +1303,13 @@ will fail visibly rather than silently.
 | # | Item | Where | If it is wrong |
 |---|---|---|---|
 | 1 | Container registry host and project | `/etc/clear/images.env` | pull fails immediately |
-| 2 | Public hostname and DNS | `nginx/clear.conf`, `CORS_ORIGINS`, `S3_PUBLIC_ENDPOINT_URL`, `OIDC_*` | certificate fails; downloads 404 |
-| 3 | Document parser (§5 step 20) | `ACTIVE_PARSER` and its block | every upload fails at the parser stage |
-| 4 | LLM vendor and key | `LLM_PROVIDER` + credentials | extraction fails; `mock` is refused in production |
-| 5 | Embedding vendor, model, dimension | `EMBEDDING_*` | **backend refuses to boot** — deliberately |
-| 6 | `POSTGRES_HOST` as seen from a container | `clear.env` | migration fails; §6 |
-| 7 | MinIO image version to pin | `images.env` | `:latest` may change under you |
-| 8 | Whether Entra SSO is used | `OIDC_*` **and** the frontend build arg | SSO button absent, or callback rejected |
-| 9 | Offsite backup destination | crontab / `rsync` | backups exist only on the VM being backed up |
-| 10 | `pdf_text_extractor` deployment, if used | separate repository | option 2 of step 20 is unavailable |
+| 2 | Public hostname and DNS | `nginx/clear.conf`, `CORS_ORIGINS`, `OIDC_*` | certificate fails; SSO callback rejected |
+| 3 | LLM vendor and key | `LLM_PROVIDER` + credentials | extraction fails; `mock` is refused in production |
+| 4 | Embedding vendor, model, dimension | `EMBEDDING_*` | **backend refuses to boot** — deliberately |
+| 5 | `POSTGRES_HOST` as seen from a container | `clear.env` | migration fails; §6 |
+| 6 | Whether Entra SSO is used | `OIDC_*` **and** the frontend build arg | SSO button absent, or callback rejected |
+| 7 | Offsite backup destination | crontab / `rsync` | backups exist only on the VM being backed up |
+| 8 | **How `clear-extractor` is deployed and managed** | separate repository | see §20 — this deployment does not build, start or supervise it |
 
 ---
 
@@ -1230,14 +1326,14 @@ will fail visibly rather than silently.
 [ ] PostgreSQL running and enabled        [ ] All containers healthy
 [ ] pgvector installed                    [ ] Backend -> PostgreSQL verified
 [ ] pgvector extension enabled            [ ] Backend -> Redis verified
-[ ] Vector round-trip through HNSW        [ ] Backend -> MinIO verified
+[ ] Vector round-trip through HNSW        [ ] Backend -> extractor verified
 [ ] Database created                      [ ] Worker -> Redis verified
 [ ] Database user created                 [ ] Worker -> PostgreSQL verified
 [ ] pg_hba.conf scoped, no 0.0.0.0/0      [ ] Frontend -> Backend verified
 [ ] Database migrations completed         [ ] File upload tested
 [ ] Seed admin created                    [ ] Document processing tested end to end
-[ ] Redis configured                      [ ] Presigned download tested
-[ ] MinIO bucket created                  [ ] Export generated and downloaded
+[ ] Redis configured                      [ ] Document download via /content tested
+[ ] clear-extractor running on clear-net  [ ] Export generated and downloaded
 [ ] Registry authentication configured    [ ] Copilot streams token by token
 [ ] Images built                          [ ] Alert sweeps observed (exactly one worker)
 [ ] Images tested                         [ ] Firewall configured (22/80/443 only)
@@ -1245,9 +1341,21 @@ will fail visibly rather than silently.
 [ ] Images pushed and read back           [ ] Reverse proxy configured
 [ ] Images pulled on the VM               [ ] HTTPS configured, HSTS on
 [ ] Quadlet/systemd units installed       [ ] PostgreSQL backup configured
-[ ] Units enabled at boot                 [ ] Object storage backup configured
+[ ] Units enabled at boot                 [ ] clear-storage volume backup configured
 [ ] VM reboot tested                      [ ] Backup restore rehearsed
 [ ] Containers recovered automatically    [ ] Rollback procedure rehearsed
+
+--- local document storage --------------------------------------------------
+[ ] STORAGE_PROVIDER=local
+[ ] clear-storage volume created
+[ ] Mounted at /var/lib/cip/storage in clear-backend
+[ ] Mounted at /var/lib/cip/storage in clear-worker-parser
+[ ] Mounted at /var/lib/cip/storage in clear-worker-ai
+[ ] STORAGE_LOCAL_ROOT matches that mount path
+[ ] STORAGE_CONTAINER set, and recorded as never-to-change
+[ ] Writable by the runtime user (uid 10001) in all three containers
+[ ] A worker's write is visible to the API (upload, then view the document)
+[ ] Files survive a container recreate (restart.sh, then re-open the document)
 ```
 
 ---

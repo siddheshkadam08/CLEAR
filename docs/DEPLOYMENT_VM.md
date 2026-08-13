@@ -1,5 +1,14 @@
 # Deploying CLEAR to a VM
 
+> **Scope.** This document describes the **Docker Compose** deployment, which uses
+> MinIO for object storage. The production Podman deployment is a different shape —
+> no MinIO, documents on a local filesystem volume, PostgreSQL installed on the host
+> — and is documented in [PODMAN_DEPLOYMENT.md](PODMAN_DEPLOYMENT.md). Use that one
+> for a production VM.
+>
+> Two files named below, `docker-compose.vm.yml` and `docker-compose.override.yml`,
+> have since been removed from the repository.
+
 The stack is BullMQ over Redis for the queue, MinIO for object storage, and one
 container per service. There is **no `scheduler` container**: its periodic sweeps run
 inside the workers behind a Postgres advisory lock — see §3.

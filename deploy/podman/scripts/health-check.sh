@@ -11,7 +11,8 @@
 #     so a backend that cannot reach Postgres or has no pgvector extension answers
 #     /healthz with 200 all day. /readyz is the one that looks.
 #   * The dependency edges the containers own but systemd does not: backend to
-#     Postgres, worker to Redis, backend to MinIO.
+#     Postgres, worker to Redis, backend and both workers to the storage volume,
+#     backend to the extractor.
 #   * Queue depth. A dispatcher that is up but not draining looks identical to a
 #     healthy one from the outside, and the symptom users report is "uploads never
 #     finish".
@@ -43,8 +44,8 @@ run_checks() {
   for unit in "${CLEAR_UNITS[@]}"; do
     state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
     case "$state" in
-      # The two oneshots (migrate, minio-init) sit at active/exited having done
-      # their work, which is success, not a stopped service.
+      # clear-migrate is a oneshot and sits at active/exited having done its
+      # work, which is success, not a stopped service.
       active) pass "$(printf '%-28s %s' "$unit" "$state")" ;;
       *)      fail "$(printf '%-28s %s' "$unit" "${state:-unknown}")" ;;
     esac
@@ -142,10 +143,50 @@ sys.exit(0 if asyncio.run(database_healthy()) else 1)" >/dev/null 2>&1; then
     info "the host firewall, listen_addresses, pg_hba.conf and POSTGRES_HOST are the four candidates"
   fi
 
-  if in_container clear-backend "curl -fsS http://clear-minio:9000/minio/health/live"; then
-    pass "minio    reachable from the backend container"
+  # Document storage is a mounted filesystem, not a service, so "is it up?" is the
+  # wrong question. The two that matter are whether the volume is actually mounted
+  # and whether the runtime user can write to it - a container that lost its mount
+  # keeps working perfectly until the first upload, then writes into its own
+  # writable layer and loses the file on the next recreate, with `storage_path` in
+  # the database still pointing at it.
+  if in_container clear-backend "test -d $STORAGE_LOCAL_ROOT"; then
+    pass "storage  $STORAGE_LOCAL_ROOT present in the backend container"
   else
-    fail "minio    reachable from the backend container"
+    fail "storage  $STORAGE_LOCAL_ROOT present in the backend container"
+    info "check Volume=clear-storage.volume:$STORAGE_LOCAL_ROOT in clear-backend.container"
+  fi
+
+  # Written and removed as the container's own unprivileged user, which is the only
+  # thing that proves the mount is writable BY THE PROCESS. A root-owned volume
+  # directory is the common failure and it looks identical from outside.
+  if in_container clear-backend \
+       "touch $STORAGE_LOCAL_ROOT/.healthcheck && rm -f $STORAGE_LOCAL_ROOT/.healthcheck"; then
+    pass "storage  writable by the backend's runtime user"
+  else
+    fail "storage  writable by the backend's runtime user"
+    info "podman exec clear-backend ls -ld $STORAGE_LOCAL_ROOT   # expect owner cip (uid 10001)"
+  fi
+
+  # The workers write the converted PDF the API later streams, so a mount that is
+  # present in the API and missing in a worker produces documents that upload fine
+  # and then fail mid-pipeline.
+  for cname in clear-worker-parser clear-worker-ai; do
+    if in_container "$cname" \
+         "touch $STORAGE_LOCAL_ROOT/.healthcheck-$cname && rm -f $STORAGE_LOCAL_ROOT/.healthcheck-$cname"; then
+      pass "storage  writable by $cname"
+    else
+      fail "storage  writable by $cname"
+    fi
+  done
+
+  # The parser. Reached by CONTAINER name on the podman network - the host's
+  # 127.0.0.1:58001 does not exist from in here.
+  if in_container clear-backend "curl -fsS http://clear-extractor:8000/health"; then
+    pass "extractor reachable at clear-extractor:8000 from the backend"
+  else
+    fail "extractor reachable at clear-extractor:8000 from the backend"
+    info "on the host the same service answers at http://127.0.0.1:58001/health;"
+    info "if that works and this does not, the extractor is not on the clear-net network"
   fi
 
   # ---- pipeline ------------------------------------------------------------

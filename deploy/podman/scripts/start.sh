@@ -41,30 +41,42 @@ the value; CORS_ORIGINS=\"https://x\" never matches an origin. Remove them."
 fi
 
 for key in DATABASE_URL JWT_SECRET INTERNAL_API_TOKEN SEED_ADMIN_PASSWORD \
-           NEW_USER_DEFAULT_PASSWORD S3_SECRET_ACCESS_KEY; do
+           NEW_USER_DEFAULT_PASSWORD; do
   [[ -n "$(envget "$key")" ]] || die "$key is empty in $ENV_FILE."
 done
 
-# The production guard in app/core/config.py refuses to boot on these, but it
-# does so inside a container whose logs nobody is reading yet.
+# The production guard in app/core/config.py refuses to boot on some of these, but
+# it does so inside a container whose logs nobody is reading yet.
 [[ "$(envget APP_ENV)" == "production" ]] || warn "APP_ENV is not 'production' in $ENV_FILE."
-[[ "$(envget STORAGE_PROVIDER)" != "local" ]] ||
-  die "STORAGE_PROVIDER=local is refused in production by the application itself."
-[[ "$(envget STORAGE_CONTAINER)" != "contracts" ]] ||
-  die "STORAGE_CONTAINER=contracts shadows the SPA route /contracts/<uuid>; every
-document download would return the application's HTML. Use cip-documents."
 
-# MinIO reads its credentials from a different file to the application, so the two
-# can disagree - and the symptom is not an authentication error at start but every
-# upload failing with SignatureDoesNotMatch much later.
-if [[ -f "$MINIO_ENV_FILE" ]]; then
-  mu="$(sed -n 's/^MINIO_ROOT_USER=//p' "$MINIO_ENV_FILE" | tail -n 1)"
-  mp="$(sed -n 's/^MINIO_ROOT_PASSWORD=//p' "$MINIO_ENV_FILE" | tail -n 1)"
-  [[ "$mu" == "$(envget S3_ACCESS_KEY_ID)" ]] ||
-    die "MINIO_ROOT_USER in $MINIO_ENV_FILE does not match S3_ACCESS_KEY_ID in $ENV_FILE."
-  [[ "$mp" == "$(envget S3_SECRET_ACCESS_KEY)" ]] ||
-    die "MINIO_ROOT_PASSWORD in $MINIO_ENV_FILE does not match S3_SECRET_ACCESS_KEY in $ENV_FILE."
-fi
+# --- local document storage -------------------------------------------------
+# The bytes of every contract live on the `clear-storage` volume, so the path the
+# application writes to and the path the volume is mounted at must be the same
+# string. They are set in two different files, which is exactly how they drift.
+env_root="$(envget STORAGE_LOCAL_ROOT)"
+case "$(envget STORAGE_PROVIDER)" in
+  local)
+    [[ -n "$env_root" ]] ||
+      die "STORAGE_PROVIDER=local but STORAGE_LOCAL_ROOT is empty in $ENV_FILE.
+The adapter would fall back to its built-in default, which is not where the
+clear-storage volume is mounted, so documents would be written into the
+container's writable layer and lost on the next recreate."
+    [[ "$env_root" == "$STORAGE_LOCAL_ROOT" ]] ||
+      die "STORAGE_LOCAL_ROOT=$env_root in $ENV_FILE, but the units mount the
+clear-storage volume at $STORAGE_LOCAL_ROOT. Uploads would go to a directory
+inside the container instead of onto the volume - and nothing would report it
+until a container was replaced and the files were gone."
+    [[ -n "$(envget STORAGE_CONTAINER)" ]] ||
+      die "STORAGE_CONTAINER is empty in $ENV_FILE. It is the subdirectory under
+STORAGE_LOCAL_ROOT that every stored path is relative to."
+    ok "Local storage: $env_root/$(envget STORAGE_CONTAINER) on volume $STORAGE_VOLUME."
+    ;;
+  *)
+    warn "STORAGE_PROVIDER=$(envget STORAGE_PROVIDER), not 'local'. This deployment's
+     units mount a filesystem volume and start no object store; make sure the
+     endpoint you have configured is actually reachable."
+    ;;
+esac
 ok "Configuration looks consistent."
 
 # Postgres is on the host, not in a container, and is the one dependency nothing

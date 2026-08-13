@@ -29,14 +29,12 @@ QUADLET_DIR="$HOME/.config/containers/systemd"
 UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$QUADLET_DIR" "$UNIT_DIR"
 
-[[ -f "$ENV_FILE" ]]       || die "$ENV_FILE does not exist. Copy $DEPLOY_DIR/.env.production.example to it and fill it in."
-[[ -f "$MINIO_ENV_FILE" ]] || die "$MINIO_ENV_FILE does not exist. See PODMAN_DEPLOYMENT.md §5 step 16."
+[[ -f "$ENV_FILE" ]] || die "$ENV_FILE does not exist. Copy $DEPLOY_DIR/.env.production.example to it and fill it in."
 
-# The unit files reference these two by absolute path and systemd reads them as
-# the deployment user. A file root can read and this user cannot produces
-# "Failed to load environment files", which does not name the permission.
-[[ -r "$ENV_FILE" ]]       || die "$ENV_FILE is not readable by $(id -un)."
-[[ -r "$MINIO_ENV_FILE" ]] || die "$MINIO_ENV_FILE is not readable by $(id -un)."
+# The unit files reference it by absolute path and systemd reads it as the
+# deployment user. A file root can read and this user cannot produces "Failed to
+# load environment files", which does not name the permission.
+[[ -r "$ENV_FILE" ]] || die "$ENV_FILE is not readable by $(id -un)."
 
 render() {
   local src="$1" dest="$2"
@@ -45,11 +43,8 @@ render() {
     -e "s|@PROJECT@|$REGISTRY_PROJECT|g" \
     -e "s|@TAG@|$IMAGE_TAG|g" \
     -e "s|@REDIS_IMAGE@|$REDIS_IMAGE|g" \
-    -e "s|@MINIO_IMAGE@|$MINIO_IMAGE|g" \
-    -e "s|@MC_IMAGE@|$MC_IMAGE|g" \
-    -e "s|@STORAGE_BUCKET@|$STORAGE_BUCKET|g" \
     -e "s|@ENV_FILE@|$ENV_FILE|g" \
-    -e "s|@MINIO_ENV_FILE@|$MINIO_ENV_FILE|g" \
+    -e "s|@STORAGE_LOCAL_ROOT@|$STORAGE_LOCAL_ROOT|g" \
     -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" \
     "$src" > "$dest"
 
@@ -66,7 +61,7 @@ log "Rendering units"
 log "  registry  $REGISTRY/$REGISTRY_PROJECT"
 log "  tag       $IMAGE_TAG"
 log "  env file  $ENV_FILE"
-log "  bucket    $STORAGE_BUCKET"
+log "  storage   volume $STORAGE_VOLUME -> $STORAGE_LOCAL_ROOT"
 echo
 
 for src in "$DEPLOY_DIR"/quadlet/*.network "$DEPLOY_DIR"/quadlet/*.volume "$DEPLOY_DIR"/quadlet/*.container; do
@@ -109,17 +104,17 @@ ok "All ${#CLEAR_UNITS[@]} units generated."
 echo
 log "Enabling at boot"
 
-# Only the two PLAIN units are enabled here. A Quadlet-generated unit cannot be:
+# Only the PLAIN unit is enabled here. A Quadlet-generated unit cannot be:
 #
 #     Failed to enable unit: Unit clear-backend.service is transient or generated.
 #
 # It has no file in a unit search path - the generator writes it into
 # /run/user/<uid>/systemd/generator/ on every daemon-reload. Quadlet reads the
 # [Install] section of the .container file itself and creates the
-# default.target.wants symlink, so those seven are already enabled by virtue of
-# carrying `WantedBy=default.target`. Looping over all nine here would print seven
-# failures that mean nothing and hide the two that would matter.
-for unit in clear-migrate.service clear-minio-init.service; do
+# default.target.wants symlink, so the rest are already enabled by virtue of
+# carrying `WantedBy=default.target`. Looping over all of them here would print a
+# row of failures that mean nothing and hide the one that would matter.
+for unit in clear-migrate.service; do
   sc enable "$unit" >/dev/null 2>&1 && ok "enabled $unit" || warn "Could not enable $unit"
 done
 

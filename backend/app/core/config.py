@@ -1459,8 +1459,6 @@ class Settings(BaseSettings):
             problems.append("CORS_ORIGINS may not contain '*' in production")
         if self.debug:
             problems.append("DEBUG must be false in production")
-        if self.storage.provider == "local":
-            problems.append("STORAGE_PROVIDER=local is not supported in production")
         # The mock providers invent their output. Allowed in production only when
         # the deployment says so explicitly - see `allow_mock_ai`.
         if not self.allow_mock_ai:

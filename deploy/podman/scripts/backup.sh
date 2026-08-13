@@ -7,24 +7,25 @@
 #
 # Three artefacts, taken in this order and restored in this order:
 #
-#   1. PostgreSQL      pg_dump -Fc. The host's database, not a container's.
-#   2. Object storage  the MinIO volume: the bytes of every uploaded contract
-#                      and every generated export.
-#   3. Configuration   clear.env, minio.env, images.env, the rendered units and
-#                      the host nginx config.
+#   1. PostgreSQL       pg_dump -Fc. The host's database, not a container's.
+#   2. Document storage the `clear-storage` volume: the bytes of every uploaded
+#                       contract and every generated export.
+#   3. Configuration    clear.env, images.env, the rendered units and the host
+#                       nginx config.
 #
 # The first two MUST be treated as one backup. `documents.storage_path` in
-# Postgres points into the object store, so a database restored newer than the
-# object store references files that do not exist - and the application looks
-# perfectly healthy while every document download 404s. Restoring an object store
-# newer than the database leaves orphans nothing can reach, which is merely
-# wasteful. Never restore one without the other.
+# Postgres is a path into the storage volume, so a database restored newer than
+# the volume references files that do not exist - and the application looks
+# perfectly healthy while every document download 404s. Restoring the volume newer
+# than the database leaves orphans nothing can reach, which is merely wasteful.
+# Never restore one without the other.
+#
+# There is no object store in this deployment: STORAGE_PROVIDER=local, so the
+# volume in step 2 IS the document store rather than a cache of one.
 #
 # NOT backed up, deliberately:
 #   * the Redis volume. It holds in-flight queue state worth minutes; restoring a
 #     day-old copy would replay work already done.
-#   * the clear-storage volume, unless STORAGE_PROVIDER=local. Under `minio` it
-#     holds only regenerable benchmark output. Pass --with-storage to include it.
 #   * images. They are in the registry, which is what a registry is for.
 #
 # Schedule it from the deployment user's crontab:
@@ -36,9 +37,6 @@ load_images_env
 require_podman
 
 DEST="${1:-/var/backups/clear}"
-WITH_STORAGE=0
-[[ "${1:-}" == "--with-storage" || "${2:-}" == "--with-storage" ]] && WITH_STORAGE=1
-[[ "$DEST" == "--with-storage" ]] && DEST="/var/backups/clear"
 
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
 STAMP="$(date +%Y-%m-%d-%H%M)"
@@ -72,29 +70,30 @@ pg_dump --host "$PGHOST" --port "${PGPORT:-5432}" --username "$PGUSER" \
   die "pg_dump failed. Nothing else has been written."
 ok "$(du -h "$OUT/postgres-$PGDATABASE.dump" | cut -f1)  postgres-$PGDATABASE.dump"
 
-# --- 2. Object storage ------------------------------------------------------
-log "2/3  Object storage (volume clear-minio-data)"
-if podman volume exists clear-minio-data 2>/dev/null; then
+# --- 2. Document storage ----------------------------------------------------
+log "2/3  Document storage (volume $STORAGE_VOLUME)"
+if podman volume exists "$STORAGE_VOLUME" 2>/dev/null; then
   # `podman volume export` streams the volume as a tar without needing a helper
   # container or knowing where podman keeps its overlay directories.
-  podman volume export clear-minio-data --output "$OUT/minio-data.tar" ||
-    die "Could not export clear-minio-data."
-  gzip -f "$OUT/minio-data.tar"
-  ok "$(du -h "$OUT/minio-data.tar.gz" | cut -f1)  minio-data.tar.gz"
+  podman volume export "$STORAGE_VOLUME" --output "$OUT/$STORAGE_VOLUME.tar" ||
+    die "Could not export $STORAGE_VOLUME."
+  gzip -f "$OUT/$STORAGE_VOLUME.tar"
+  ok "$(du -h "$OUT/$STORAGE_VOLUME.tar.gz" | cut -f1)  $STORAGE_VOLUME.tar.gz"
 else
-  warn "Volume clear-minio-data does not exist; skipping. (Managed S3/Azure instead?)"
-fi
-
-if (( WITH_STORAGE )) && podman volume exists clear-storage 2>/dev/null; then
-  podman volume export clear-storage --output "$OUT/clear-storage.tar"
-  gzip -f "$OUT/clear-storage.tar"
-  ok "$(du -h "$OUT/clear-storage.tar.gz" | cut -f1)  clear-storage.tar.gz"
+  # Not a warning. This volume holds every contract in the system, so its absence
+  # means either the deployment is not installed or the backup is being taken
+  # against the wrong host - and a "successful" backup with no documents in it is
+  # the worst possible outcome, because it is only discovered during a restore.
+  die "Volume $STORAGE_VOLUME does not exist. This is where every uploaded document
+lives, so a backup without it is not a backup. Check that the deployment is
+installed on this host and that you are the deployment user:
+  podman volume ls"
 fi
 
 # --- 3. Configuration -------------------------------------------------------
 log "3/3  Configuration"
 mkdir -p "$OUT/config"
-for f in "$ENV_FILE" "$MINIO_ENV_FILE" "$IMAGES_ENV"; do
+for f in "$ENV_FILE" "$IMAGES_ENV"; do
   [[ -f "$f" ]] && cp -p "$f" "$OUT/config/" && ok "$(basename "$f")"
 done
 if compgen -G "$HOME/.config/containers/systemd/clear-*" >/dev/null; then
@@ -147,8 +146,9 @@ Restore (both artefacts, together - see the header of this script):
   $INSTALL_DIR/scripts/stop.sh
   pg_restore --host $PGHOST --username $PGUSER --dbname $PGDATABASE --clean --if-exists \\
              $OUT/postgres-$PGDATABASE.dump
-  gunzip -c $OUT/minio-data.tar.gz > /tmp/minio-data.tar
-  podman volume rm clear-minio-data && podman volume create clear-minio-data
-  podman volume import clear-minio-data /tmp/minio-data.tar
+  gunzip -c $OUT/$STORAGE_VOLUME.tar.gz > /tmp/$STORAGE_VOLUME.tar
+  # Destructive: this discards whatever documents are on the volume now.
+  podman volume rm $STORAGE_VOLUME && podman volume create $STORAGE_VOLUME
+  podman volume import $STORAGE_VOLUME /tmp/$STORAGE_VOLUME.tar
   $INSTALL_DIR/scripts/start.sh
 EOF

@@ -60,16 +60,18 @@ IMAGES_ENV="${IMAGES_ENV:-$CLEAR_CONF_DIR/images.env}"
 # minimum. `:latest` on a production host means a `podman pull` months from now
 # quietly installs a different major version.
 : "${REDIS_IMAGE:=docker.io/library/redis:7-alpine}"
-# REQUIRES CONFIRMATION: pin these two to a MinIO RELEASE.* tag you have tested.
-# MinIO's release cadence is fast and its releases are not always compatible in
-# both directions with an existing data directory.
-: "${MINIO_IMAGE:=docker.io/minio/minio:latest}"
-: "${MC_IMAGE:=docker.io/minio/mc:latest}"
 
-: "${STORAGE_BUCKET:=cip-documents}"
+# The single env file every container is started with. Every script reads it and
+# every unit references it, so losing this default makes `set -u` abort the whole
+# suite with `ENV_FILE: unbound variable` - a failure that names none of them.
 : "${ENV_FILE:=$CLEAR_CONF_DIR/clear.env}"
-: "${MINIO_ENV_FILE:=$CLEAR_CONF_DIR/minio.env}"
 : "${INSTALL_DIR:=$DEPLOY_DIR}"
+
+# Documents live on a podman volume mounted here in the backend and both worker
+# pools. Kept in one place because the health check, the backup and three unit
+# files all have to agree on it, and STORAGE_LOCAL_ROOT in clear.env has to match.
+: "${STORAGE_LOCAL_ROOT:=/var/lib/cip/storage}"
+: "${STORAGE_VOLUME:=clear-storage}"
 
 load_images_env() {
   if [[ -f "$IMAGES_ENV" ]]; then
@@ -109,8 +111,6 @@ image_ref() { printf '%s/%s/%s:%s' "$REGISTRY" "$REGISTRY_PROJECT" "$1" "${2:-$I
 # walks it backwards.
 CLEAR_UNITS=(
   clear-redis.service
-  clear-minio.service
-  clear-minio-init.service
   clear-migrate.service
   clear-backend.service
   clear-worker-parser.service
@@ -119,11 +119,10 @@ CLEAR_UNITS=(
   clear-frontend.service
 )
 
-# Long-running containers only - the two oneshots have no container to inspect
-# once they have exited.
+# Long-running containers only - clear-migrate is a oneshot and has no container
+# to inspect once it has exited.
 CLEAR_CONTAINERS=(
   clear-redis
-  clear-minio
   clear-backend
   clear-worker-parser
   clear-worker-ai
