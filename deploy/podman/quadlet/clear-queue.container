@@ -1,0 +1,60 @@
+# The BullMQ dispatcher.
+#
+# A logic-free shim: it takes a message off Redis and POSTs it to
+# /internal/stages/{stage}/run on a worker pool. Every decision - which stage runs
+# next, whether a failure is retryable, how long to back off - is made in Python
+# and returned in the response body. BullMQ v5 needs no QueueScheduler; delayed-job
+# promotion and stalled-job recovery moved into Worker at v4.
+#
+# It dispatches to INTERNAL_API_BASE_URL, which clear.env points at
+# http://clear-backend:8000. The API and both worker pools mount the same internal
+# routes, so pointing it at the backend means a 10-minute extraction would run in
+# the API's process pool and logins would queue behind contract parsing. Point it
+# at a worker pool instead once you have more than one of each - see
+# PODMAN_DEPLOYMENT.md §9.
+#
+# Only relevant when QUEUE_DRIVER=bullmq. Under QUEUE_DRIVER=postgres this whole
+# unit and clear-redis are unnecessary, and the worker pools run a different
+# command entirely.
+#
+# Installed to:  ~/.config/containers/systemd/clear-queue.container
+# Generates:     clear-queue.service
+[Unit]
+Description=CLEAR queue dispatcher (BullMQ)
+After=network-online.target clear-redis.service clear-backend.service
+Requires=clear-redis.service
+Wants=clear-backend.service
+
+[Container]
+Image=@REGISTRY@/@PROJECT@/clear-queue:@TAG@
+ContainerName=clear-queue
+Network=clear.network
+EnvironmentFile=@ENV_FILE@
+Environment=OTEL_SERVICE_NAME=cip-queue
+
+# Loopback only: queue depths and the dead-letter count, for `make queue-status`
+# and for the admin screens the API proxies. Not public.
+PublishPort=127.0.0.1:9100:9100
+
+# busybox wget, not the image's `node -e "fetch(...)"` HEALTHCHECK. Identical in
+# effect, and free of the quotes and parentheses that a systemd unit value, a
+# Quadlet parser and `sh -c` would each get a turn at reinterpreting.
+HealthCmd=wget --quiet --spider http://127.0.0.1:9100/healthz
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=15s
+
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=10
+# On SIGTERM the dispatcher stops accepting new jobs and waits for in-flight ones,
+# and a stage legitimately takes minutes. Killing it early orphans a job as
+# `processing` until the stalled-job sweep reclaims it.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

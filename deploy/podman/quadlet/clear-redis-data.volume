@@ -1,0 +1,26 @@
+# Redis append-only file. Mounted at /data in the Redis container.
+#
+# Redis here is a BullMQ broker, a cache and a rate-limit counter store. Only the
+# first of those is worth persisting, and only briefly: a queued job that is lost
+# is an upload that stops advancing with no error, because the `processing_jobs`
+# row still says `queued` while nothing holds a message for it. Recovering that
+# means `cip reprocess`, by hand, per contract.
+#
+# So persistence is enabled (`--appendonly yes`) and this volume exists, but the
+# data in it is worth minutes, not months. It is deliberately NOT in the backup
+# script: restoring a day-old queue would replay work already done.
+#
+# If the container is deleted: in-flight queue state survives a restart. If the
+# VOLUME is deleted, re-enqueue with `cip reprocess` for any contract left in a
+# non-terminal state.
+#
+# Installed to:  ~/.config/containers/systemd/clear-redis-data.volume
+# Generates:     clear-redis-data-volume.service
+[Unit]
+Description=CLEAR Redis persistence
+
+[Volume]
+VolumeName=clear-redis-data
+
+[Install]
+WantedBy=default.target

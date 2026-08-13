@@ -1,0 +1,53 @@
+# Database migration and seed. Runs to completion, then stays "active (exited)".
+#
+# A plain systemd unit rather than a Quadlet .container, deliberately. Quadlet is
+# built for long-running containers and generates `podman run -d` with sd-notify;
+# expressing a run-once-and-exit job through it depends on Quadlet version
+# specifics. `Type=oneshot` here is unambiguous on every podman and systemd
+# version: systemd runs podman in the foreground and does not consider this unit
+# started until the container has actually exited 0.
+#
+# That is what clear-backend.service and both worker units hang their
+# `Requires=clear-migrate.service` on. The API therefore cannot start against a
+# half-built schema, and a failed migration stops the deployment instead of
+# producing a stack of 500s.
+#
+# Re-running it is safe and is part of every update: `alembic upgrade head` is a
+# no-op when the schema is current, and the seed is idempotent - it does not reset
+# the admin password on an existing account.
+#
+# @-placeholders are rendered by deploy/podman/scripts/install-quadlet.sh.
+#
+# Installed to:  ~/.config/systemd/user/clear-migrate.service
+[Unit]
+Description=CLEAR database migration and seed
+Documentation=file:///opt/clear/docs/PODMAN_DEPLOYMENT.md
+After=network-online.target clear-network.service
+Wants=network-online.target clear-network.service
+
+[Service]
+Type=oneshot
+# Without this the unit reports "inactive (dead)" the moment the container exits,
+# and every unit that Requires= it would try to start it again on each restart.
+RemainAfterExit=yes
+
+# Postgres is a HOST service. A user unit cannot order itself after a system unit,
+# so on a reboot this can genuinely start before postgresql is accepting
+# connections. Rather than sleep and hope, the migration is simply allowed to fail
+# and be retried - `alembic upgrade` against an unreachable database exits
+# non-zero in seconds and leaves nothing behind.
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=20
+StartLimitIntervalSec=600
+
+# A first migration on an empty database builds 30-odd tables and their HNSW
+# indexes. Two minutes is not always enough.
+TimeoutStartSec=900
+
+# --replace, so a container left behind by a hard kill does not block the next run
+# with a name collision. --rm, so nothing accumulates.
+ExecStart=/usr/bin/podman run --rm --replace --name clear-migrate --network clear-net --env-file @ENV_FILE@ @REGISTRY@/@PROJECT@/clear-backend:@TAG@ python -m app.cli migrate --seed
+
+[Install]
+WantedBy=default.target

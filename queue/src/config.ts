@@ -64,7 +64,30 @@ const envSchema = z.object({
   QUEUE_KEEP_FAILED: z.coerce.number().int().nonnegative().default(5_000),
 
   OTEL_SERVICE_NAME: z.string().default('cip-queue'),
-  LOG_LEVEL: z.string().default('info'),
+
+  /**
+   * Normalised onto pino's own spelling.
+   *
+   * Python's logging levels are upper-case and include `WARNING`/`CRITICAL`,
+   * which pino does not have. Under compose that never surfaced, because the
+   * `queue` service's environment block did not forward `LOG_LEVEL` at all - but
+   * the Podman deployment passes one `--env-file` to every container precisely so
+   * that no key can be silently dropped, so this service now receives the
+   * backend's spelling. `pino({level: 'INFO'})` throws `unknown level INFO` at
+   * construction, before the logger exists to report it: the dispatcher
+   * crash-loops with an unexplained non-zero exit and nothing is dispatched.
+   *
+   * Anything outside both vocabularies still fails the parse loudly, which is the
+   * point of validating configuration at startup.
+   */
+  LOG_LEVEL: z
+    .string()
+    .default('info')
+    .transform((value) => value.toLowerCase())
+    .pipe(z.enum(['trace', 'debug', 'info', 'warn', 'warning', 'error', 'fatal', 'critical']))
+    .transform((value) =>
+      value === 'warning' ? 'warn' : value === 'critical' ? 'fatal' : value,
+    ),
 });
 
 const parsed = envSchema.safeParse(process.env);

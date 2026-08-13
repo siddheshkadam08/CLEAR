@@ -1,0 +1,72 @@
+# The SPA, served by nginx, which is also this deployment's internal reverse proxy.
+#
+# It serves three things on one origin, which is the whole reason the deployment
+# needs only one public port:
+#
+#   /                 the built React bundle, with try_files ... /index.html so a
+#                     hard reload of /contracts/<uuid> serves the app rather
+#                     than 404. Without that, every deep link anyone shares is
+#                     broken.
+#   /api/             proxied to clear-backend:8000. Same-origin, so the HttpOnly
+#                     refresh cookie stays first-party rather than depending on
+#                     SameSite=None plus CORS credentials.
+#   /<bucket>/        proxied to clear-minio:9000, so a presigned download URL is
+#                     fetchable without publishing the object store separately.
+#
+# The four Environment= lines below are substituted into the nginx config at
+# container start (the image ships nginx.conf as a template). They are set here
+# rather than left to the image's build args so a wiring change - a renamed
+# container, a different bucket - needs a restart, not a rebuild.
+#
+# VITE_* variables are NOT among them, and cannot be: Vite substitutes
+# import.meta.env at BUILD time, so VITE_API_BASE_URL is baked into the bundle.
+# Setting it here would silently do nothing.
+#
+# STORAGE_BUCKET becomes an nginx `location`, so it must not collide with a route
+# the SPA owns - `contracts` would, because the router serves /contracts/<uuid> -
+# and it must equal STORAGE_CONTAINER in clear.env, or downloads 404 with no error
+# logged anywhere.
+#
+# Published on 127.0.0.1:8080. The host's nginx terminates TLS on 443 and proxies
+# here; see deploy/podman/nginx/clear.conf. Rootless podman cannot bind 80 or 443
+# without extra privilege, and this arrangement means it never needs to.
+#
+# Installed to:  ~/.config/containers/systemd/clear-frontend.container
+# Generates:     clear-frontend.service
+[Unit]
+Description=CLEAR frontend (nginx + SPA)
+After=network-online.target clear-backend.service
+Wants=clear-backend.service
+
+[Container]
+Image=@REGISTRY@/@PROJECT@/clear-frontend:@TAG@
+ContainerName=clear-frontend
+Network=clear.network
+
+Environment=API_HOST=clear-backend
+Environment=API_PORT=8000
+Environment=STORAGE_HOST=clear-minio
+Environment=STORAGE_PORT=9000
+Environment=STORAGE_BUCKET=@STORAGE_BUCKET@
+
+PublishPort=127.0.0.1:8080:8080
+
+# 127.0.0.1, not localhost. Inside the container `localhost` resolves to ::1
+# first and the server block carries only `listen 8080` - IPv4 - so a probe on
+# the IPv6 loopback reports unhealthy for ever while every real request succeeds.
+HealthCmd=wget --quiet --spider http://127.0.0.1:8080/health
+HealthInterval=30s
+HealthTimeout=3s
+HealthRetries=3
+HealthStartPeriod=10s
+
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

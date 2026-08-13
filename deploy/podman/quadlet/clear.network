@@ -1,0 +1,31 @@
+# The application network. Every container that talks to another one joins it.
+#
+# Container-to-container traffic resolves by container name over netavark's
+# embedded DNS - `clear-backend`, `clear-redis`, `clear-minio` - which is why the
+# names in clear.env are those and not addresses. Podman assigns a fresh IP on
+# every restart, so an address written anywhere goes stale the first time a
+# container is replaced.
+#
+# Nothing on this network is reachable from outside the host except through a
+# PublishPort, and the only container that publishes anything beyond 127.0.0.1 is
+# none of them: the host's nginx is the single ingress. See PODMAN_DEPLOYMENT.md
+# §7 for the port table.
+#
+# Installed to:  ~/.config/containers/systemd/clear.network
+# Generates:     clear-network.service
+[Unit]
+Description=CLEAR application network
+
+[Network]
+# Explicit, because the default would be `systemd-clear` - and this name appears
+# in clear.env, in `podman network inspect`, and in every troubleshooting command
+# in the guide.
+NetworkName=clear-net
+Driver=bridge
+
+# Internal DNS is what makes the service names above resolve. On by default for a
+# named bridge; stated so that nobody removes it by accident.
+DisableDNS=false
+
+[Install]
+WantedBy=default.target

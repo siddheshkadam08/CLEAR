@@ -1,0 +1,34 @@
+# Shared application storage: mounted at /var/lib/cip/storage on the backend and
+# on both worker pools.
+#
+# What lives here
+# ---------------
+#   evaluation-results/   benchmark reports the admin Retrieval Quality screen
+#                         reads. Written by `cip benchmark`, read by the API - so
+#                         both must see the same directory, which is why
+#                         EVALUATION_RESULTS_DIR is absolute and points here.
+#   fixtures/parser/      only written when PARSER_RECORD_FIXTURES=true, which
+#                         production sets to false.
+#
+# What does NOT live here: document bytes. STORAGE_PROVIDER=minio puts those in
+# object storage (production refuses STORAGE_PROVIDER=local outright). If a
+# deployment ever switches to a local provider, this volume becomes the primary
+# document store and its backup becomes as critical as the database's.
+#
+# If the container is deleted: nothing here is lost. The volume outlives every
+# container that mounts it and is only removed by an explicit `podman volume rm`.
+#
+# Backup:  podman volume export clear-storage --output clear-storage-$(date +%F).tar
+#
+# Installed to:  ~/.config/containers/systemd/clear-storage.volume
+# Generates:     clear-storage-volume.service
+[Unit]
+Description=CLEAR shared application storage
+
+[Volume]
+# Without this the volume would be named `systemd-clear-storage`, which no backup
+# command in the guide would find.
+VolumeName=clear-storage
+
+[Install]
+WantedBy=default.target

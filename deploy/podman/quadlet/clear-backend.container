@@ -1,0 +1,82 @@
+# The API.
+#
+# Same image as both worker pools and as the migration job - identical code,
+# different entrypoint. That is not a shortcut: the workers run the pipeline
+# stages by importing the same modules the API does, so a second image would be a
+# second copy of the same 2.5 GB of LibreOffice, Tesseract and Python wheels, and
+# a way for the two to drift apart between builds. One image, one digest, one
+# thing to promote through the registry. See PODMAN_DEPLOYMENT.md §2.1.
+#
+# Requires clear-migrate.service, which is Type=oneshot: systemd holds this unit
+# until the migration has actually exited 0, so the API can never come up against
+# a half-built schema.
+#
+# Requires=, not Wants=, and the difference is the guarantee - Wants= would let
+# the API start after a FAILED migration. The cost is one piece of systemd
+# behaviour worth knowing before it surprises you: explicitly stopping or
+# restarting clear-migrate.service propagates to this unit and to both worker
+# pools. `systemctl --user restart clear-migrate` is therefore a restart of the
+# application, not a quiet re-run of Alembic. update.sh relies on exactly that.
+#
+# Published on loopback only. The frontend container's nginx proxies /api to it
+# over the podman network, and the host's nginx is the only thing listening on a
+# public interface. The loopback binding is what makes `curl 127.0.0.1:8000/readyz`
+# work from an SSH session without opening a port.
+#
+# Installed to:  ~/.config/containers/systemd/clear-backend.container
+# Generates:     clear-backend.service
+[Unit]
+Description=CLEAR API
+After=network-online.target clear-migrate.service clear-redis.service clear-minio-init.service
+Requires=clear-migrate.service
+Wants=clear-redis.service clear-minio-init.service
+
+[Container]
+Image=@REGISTRY@/@PROJECT@/clear-backend:@TAG@
+ContainerName=clear-backend
+Network=clear.network
+Volume=clear-storage.volume:/var/lib/cip/storage
+EnvironmentFile=@ENV_FILE@
+Environment=OTEL_SERVICE_NAME=cip-backend
+
+PublishPort=127.0.0.1:8000:8000
+
+# Stated rather than inherited from the image's CMD, because two of these flags
+# decide whether the deployment works:
+#
+# --forwarded-allow-ips "*"
+#     Two proxies sit in front of this process (the host's nginx, then the
+#     frontend container's). Gunicorn trusts X-Forwarded-* only from
+#     127.0.0.1 by default, and neither proxy is at 127.0.0.1 from inside this
+#     container - so without this the app believes every request arrived over
+#     plain HTTP from the nginx container's address. Generated absolute URLs then
+#     come out as http://, which breaks the OIDC redirect against a registration
+#     that lists https://. Trusting any source is safe here precisely because
+#     nothing but those two proxies can reach the port.
+#
+# --graceful-timeout 30
+#     A rolling replacement must let an in-flight upload finish. TimeoutStopSec
+#     below is deliberately larger, so systemd does not SIGKILL the container
+#     while gunicorn is still draining.
+Exec=gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker --workers 4 --bind 0.0.0.0:8000 --forwarded-allow-ips "*" --timeout 120 --graceful-timeout 30 --max-requests 2000 --max-requests-jitter 200 --access-logfile - --error-logfile -
+
+# The image already declares this healthcheck against :8000/healthz, which is the
+# port this container serves - unlike the worker pools, which must override it.
+# Repeated here so `podman inspect` shows the deployment's own intent.
+HealthCmd=curl -fsS http://127.0.0.1:8000/healthz
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=40s
+
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

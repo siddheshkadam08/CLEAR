@@ -1,0 +1,47 @@
+# Redis - BullMQ broker, response cache, rate-limit counters.
+#
+# Internal only. There is NO PublishPort: nothing outside the podman network has
+# any business reaching it, and an exposed Redis with no password is a remote
+# code execution primitive, not a database.
+#
+# `noeviction` is not a tuning preference. Under the default `allkeys-lru` Redis
+# would evict BullMQ's own bookkeeping keys under memory pressure, and the
+# symptom is jobs that vanish silently rather than an error anywhere.
+#
+# @-placeholders are rendered by deploy/podman/scripts/install-quadlet.sh.
+#
+# Installed to:  ~/.config/containers/systemd/clear-redis.container
+# Generates:     clear-redis.service
+[Unit]
+Description=CLEAR Redis
+After=network-online.target
+
+[Container]
+Image=@REDIS_IMAGE@
+ContainerName=clear-redis
+Network=clear.network
+Volume=clear-redis-data.volume:/data
+
+Exec=redis-server --appendonly yes --maxmemory-policy noeviction
+
+# The redis image ships no HEALTHCHECK, so `podman ps` would report no health at
+# all for the one container everything else queues through.
+HealthCmd=redis-cli ping
+HealthInterval=15s
+HealthTimeout=3s
+HealthRetries=5
+HealthStartPeriod=5s
+
+# Drops every capability the process does not use. Redis needs none of them.
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=5
+# Redis flushes its AOF on SIGTERM; killing it early costs the queue state this
+# container exists to keep.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

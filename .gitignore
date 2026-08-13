@@ -48,6 +48,10 @@ coverage/
 .env
 .env.*
 !.env.example
+# The Podman deployment's template. It matches `.env.*` above, so without this it
+# would be untrackable - and a deployment template that cannot be committed is a
+# deployment template that drifts from the code it configures.
+!.env.production.example
 *.pem
 *.key
 !**/testdata/**/*.key

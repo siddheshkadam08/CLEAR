@@ -1,0 +1,72 @@
+# Worker pool: the CPU- and IO-bound stages.
+#
+# WORKER_ROLE=parser serves validation, parser, enrichment, classification and
+# chunking. Split from the AI pool because the two scale on different curves: this
+# one is bound by the host's CPU and by the layout service, the other by a model
+# provider's latency. Scale this pool up when parsing is the queue depth that
+# grows.
+#
+# `uvicorn app.worker_app:app`, NOT `python -m app.cli worker`. The distinction
+# decides whether anything is processed at all:
+#
+#   QUEUE_DRIVER=bullmq     the dispatcher POSTs stages to this HTTP server.
+#                           worker_app SERVES; it polls nothing.
+#   QUEUE_DRIVER=postgres   there is no dispatcher. `cli worker` is the process
+#                           that CLAIMS rows from stage_queue.
+#
+# Run the wrong one for the configured driver and every container reports healthy
+# while every upload stays `pending` for ever.
+#
+# It also runs the periodic maintenance sweeps - alert evaluation, stalled-job
+# reclamation, export recovery and purge - which is why there is no scheduler
+# container. Every worker starts them; a Postgres advisory lock means exactly one
+# performs them per tick. That is what makes the sweeps survive the loss of any
+# single worker, which a dedicated scheduler container did not.
+#
+# No PublishPort. Port 8001 is reachable only from the podman network, which is
+# the only place the dispatcher lives.
+#
+# Installed to:  ~/.config/containers/systemd/clear-worker-parser.container
+# Generates:     clear-worker-parser.service
+[Unit]
+Description=CLEAR worker pool (parser stages)
+After=network-online.target clear-migrate.service clear-redis.service clear-minio-init.service
+Requires=clear-migrate.service
+Wants=clear-redis.service clear-minio-init.service
+
+[Container]
+Image=@REGISTRY@/@PROJECT@/clear-backend:@TAG@
+ContainerName=clear-worker-parser
+Network=clear.network
+Volume=clear-storage.volume:/var/lib/cip/storage
+EnvironmentFile=@ENV_FILE@
+Environment=WORKER_ROLE=parser
+Environment=OTEL_SERVICE_NAME=cip-worker-parser
+
+Exec=uvicorn app.worker_app:app --host 0.0.0.0 --port 8001 --timeout-graceful-shutdown 30
+
+# MUST be overridden. The image's own HEALTHCHECK probes :8000, which is the API's
+# port - a worker serves app.worker_app on :8001, so the inherited check can never
+# pass and the pool reports `unhealthy` for ever while processing jobs perfectly
+# well. A health signal that is permanently red is worse than none: it trains
+# everyone to ignore the column that is supposed to show a real outage.
+HealthCmd=curl -fsS http://127.0.0.1:8001/healthz
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=40s
+
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+# A stage in flight when the stop arrives is a document part-way through parsing.
+# Let it finish; anything harder is recovered by the stalled-job lease, which is
+# slower and noisier.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

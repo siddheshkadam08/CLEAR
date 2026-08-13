@@ -1,0 +1,56 @@
+# Worker pool: the model-bound stages.
+#
+# WORKER_ROLE=ai serves docpipeline, extraction, ai_extraction, embedding and
+# indexing. These are latency-bound on an external provider rather than on this
+# host, which is why WORKER_CONCURRENCY_DOCPIPELINE and _EXTRACTION are capped at
+# 4: each makes a dozen or more model calls per document, so more parallel
+# documents only queue behind the same gateway.
+#
+# Everything in the sibling clear-worker-parser.container header applies here too -
+# in particular why the command is `uvicorn app.worker_app:app` and why the image's
+# HEALTHCHECK must be overridden.
+#
+# This pool is the one to scale when extraction is the queue depth that grows:
+#   cp clear-worker-ai.container clear-worker-ai-2.container
+#   sed -i s/clear-worker-ai/clear-worker-ai-2/ clear-worker-ai-2.container
+# The container NAME must be unique; WORKER_ROLE stays `ai`. The dispatcher finds
+# it by round-robin over the queue, not by name, so nothing else needs changing.
+#
+# Installed to:  ~/.config/containers/systemd/clear-worker-ai.container
+# Generates:     clear-worker-ai.service
+[Unit]
+Description=CLEAR worker pool (AI stages)
+After=network-online.target clear-migrate.service clear-redis.service clear-minio-init.service
+Requires=clear-migrate.service
+Wants=clear-redis.service clear-minio-init.service
+
+[Container]
+Image=@REGISTRY@/@PROJECT@/clear-backend:@TAG@
+ContainerName=clear-worker-ai
+Network=clear.network
+Volume=clear-storage.volume:/var/lib/cip/storage
+EnvironmentFile=@ENV_FILE@
+Environment=WORKER_ROLE=ai
+Environment=OTEL_SERVICE_NAME=cip-worker-ai
+
+Exec=uvicorn app.worker_app:app --host 0.0.0.0 --port 8001 --timeout-graceful-shutdown 30
+
+HealthCmd=curl -fsS http://127.0.0.1:8001/healthz
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=40s
+
+NoNewPrivileges=true
+LogDriver=journald
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=180
+# Longer than the parser pool's. An extraction in flight is minutes of paid
+# provider calls; throwing it away on a restart means paying for them twice.
+TimeoutStopSec=300
+
+[Install]
+WantedBy=default.target

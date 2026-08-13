@@ -11,6 +11,12 @@ coverage
 .env.*
 !.env.example
 
+# A host-built tsbuildinfo makes `tsc -b` inside the image believe the project is
+# already up to date, so `npm run typecheck` reports success having checked
+# nothing - the one thing that step exists to prevent. Type errors then reach the
+# bundle, which Vite emits regardless because it never typechecks.
+*.tsbuildinfo
+
 .git
 .gitignore
 *.log

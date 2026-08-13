@@ -16,3 +16,9 @@ dist/
 !.env.example
 tests/**/__snapshots__/
 *.log
+
+# Recorded parser output, written by PARSER_MODE=fixture. No target copies it, so
+# this only removes it from the *context* - but a context is uploaded whole to
+# whatever builds the image, and these files hold the full extracted text of real
+# counterparty agreements. On a working install it is also 15MB+ of pure cost.
+storage/fixtures/
