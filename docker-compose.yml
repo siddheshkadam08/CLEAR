@@ -39,7 +39,7 @@ x-backend-env: &backend-env
   # `postgres` service, so setting DATABASE_URL in .env appeared to work and was
   # silently ignored - the app kept talking to the container while the operator
   # believed it had been repointed at an external database.
-  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-cip_dev_password}@postgres:5432/${POSTGRES_DB:-cip}}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-carbonadmin}@postgres:5432/${POSTGRES_DB:-cip}}
   # Schema the application's tables live in. Empty means `public`. Set this when
   # the database is shared with another application that already owns table names
   # we also use - see DatabaseSettings.schema_name.
