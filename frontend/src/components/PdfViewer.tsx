@@ -20,10 +20,77 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { getAccessToken } from '@/api/client';
+import { fetchAuthenticatedBlob } from '@/api/client';
+import { ApiError } from '@/api/errors';
 import type { BoundingBox } from '@/api/types';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+/** The content URL answered with something that is not a PDF - see the throw site. */
+class NotPdfError extends Error {
+  constructor(readonly contentType: string) {
+    super(`Expected PDF bytes, received ${contentType}`);
+    this.name = 'NotPdfError';
+  }
+}
+
+/**
+ * Development-only tracing for the two-request document load.
+ *
+ * Stripped from the production bundle: `import.meta.env.DEV` is a compile-time
+ * constant, so Vite removes both the call and this function from the build.
+ *
+ * Deliberately never given a URL containing credentials, a token, or any document
+ * content - only the path, the status and the content type, which is what
+ * identifies a misrouted or unauthenticated request.
+ */
+function traceLoad(stage: string, detail: Record<string, unknown>): void {
+  if (!import.meta.env.DEV) return;
+  // eslint-disable-next-line no-console
+  console.debug(`[PdfViewer] ${stage}`, detail);
+}
+
+/**
+ * Turn a load failure into something a reader can act on.
+ *
+ * The proxied route now fails with a real `ApiError` carrying a status, so the
+ * message can name the actual problem instead of guessing from the text of an
+ * exception. That guessing is what produced "the document link has expired" for a
+ * deployment that signs nothing and therefore has no link to expire - advice
+ * whose only instruction, reload the page, reproduced the error.
+ *
+ * A 401 here has already survived one refresh attempt inside
+ * `fetchAuthenticatedBlob`, so the session really is gone.
+ */
+function describeFailure(caught: unknown, proxied: boolean): string {
+  if (caught instanceof NotPdfError) {
+    // Deliberately blunt: this is a deployment fault, not something the reader
+    // did, and the alternative is pdf.js's "Invalid PDF structure" sending someone
+    // to look for a corrupt upload that is perfectly fine.
+    return 'The server returned a page instead of the document. The API route serving document content is not reachable.';
+  }
+
+  if (caught instanceof ApiError) {
+    if (caught.status === 401) {
+      return 'Your session has expired. Sign in again to view this document.';
+    }
+    if (caught.status === 403) {
+      return 'You do not have permission to view this document.';
+    }
+    if (caught.status === 404) {
+      return 'This document is no longer available.';
+    }
+    return 'This document could not be displayed.';
+  }
+
+  // Signed object-storage URLs are fetched by pdf.js itself, so their failures
+  // arrive as pdf.js errors with no status to read.
+  if (!proxied && caught instanceof Error && /expired|403|401/i.test(caught.message)) {
+    return 'The document link has expired. Reload the page to get a fresh one.';
+  }
+
+  return 'This document could not be displayed.';
+}
 
 export interface PdfViewerProps {
   /**
@@ -65,60 +132,114 @@ export function PdfViewer({ url, highlights = [], page, focusToken }: PdfViewerP
   // ---------------------------------------------------------------- document
   useEffect(() => {
     let cancelled = false;
+    let task: ReturnType<typeof pdfjs.getDocument> | null = null;
+    let objectUrl: string | null = null;
+    const controller = new AbortController();
+
     setLoading(true);
     setError(null);
 
     // Two kinds of URL arrive here, and they authorise in opposite ways.
     //
     // A real object-storage URL is pre-signed: the signature *is* the
-    // authorisation, and attaching our own credentials to a cross-origin request
-    // would break the CORS preflight for no gain.
+    // authorisation, and it is handed straight to pdf.js. Attaching our own
+    // credentials to that cross-origin request would break the CORS preflight for
+    // no gain.
     //
-    // A local or otherwise unsignable backend cannot do that, so `file_access`
-    // returns an API path instead (`is_proxied`). That route is behind the normal
-    // session guard, so it needs the bearer token - and without it pdf.js gets a
-    // 401, which this component's own error mapping reports as "the document link
-    // has expired". Which is doubly misleading: nothing was signed, so nothing
-    // could expire, and reloading the page - what the message tells you to do -
-    // produces another 401.
+    // A local or otherwise unsignable backend has nothing to sign against, so
+    // `file_access` returns an API path instead - a route behind the normal
+    // session guard. Those bytes are fetched HERE, by the application, and handed
+    // to pdf.js as a blob URL.
+    //
+    // Fetching rather than letting pdf.js do it, for three reasons:
+    //
+    //  * The token. pdf.js would need `httpHeaders`, which pins whatever token was
+    //    current when the document was opened. A token that expires between then
+    //    and the request 401s, and the reader is told to sign in again while the
+    //    HttpOnly refresh cookie that would have recovered it goes unused.
+    //    `fetchAuthenticatedBlob` runs the same refresh-and-retry as every other
+    //    call, so an expired token is invisible.
+    //  * Range requests. pdf.js fetches a large PDF in pieces, so the same
+    //    authorisation problem recurs per range for as long as the document is
+    //    open - a long read can start failing to render pages part-way through.
+    //    One fetch up front has one outcome.
+    //  * The URL stops being a credential. A blob URL is origin-local and dies
+    //    with the page; nothing that could be copied out of devtools and replayed.
+    //
+    // A blob URL rather than passing the ArrayBuffer as `data:` - pdf.js transfers
+    // that buffer to its worker and leaves it detached, so StrictMode's second
+    // effect invocation in development would hand it an empty buffer and fail.
     const proxied = url.startsWith('/api/');
-    const token = proxied ? getAccessToken() : null;
-    const task = pdfjs.getDocument({
-      url,
-      withCredentials: proxied,
-      ...(token ? { httpHeaders: { Authorization: `Bearer ${token}` } } : {}),
-    });
 
-    task.promise.then(
-      (doc) => {
-        if (cancelled) {
-          void doc.destroy();
-          return;
+    const load = async (): Promise<void> => {
+      let source = url;
+
+      if (proxied) {
+        traceLoad('content request started', { url });
+        const { blob, contentType, status } = await fetchAuthenticatedBlob(url, {
+          signal: controller.signal,
+        });
+        traceLoad('content request completed', {
+          url,
+          status,
+          contentType,
+          bytes: blob.size,
+        });
+
+        // A 200 is not proof that these are PDF bytes.
+        //
+        // The SPA fallback (`try_files $uri $uri/ /index.html`) answers any path
+        // the proxy does not claim with the application's own HTML, at 200. So a
+        // content URL that has lost its `/api/v1` prefix - or a proxy that stops
+        // routing it - returns a perfectly successful page of HTML, pdf.js reports
+        // "Invalid PDF structure", and nothing appears in the backend's log at all
+        // because the request never reached it. Naming that here turns a confusing
+        // parser error into the routing problem it actually is.
+        if (contentType && !/pdf|octet-stream/i.test(contentType)) {
+          throw new NotPdfError(contentType);
         }
-        docRef.current = doc;
-        setPageCount(doc.numPages);
-        setLoading(false);
-      },
-      (caught: unknown) => {
+
+        // Checked before creating the URL: a revoke in the cleanup below cannot
+        // run for an object that did not exist when the cleanup was scheduled.
         if (cancelled) return;
-        setLoading(false);
-        // "Expired" is only true of a signed URL. On the proxied route the same
-        // 401 means the session lapsed, and telling the reader to reload would
-        // send them round the loop again.
-        const denied = caught instanceof Error && /expired|403|401/i.test(caught.message);
-        setError(
-          !denied
-            ? 'This document could not be displayed.'
-            : proxied
-              ? 'Your session has expired. Sign in again to view this document.'
-              : 'The document link has expired. Reload the page to get a fresh one.',
-        );
-      },
-    );
+        objectUrl = URL.createObjectURL(blob);
+        source = objectUrl;
+      }
+
+      task = pdfjs.getDocument({ url: source });
+      const doc = await task.promise;
+
+      if (cancelled) {
+        void doc.destroy();
+        return;
+      }
+      traceLoad('document ready', { pages: doc.numPages });
+      docRef.current = doc;
+      setPageCount(doc.numPages);
+      setLoading(false);
+    };
+
+    load().catch((caught: unknown) => {
+      // An abort is this effect being superseded, not a failure. Reporting it
+      // would flash an error over the document the reader just switched to.
+      if (cancelled || (caught instanceof DOMException && caught.name === 'AbortError')) return;
+      traceLoad('load failed', { url, error: String(caught) });
+      setLoading(false);
+      setError(describeFailure(caught, proxied));
+    });
 
     return () => {
       cancelled = true;
-      void task.destroy();
+      // Aborts the fetch itself, not just its result. Switching contracts while a
+      // 40MB document is in flight would otherwise leave it downloading to
+      // nowhere, competing for bandwidth with the one now on screen.
+      controller.abort();
+      void task?.destroy();
+      // Without this the decoded PDF stays resident for the lifetime of the page.
+      // Contracts here run to tens of megabytes and the viewer is remounted on
+      // every document a reviewer opens, so the leak is measured in hundreds of
+      // megabytes over a session, not kilobytes.
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       docRef.current = null;
     };
   }, [url]);

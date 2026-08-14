@@ -138,6 +138,59 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 }
 
 /** Multipart upload. Content-Type is left to the browser so the boundary is right. */
+/**
+ * Fetch binary content from an API route that requires authentication.
+ *
+ * Takes a full application path (`/api/v1/contracts/{id}/content`) rather than a
+ * BASE_URL-relative one, because its callers are handed complete URLs by the API
+ * - `file_access` returns either a pre-signed object-storage URL or, when the
+ * backend has nothing to sign against, this route.
+ *
+ * It exists so binary fetches get the same 401 handling as every JSON call. A
+ * consumer that builds its own `fetch` with a bearer token gets one shot with
+ * whatever token it happened to read: when that token has just expired the
+ * request 401s and the caller reports a dead session, while the HttpOnly refresh
+ * cookie sitting in the browser would have recovered it silently. Sharing
+ * `refreshAccessToken` also shares its single-flight guard, so a page opening
+ * three documents at once still triggers one refresh rather than three that
+ * invalidate each other.
+ */
+export async function fetchAuthenticatedBlob(
+  url: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<{ blob: Blob; contentType: string; status: number }> {
+  const send = async (): Promise<Response> =>
+    fetch(url, {
+      credentials: 'include',
+      signal: options.signal,
+      headers: {
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
+    });
+
+  let response = await send();
+
+  if (response.status === 401) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      response = await send();
+    }
+  }
+
+  if (!response.ok) {
+    throw await ApiError.fromResponse(response);
+  }
+
+  // The content type is returned rather than checked here: this helper serves the
+  // viewer, which requires a PDF, and the download button, which legitimately
+  // receives DOCX and ZIP. Only the caller knows which it asked for.
+  return {
+    blob: await response.blob(),
+    contentType: response.headers.get('content-type') ?? '',
+    status: response.status,
+  };
+}
+
 export async function apiUpload<T>(
   path: string,
   formData: FormData,

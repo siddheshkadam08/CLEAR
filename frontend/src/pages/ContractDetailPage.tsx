@@ -30,7 +30,7 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { getAccessToken } from '@/api/client';
+import { fetchAuthenticatedBlob } from '@/api/client';
 import {
   contracts as contractsApi,
   jobs as jobsApi,
@@ -92,19 +92,27 @@ interface Focus {
  * authenticate: the browser would navigate to it without the bearer token and
  * land on a 401 rendered as JSON. Fetching lets the same code serve both.
  */
+async function fetchSignedUrl(url: string): Promise<Blob> {
+  const response = await fetch(url, { credentials: 'omit' });
+  if (!response.ok) throw new Error(`Download failed (${response.status})`);
+  return response.blob();
+}
+
 async function downloadSource(contractId: UUID, original: boolean): Promise<void> {
   const access = original
     ? await contractsApi.fileAccessForDownload(contractId)
     : await contractsApi.fileAccess(contractId);
 
-  const token = getAccessToken();
-  const response = await fetch(access.url, {
-    headers: access.is_proxied && token ? { Authorization: `Bearer ${token}` } : {},
-    credentials: access.is_proxied ? 'include' : 'omit',
-  });
-  if (!response.ok) throw new Error(`Download failed (${response.status})`);
+  // Proxied goes through the shared client so a token that expired while the
+  // reader was reading is refreshed and retried, rather than surfacing as a
+  // download that silently failed. A signed URL is fetched bare: it carries its
+  // own authorisation, and sending credentials cross-origin would fail CORS.
+  // No content-type assertion here, unlike the viewer: a download legitimately
+  // returns DOCX or ZIP as well as PDF.
+  const blob = access.is_proxied
+    ? (await fetchAuthenticatedBlob(access.url)).blob
+    : await fetchSignedUrl(access.url);
 
-  const blob = await response.blob();
   const href = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = href;
