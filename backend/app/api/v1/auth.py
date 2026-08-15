@@ -53,7 +53,7 @@ def _set_refresh_cookie(response: Response, token: str, max_age_days: int) -> No
         # Lax rather than Strict: the OIDC redirect returns cross-site, and Strict
         # would drop the cookie on that navigation.
         samesite="lax",
-        secure=settings.is_production,
+        secure=settings.security.cookie_secure,
         path="/api/v1/auth",
     )
 
@@ -242,7 +242,7 @@ def _set_pkce_cookie(response: Response, verifier: str) -> None:
         # Lax, not Strict: the return from Microsoft is a cross-site top-level
         # navigation, and Strict would drop the cookie exactly when it is needed.
         samesite="lax",
-        secure=settings.is_production,
+        secure=settings.security.cookie_secure,
         path="/api/v1/auth",
     )
 

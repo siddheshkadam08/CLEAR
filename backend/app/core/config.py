@@ -251,6 +251,7 @@ class SecuritySettings(BaseSettings):
     refresh_token_expire_days: Annotated[
         int, Field(validation_alias="REFRESH_TOKEN_EXPIRE_DAYS", ge=1, le=365)
     ] = 14
+    cookie_secure: Annotated[bool, Field(validation_alias="AUTH_COOKIE_SECURE")] = True
     password_hash_scheme: Annotated[
         Literal["argon2", "bcrypt"], Field(validation_alias="PASSWORD_HASH_SCHEME")
     ] = "argon2"  # noqa: S105 - an algorithm name, not a credential
