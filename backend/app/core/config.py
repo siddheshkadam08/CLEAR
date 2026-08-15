@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
@@ -1486,6 +1487,29 @@ class Settings(BaseSettings):
                 "Refusing to start in production with insecure configuration:\n  - "
                 + "\n  - ".join(problems)
             )
+
+        # Warned about, not refused.
+        #
+        # `AUTH_COOKIE_SECURE=false` is a real choice for an internal deployment
+        # that genuinely cannot terminate TLS, and refusing to boot would leave an
+        # operator with no way to run at all. But it puts a multi-day refresh token
+        # on the wire in cleartext, replayable by anyone who can observe it, so it
+        # must not be something a deployment drifts into and forgets. Stated on
+        # every boot, it stays visible.
+        #
+        # `warnings` rather than the logger: settings are constructed before
+        # logging is configured, so a log call here would be swallowed.
+        if not self.security.cookie_secure:
+            warnings.warn(
+                "AUTH_COOKIE_SECURE=false in production: the refresh cookie is sent "
+                "without the Secure flag, so the session token travels in cleartext "
+                "over HTTP and can be replayed by anyone who can observe the network. "
+                "This is only appropriate where TLS is impossible. Prefer terminating "
+                "TLS - a self-signed certificate trusted by the client machines is "
+                "enough.",
+                stacklevel=2,
+            )
+
         return self
 
     # --- convenience ---------------------------------------------------------

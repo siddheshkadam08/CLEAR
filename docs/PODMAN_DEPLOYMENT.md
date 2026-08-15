@@ -1228,6 +1228,60 @@ podman exec clear-backend python -m app.cli shell
 podman exec clear-backend find /var/lib/cip/storage -maxdepth 2 -type d
 ```
 
+### Logged out on every page refresh
+
+Signing in works. Reloading the page returns you to the login screen. Nothing in
+the backend log looks wrong, because nothing is.
+
+**Almost always: the deployment is being served over plain HTTP.**
+
+The refresh token is an HttpOnly cookie carrying `Secure`, and a browser
+**silently discards** a `Secure` cookie on a plain-HTTP origin — no error, no
+console warning at the point it matters. Signing in still appears to succeed
+because the *access* token comes back in the response body and is held in memory.
+A reload wipes that memory, the refresh call goes out with no cookie, and the app
+correctly concludes there is no session.
+
+`http://localhost` is a secure context to a browser; `http://<lan-ip>` is not.
+That is why this appears on a VM having never appeared on a laptop.
+
+Confirm it in thirty seconds — after signing in:
+
+```text
+DevTools -> Application -> Cookies -> your origin
+    cip_refresh present?      absent  => this is the cause
+
+DevTools -> Network, then reload
+    POST /api/v1/auth/refresh -> 401   and no Cookie header on the request
+```
+
+**The fix is TLS** — steps 34–35 above. A self-signed certificate trusted by the
+client machines is enough; the flag needs a *trusted* secure context, not a
+publicly-signed one. Afterwards, point `CORS_ORIGINS`, `OIDC_REDIRECT_URI` and
+`OIDC_POST_LOGIN_REDIRECT` at `https://` and restart.
+
+If TLS is genuinely impossible on this network, the flag can be turned off:
+
+```bash
+echo 'AUTH_COOKIE_SECURE=false' >> /etc/clear/clear.env
+/opt/clear/deploy/podman/scripts/restart.sh
+```
+
+Understand what that buys and costs. The refresh token is a multi-day credential;
+without `Secure` it crosses the network in cleartext and can be replayed by anyone
+able to observe it. The backend says so in its log on every boot, deliberately.
+Prefer a self-signed certificate over this.
+
+Entra SSO fails the same way and for the same reason — the PKCE verifier is a
+second `Secure` cookie, so the callback cannot complete over HTTP.
+
+**If `cip_refresh` IS present and refresh still fails**, this is not the cause.
+Check instead that the refresh request is same-origin: `VITE_API_BASE_URL` is baked
+into the bundle at build time, and an image built with an absolute
+`http://<host>:8000/api/v1` makes every API call cross-site, where a `SameSite=lax`
+cookie is not sent. That one is fixed by rebuilding the image, not by an
+environment variable.
+
 ### The backend restart-loops at boot
 
 Almost always one of two things, and both are in the logs:

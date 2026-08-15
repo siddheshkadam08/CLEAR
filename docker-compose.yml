@@ -59,6 +59,19 @@ x-backend-env: &backend-env
   UPLOAD_DUPLICATE_CHECK: ${UPLOAD_DUPLICATE_CHECK:-false}
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  # The `Secure` flag on the refresh cookie, defaulted to its secure value.
+  #
+  # Forwarded because this block is an allow-list: without the line, setting
+  # AUTH_COOKIE_SECURE in .env does nothing at all, which is the same trap the
+  # OIDC and QUEUE_* blocks below were written to explain.
+  #
+  # It matters here because a browser silently discards a `Secure` cookie over
+  # plain HTTP, and this stack publishes plain HTTP. The symptom is not an error:
+  # signing in works, and then a page reload logs you out, because the access token
+  # lived in memory while the refresh cookie was never stored at all. Set it false
+  # only on a deployment with no TLS, knowing the refresh token then travels in
+  # cleartext.
+  AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
   # --- Microsoft Entra SSO ---
   #
   # This block is an allow-list, not a passthrough: a key absent here never
