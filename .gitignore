@@ -102,3 +102,10 @@ docker-compose.override.yml.local
 
 # Benchmark artefacts. Reports are build outputs; baselines are committed.
 evaluation-results/
+
+# Image exports for offline transfer to a VM. Gigabyte-scale build output.
+*.tar
+
+# Document bytes and the parser cache when STORAGE_PROVIDER=local. Contract
+# content - never committed.
+.local-storage/

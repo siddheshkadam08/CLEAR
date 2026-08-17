@@ -129,9 +129,19 @@ def test_the_existing_guarantees_still_hold() -> None:
     assert "maximum" not in cleaned["properties"]["amount"]
 
 
-def test_an_object_with_no_properties_is_not_given_an_empty_required() -> None:
-    """``required: []`` is legal but says nothing; an open object stays open."""
+def test_an_open_object_is_carried_as_key_value_pairs() -> None:
+    """An object with no properties cannot stay an object.
+
+    This previously asserted that "an open object stays open" - it kept
+    ``{"type": "object", "additionalProperties": false}``, which describes an
+    object that may have no keys whatsoever. Strict mode does not treat that as a
+    property at all, so the parent's ``required`` entry naming it became
+    "Extra required key 'attributes' supplied" and the request 400ed.
+
+    See :mod:`app.ai.rag.schema_compat` for the representation that replaces it.
+    """
     cleaned = _sanitise_schema({"type": "object"})
 
-    assert "required" not in cleaned
-    assert cleaned["additionalProperties"] is False
+    assert cleaned["type"] == "array"
+    assert cleaned["items"]["required"] == ["key", "value"]
+    assert cleaned["items"]["additionalProperties"] is False

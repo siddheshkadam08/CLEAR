@@ -37,8 +37,21 @@ down_revision = "0011"
 branch_labels = None
 depends_on = None
 
-_SCHEMA = "clear"
 _TABLE = "contracts"
+
+
+def _resolve_schema() -> str:
+    """The schema these objects live in, honouring DB_SCHEMA.
+
+    Revisions 0004, 0005 and 0007 all resolve it this way. This one hardcoded
+    ``"clear"``, so against a database whose tables are in ``public`` every
+    lookup here searched a schema that does not exist: `_has_column` found
+    nothing and reported every column missing, and the first statement to touch
+    the schema for real failed with `schema "clear" does not exist`.
+    """
+    from app.core.config import get_settings
+
+    return get_settings().db.schema_name.strip() or "public"
 
 _NEW_COLUMNS = (
     "original_file_path",
@@ -64,7 +77,7 @@ def _has_column(name: str) -> bool:
             "SELECT 1 FROM information_schema.columns "
             "WHERE table_schema = :schema AND table_name = :table AND column_name = :column"
         ),
-        {"schema": _SCHEMA, "table": _TABLE, "column": name},
+        {"schema": _resolve_schema(), "table": _TABLE, "column": name},
     )
     return rows.first() is not None
 
@@ -78,7 +91,7 @@ def _enum_has_value(enum_name: str, value: str) -> bool:
             "JOIN pg_namespace n ON n.oid = t.typnamespace "
             "WHERE n.nspname = :schema AND t.typname = :enum AND e.enumlabel = :value"
         ),
-        {"schema": _SCHEMA, "enum": enum_name, "value": value},
+        {"schema": _resolve_schema(), "enum": enum_name, "value": value},
     )
     return rows.first() is not None
 
@@ -93,7 +106,7 @@ def upgrade() -> None:
         ("contract_status", "conversion_failed"),
     ):
         if not _enum_has_value(enum_name, value):
-            op.execute(f"ALTER TYPE {_SCHEMA}.{enum_name} ADD VALUE IF NOT EXISTS '{value}'")
+            op.execute(f"ALTER TYPE {_resolve_schema()}.{enum_name} ADD VALUE IF NOT EXISTS '{value}'")
 
     # --- columns ----------------------------------------------------------
     definitions = {
@@ -102,7 +115,7 @@ def upgrade() -> None:
         "processing_file_path": sa.Column("processing_file_path", sa.String(1024), nullable=True),
         "original_file_type": sa.Column(
             "original_file_type",
-            sa.Enum(name="file_type", schema=_SCHEMA, create_type=False),
+            sa.Enum(name="file_type", schema=_resolve_schema(), create_type=False),
             nullable=True,
         ),
         # No unique constraint, unlike `sha256_hash`. This is an integrity check
@@ -117,14 +130,14 @@ def upgrade() -> None:
     }
     for name in _NEW_COLUMNS:
         if not _has_column(name):
-            op.add_column(_TABLE, definitions[name], schema=_SCHEMA)
+            op.add_column(_TABLE, definitions[name], schema=_resolve_schema())
 
     op.create_index(
         "ix_contracts_source_archive_id",
         _TABLE,
         ["source_archive_id"],
         unique=False,
-        schema=_SCHEMA,
+        schema=_resolve_schema(),
         postgresql_where=sa.text("source_archive_id IS NOT NULL"),
         if_not_exists=True,
     )
@@ -138,7 +151,7 @@ def upgrade() -> None:
     op.execute(
         sa.text(
             f"""
-            UPDATE {_SCHEMA}.{_TABLE}
+            UPDATE {_resolve_schema()}.{_TABLE}
                SET original_file_path   = COALESCE(original_file_path, storage_path),
                    processing_file_path = COALESCE(processing_file_path, storage_path),
                    original_file_type   = COALESCE(original_file_type, file_type),
@@ -160,8 +173,8 @@ def downgrade() -> None:
     leaving two unused labels behind.
     """
     op.drop_index(
-        "ix_contracts_source_archive_id", table_name=_TABLE, schema=_SCHEMA, if_exists=True
+        "ix_contracts_source_archive_id", table_name=_TABLE, schema=_resolve_schema(), if_exists=True
     )
     for name in _NEW_COLUMNS:
         if _has_column(name):
-            op.drop_column(_TABLE, name, schema=_SCHEMA)
+            op.drop_column(_TABLE, name, schema=_resolve_schema())

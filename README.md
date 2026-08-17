@@ -246,8 +246,8 @@ checkpoint, so a failure resumes at the failed stage instead of restarting.
 | 8 | Indexing | search index + knowledge graph → `READY` | Index |
 
 ```
-QUEUED → VALIDATING → PARSING → ENRICHING → CLASSIFYING → CHUNKING
-       → AI_EXTRACTION → EMBEDDING → INDEXING → READY
+QUEUED → VALIDATING → PARSING → AI_EXTRACTION (docpipeline, then extraction)
+       → EMBEDDING → INDEXING → READY
 alt: FAILED · RETRYING · CANCELLED · PAUSED
 ```
 

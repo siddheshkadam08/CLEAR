@@ -5,10 +5,9 @@ on import. :func:`app.orchestrator.stages.base.get_stage_handler` imports this
 package lazily, so the API process never loads parser or embedding dependencies
 just to serve a request.
 
-Stage order (§10.1)::
+Stage order (§10.1) - the six of ``STAGE_ORDER``::
 
-    validation -> parser -> enrichment -> classification
-               -> chunking -> ai_extraction -> embedding -> indexing
+    validation -> parser -> docpipeline -> extraction -> embedding -> indexing
 """
 
 from app.orchestrator.stages.base import (

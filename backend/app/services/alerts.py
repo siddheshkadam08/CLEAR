@@ -39,15 +39,43 @@ logger = get_logger(__name__)
 #: Which stage failure maps onto which operational category, so the alert says
 #: "embedding" rather than a generic "processing failed" and the suggested
 #: resolution is the useful one.
+#: Grouped by category rather than listed per stage, because most stages share
+#: one: written the other way round, ``AlertCategory.DOCUMENT_PROCESSING`` was
+#: spelled out five times and ``AI_EXTRACTION`` three, which is the form where a
+#: stage quietly ends up in the wrong group.
+#:
+#: ``DOCPIPELINE`` and ``EXTRACTION`` are two distinct stages sharing one
+#: category, not a duplicated entry: between them they are what "the model is
+#: reading the document" now means. Neither was listed here at all while the
+#: retired stages were, so a docpipeline failure raised a *generic* processing
+#: alert and lost the resolution text that names the provider.
+#:
+#: The retired four are kept so an alert raised before the old pipeline was
+#: removed still reads back with its category.
+_CATEGORY_STAGES: tuple[tuple[AlertCategory, tuple[PipelineStage, ...]], ...] = (
+    (AlertCategory.PARSER, (PipelineStage.PARSER,)),
+    (AlertCategory.EMBEDDING, (PipelineStage.EMBEDDING,)),
+    (
+        AlertCategory.AI_EXTRACTION,
+        (PipelineStage.DOCPIPELINE, PipelineStage.EXTRACTION, PipelineStage.AI_EXTRACTION),
+    ),
+    (
+        AlertCategory.DOCUMENT_PROCESSING,
+        (
+            PipelineStage.VALIDATION,
+            PipelineStage.INDEXING,
+            PipelineStage.ENRICHMENT,
+            PipelineStage.CLASSIFICATION,
+            PipelineStage.CHUNKING,
+        ),
+    ),
+)
+
+#: Which stage failure maps onto which operational category, so the alert says
+#: "embedding" rather than a generic "processing failed" and the suggested
+#: resolution is the useful one.
 _STAGE_CATEGORY: dict[str, AlertCategory] = {
-    PipelineStage.VALIDATION.value: AlertCategory.DOCUMENT_PROCESSING,
-    PipelineStage.PARSER.value: AlertCategory.PARSER,
-    PipelineStage.ENRICHMENT.value: AlertCategory.DOCUMENT_PROCESSING,
-    PipelineStage.CLASSIFICATION.value: AlertCategory.DOCUMENT_PROCESSING,
-    PipelineStage.CHUNKING.value: AlertCategory.DOCUMENT_PROCESSING,
-    PipelineStage.AI_EXTRACTION.value: AlertCategory.AI_EXTRACTION,
-    PipelineStage.EMBEDDING.value: AlertCategory.EMBEDDING,
-    PipelineStage.INDEXING.value: AlertCategory.DOCUMENT_PROCESSING,
+    stage.value: category for category, stages in _CATEGORY_STAGES for stage in stages
 }
 
 #: Error codes that mean the platform itself is unwell rather than one awkward

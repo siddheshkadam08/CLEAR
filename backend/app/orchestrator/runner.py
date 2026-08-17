@@ -381,9 +381,15 @@ async def _execute(message: StageMessage, max_attempts: int) -> StageOutcome:
             )
 
         # --- advance ---------------------------------------------------------
-        # Re-plan when this stage produced context that changes the plan, i.e.
-        # classification selecting a profile with a different chunk strategy.
-        if message.stage is PipelineStage.CLASSIFICATION and result.context_updates:
+        # Re-plan when this stage produced context that changes the plan - the
+        # profile it selected is a version key for every stage after it, and the
+        # plan was built before one existed.
+        #
+        # This tested `CLASSIFICATION`, which is retired and never dispatched, so
+        # the re-plan simply stopped happening. `DOCPIPELINE` is what resolves the
+        # profile now (`_resolve_profile`, emitted as `profile_id` in
+        # `context_updates`), so it is the stage the plan has to be rebuilt after.
+        if message.stage is PipelineStage.DOCPIPELINE and result.context_updates:
             profile = await _load_profile(db, job)
             plan = await workflow.plan(job=job, contract=contract, profile=profile)
             job.execution_plan = {**(job.execution_plan or {}), **plan.to_dict()}

@@ -247,7 +247,7 @@ if [[ ${#SIMULATED[@]} -gt 0 ]]; then
     for entry in "${SIMULATED[@]}"; do warn "    ${entry}"; done
     warn ""
     warn "Set the real providers in .env on this host, then re-run:"
-    warn "    LLM_PROVIDER=anthropic|openai|gemini  + the matching API key"
+    warn "    LLM_PROVIDER=azure_openai|anthropic|openai  + the matching API key"
     warn "    EMBEDDING_PROVIDER=nvidia|openai      + the matching API key"
     warn "    PARSER_MODE=live                      + IDOC_BASE_URL / IDOC_API_KEY"
     warn ""

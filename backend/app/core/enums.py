@@ -177,32 +177,41 @@ class JobState(StrEnum):
 class PipelineStage(StrEnum):
     """Every stage a job can run. Order is significant - see ``STAGE_ORDER``.
 
-    ``ENRICHMENT`` through ``INDEXING`` are the old pipeline. Their handlers
-    still exist and still work, but they are no longer in ``STAGE_ORDER``, so
-    nothing dispatches them - see the note there. The members stay because
-    historical ``job_stage_runs`` rows name them and would not deserialise
-    otherwise.
+    The six members of ``STAGE_ORDER`` are the pipeline. ``ENRICHMENT``,
+    ``CLASSIFICATION``, ``CHUNKING`` and ``AI_EXTRACTION`` were the old one; its
+    handlers are deleted and nothing dispatches them.
+
+    **These four members cannot simply be deleted with the handlers.**
+    ``job_stage_runs.stage``, ``processing_jobs.current_stage`` and
+    ``stage_queue.stage`` are columns of the *native Postgres enum*
+    ``pipeline_stage``, which still declares all ten labels. Historical rows name
+    the retired four, and SQLAlchemy raises ``LookupError`` mapping a label with
+    no Python member - so dropping them here would break reading any job that ran
+    before the change, on a database shared with other work. They are labels for
+    history, not stages: nothing routes to them.
     """
 
     VALIDATION = "validation"
     PARSER = "parser"
     DOCPIPELINE = "docpipeline"
     EXTRACTION = "extraction"
+    EMBEDDING = "embedding"
+    INDEXING = "indexing"
+
+    # --- retired: readable for history, never dispatched ---------------------
     ENRICHMENT = "enrichment"
     CLASSIFICATION = "classification"
     CHUNKING = "chunking"
     AI_EXTRACTION = "ai_extraction"
-    EMBEDDING = "embedding"
-    INDEXING = "indexing"
 
 
 #: Canonical execution order. Index position drives resume-from-checkpoint and
 #: "regenerate only downstream stages" logic.
 #:
-#: Three stages, not eight. The six that used to follow the parser - enrichment,
-#: classification, chunking, ai_extraction, embedding, indexing - are replaced by
-#: ``DOCPIPELINE``, which does the same job against a different taxonomy and
-#: writes to the ``cip_*`` tables instead of ``clauses``/``chunks``/``embeddings``.
+#: Six stages, not eight. The four that used to follow the parser - enrichment,
+#: classification, chunking and ai_extraction - are replaced by ``DOCPIPELINE``,
+#: which does the same job against a different taxonomy and reads its types from
+#: ``cip_docMapping``.
 #:
 #: The old path could not classify a document type it had no profile for, and
 #: then failed the whole job when the wrong profile's clauses found nothing: a
@@ -242,12 +251,15 @@ STAGE_TO_STATE: dict[PipelineStage, JobState] = {
     PipelineStage.PARSER: JobState.PARSING,
     PipelineStage.DOCPIPELINE: JobState.AI_EXTRACTION,
     PipelineStage.EXTRACTION: JobState.AI_EXTRACTION,
+    PipelineStage.EMBEDDING: JobState.EMBEDDING,
+    PipelineStage.INDEXING: JobState.INDEXING,
+    # Retired, and kept resolvable on purpose: a job that ran before the old
+    # pipeline was removed still names these, and rendering its history must not
+    # raise. Nothing dispatches them - `_STAGE_MODULES` has no handler to load.
     PipelineStage.ENRICHMENT: JobState.ENRICHING,
     PipelineStage.CLASSIFICATION: JobState.CLASSIFYING,
     PipelineStage.CHUNKING: JobState.CHUNKING,
     PipelineStage.AI_EXTRACTION: JobState.AI_EXTRACTION,
-    PipelineStage.EMBEDDING: JobState.EMBEDDING,
-    PipelineStage.INDEXING: JobState.INDEXING,
 }
 
 #: Hard dependency graph validated by the Workflow Engine before dispatch.
@@ -256,16 +268,13 @@ STAGE_DEPENDENCIES: dict[PipelineStage, tuple[PipelineStage, ...]] = {
     PipelineStage.PARSER: (PipelineStage.VALIDATION,),
     PipelineStage.DOCPIPELINE: (PipelineStage.PARSER,),
     PipelineStage.EXTRACTION: (PipelineStage.DOCPIPELINE,),
-    # EXTRACTION now writes the `chunks` rows this reads, so it depends on the
-    # live stage rather than the retired AI_EXTRACTION it used to follow.
     PipelineStage.EMBEDDING: (PipelineStage.EXTRACTION,),
-    # Retained for the stages no longer in STAGE_ORDER, so anything that reads
-    # this map for a historical run still resolves.
+    PipelineStage.INDEXING: (PipelineStage.EMBEDDING,),
+    # As above: history, so a persisted execution plan still resolves.
     PipelineStage.ENRICHMENT: (PipelineStage.PARSER,),
     PipelineStage.CLASSIFICATION: (PipelineStage.ENRICHMENT,),
     PipelineStage.CHUNKING: (PipelineStage.CLASSIFICATION,),
     PipelineStage.AI_EXTRACTION: (PipelineStage.CHUNKING,),
-    PipelineStage.INDEXING: (PipelineStage.EMBEDDING,),
 }
 
 
@@ -379,22 +388,6 @@ STAGE_ARTIFACTS: dict[PipelineStage, tuple[ArtifactKind, ...]] = {
     # a second row is left `is_current` on every reprocess.
     PipelineStage.EXTRACTION: (
         ArtifactKind.CHUNKS,
-        ArtifactKind.CLAUSES,
-        ArtifactKind.ENTITIES,
-        ArtifactKind.OBLIGATIONS,
-        ArtifactKind.RISKS,
-        ArtifactKind.TIMELINES,
-        ArtifactKind.RELATIONSHIPS,
-        ArtifactKind.EXTRACTION_STATISTICS,
-    ),
-    PipelineStage.ENRICHMENT: (ArtifactKind.CANONICAL_DOCUMENT, ArtifactKind.STATISTICS),
-    PipelineStage.CLASSIFICATION: (ArtifactKind.CLASSIFICATION,),
-    PipelineStage.CHUNKING: (
-        ArtifactKind.CHUNKS,
-        ArtifactKind.CHUNK_STATISTICS,
-        ArtifactKind.CHUNK_VALIDATION,
-    ),
-    PipelineStage.AI_EXTRACTION: (
         ArtifactKind.CLAUSES,
         ArtifactKind.ENTITIES,
         ArtifactKind.OBLIGATIONS,

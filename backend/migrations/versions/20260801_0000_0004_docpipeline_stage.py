@@ -34,7 +34,7 @@ down_revision = "0003"
 branch_labels = None
 depends_on = None
 
-_SCHEMA = "clear"
+# Schema comes from DB_SCHEMA at runtime - see _resolve_schema() below.
 
 
 def upgrade() -> None:

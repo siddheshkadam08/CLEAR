@@ -23,8 +23,8 @@ from app.ai.rag.providers import (
     Purpose,
     StructuredResult,
     TokenUsage,
-    _sanitise_schema,
 )
+from app.ai.rag.schema_compat import compile_strict, restore_payload
 from app.core import metrics
 from app.core.config import get_settings
 from app.core.errors import (
@@ -138,6 +138,11 @@ class OpenAIProvider(IInferenceProvider):
         # `parse_json` already does for providers without enforcement.
         unenforced = self.settings.llm.llm_structured_output == "none"
 
+        # Compiled once, outside the retry loop: the schema does not change
+        # between attempts, and `freeform_paths` is needed to restore whichever
+        # attempt succeeds.
+        compiled = compile_strict(schema)
+
         # Without provider-side enforcement, malformed JSON is not a permanent
         # fault - it is the model occasionally wrapping the object in prose or a
         # code fence, and the next sample usually does not. Treating it as
@@ -156,7 +161,7 @@ class OpenAIProvider(IInferenceProvider):
                         f"{system}\n\n"
                         "Respond with a single JSON object conforming to this schema. "
                         "Output JSON only - no prose, no explanation, no code fence.\n"
-                        f"{json.dumps(_sanitise_schema(schema))}"
+                        f"{json.dumps(compiled.schema)}"
                     ),
                     prompt=prompt,
                     purpose=purpose,
@@ -174,7 +179,7 @@ class OpenAIProvider(IInferenceProvider):
                         "json_schema": {
                             "name": "extraction",
                             "strict": True,
-                            "schema": _sanitise_schema(schema),
+                            "schema": compiled.schema,
                         },
                     },
                 )
@@ -190,7 +195,12 @@ class OpenAIProvider(IInferenceProvider):
                         stage="ai_extraction",
                     )
                 return StructuredResult(
-                    data=self.parse_json(result.text, context="structured response"),
+                    # Undoes the free-form rewrite, so the caller receives the
+                    # shape its own schema described.
+                    data=restore_payload(
+                        self.parse_json(result.text, context="structured response"),
+                        compiled.freeform_paths,
+                    ),
                     inference=result,
                 )
             except SchemaValidationError as exc:

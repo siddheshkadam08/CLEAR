@@ -1,8 +1,14 @@
-"""Stage 6 - AI extraction.
+"""Persistence machinery for the extraction stage.
 
-The stage that turns a chunked document into the thing users came for: clauses with
-typed attributes, parties, obligations, key dates, risks, a 0-100 risk score, and a
+Turns a chunked document into the thing users came for: clauses with typed
+attributes, parties, obligations, key dates, risks, a 0-100 risk score, and a
 list of the mandatory clauses this contract does not contain.
+
+**Not a dispatchable stage.** This module holds the base class only;
+:class:`~app.orchestrator.stages.extraction.ExtractionStage` is the handler that
+``STAGE_ORDER`` actually runs. It was the retired ``ai_extraction`` stage of the
+old pipeline, which is gone - what survives is the half worth keeping, because
+``cleanup()`` and ``_persist()`` are load-bearing and neither is obvious.
 
 Division of labour:
 
@@ -50,7 +56,6 @@ from app.core.enums import (
     EmbeddingLevel,
     LiabilityCapBasis,
     PartySide,
-    PipelineStage,
 )
 from app.core.errors import PipelineError
 from app.core.logging import get_logger
@@ -61,7 +66,6 @@ from app.orchestrator.stages.base import (
     StageContext,
     StageHandler,
     StageResult,
-    register_stage,
 )
 from app.repositories.chunk import ChunkRepository
 from app.repositories.contract import ContractMetadataRepository
@@ -79,11 +83,17 @@ from app.repositories.knowledge import (
 logger = get_logger(__name__)
 
 
-class AIExtractionStage(StageHandler):
-    stage = PipelineStage.AI_EXTRACTION
-    # Annotated to keep the base's arity-free type. Inferred, this would be a
-    # two-tuple, and `ExtractionStage` subclasses it with a single requirement.
-    requires: tuple[ArtifactKind, ...] = (ArtifactKind.CHUNKS, ArtifactKind.CLASSIFICATION)
+class ExtractionStageBase(StageHandler):
+    """Shared extraction persistence. Subclassed, never registered.
+
+    ``stage`` is deliberately left unset: the base implements no stage of its own,
+    and giving it one would put a handler in the registry for a stage nothing
+    dispatches. :class:`~app.orchestrator.stages.extraction.ExtractionStage`
+    supplies it.
+    """
+
+    # Annotated to keep the base's arity-free type, so a subclass can narrow it.
+    requires: tuple[ArtifactKind, ...] = ()
     cacheable = True
     retryable = True
 
@@ -967,6 +977,4 @@ def _ip_answer(result: ExtractionResult) -> str:
     return str(clause.attributes.get("we_retain_pre_existing_ip") or PartySide.UNKNOWN.value)
 
 
-register_stage(AIExtractionStage())
-
-__all__ = ["AIExtractionStage"]
+__all__ = ["ExtractionStageBase"]

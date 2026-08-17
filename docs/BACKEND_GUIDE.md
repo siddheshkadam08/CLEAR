@@ -179,7 +179,7 @@ runs over the same Redis with zero changes to any stage.
 | --- | --- |
 | **Project** | A folder *and* a security wall. Contracts live inside a project. Your access is granted per project. |
 | **Contract** | One uploaded document (PDF or DOCX), plus everything we learned from it. |
-| **Job** | The processing run for one contract. It moves through 8 stages. |
+| **Job** | The processing run for one contract. It moves through 6 stages. |
 | **Stage** | One step of processing (e.g. "Parser", "Chunking"). Each is independently retryable. |
 | **Artifact** | The saved output of a stage — a JSON file in object storage. Doubles as a **checkpoint**. |
 | **Checkpoint** | A saved stage result. If stage 6 fails, we resume from 6 — stages 1–5 are not redone. |
@@ -1249,7 +1249,7 @@ the bottleneck for the document viewer.
 
 | | Purpose | Options |
 | --- | --- | --- |
-| **`LLM_PROVIDER`** | Reading the contract, answering questions | `gemini` · `anthropic` · `openai` · `azure_openai` · `local` · `mock` |
+| **`LLM_PROVIDER`** | Reading the contract, answering questions | `azure_openai` · `anthropic` · `openai` · `local` · `mock` |
 | **`EMBEDDING_PROVIDER`** | Building the meaning index | `nvidia` · `openai` · `azure_openai` · `sentence_transformers` · `mock` |
 
 Adapters are imported **lazily**, so a deployment installs only the SDK it actually
@@ -1741,10 +1741,10 @@ upload.
                     │ QUEUED │
                     └───┬────┘
                         ▼
-   ┌───────────► VALIDATING ──► PARSING ──► ENRICHING ──► CLASSIFYING
+   ┌───────────► VALIDATING ──► PARSING ──► AI_EXTRACTION (docpipeline)
    │                                                            │
    │                                                            ▼
-   │            INDEXING ◄── EMBEDDING ◄── AI_EXTRACTION ◄── CHUNKING
+   │            INDEXING ◄── EMBEDDING ◄────────── AI_EXTRACTION (extraction)
    │                │
    │                ▼
    │             READY  ✔
@@ -1852,9 +1852,9 @@ Dependencies point **one way only**. Nothing lower may import from anything high
 
 ```
  ┌──────────────────────────────────────────────────────────────────────────┐
- │  THE 8 STAGES                                                            │
- │  validation → parser → enrichment → classification →                     │
- │  chunking → ai_extraction → embedding → indexing                         │
+ │  THE 6 STAGES                                                            │
+ │  validation → parser → docpipeline →                                     │
+ │  extraction → embedding → indexing                                       │
  ├──────────────────────────────────────────────────────────────────────────┤
  │  THE 3 EMBEDDING LEVELS                                                  │
  │  L1 document_summary  →  which documents?                                │

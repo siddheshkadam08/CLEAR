@@ -220,14 +220,12 @@ def _simple_tier_model(settings: Any) -> str:
     """The model the simple tier will actually use, per the active provider.
 
     ``LLM_MODEL_SIMPLE`` is the generic name and is what the router returns, but
-    the Gemini adapter substitutes its own ``GEMINI_MODEL_SIMPLE`` before the
-    request goes out. Stamping the generic value recorded `z-ai/glm-4.7` on work
-    that `gemini-2.5-flash-lite` had done - a provenance claim that was simply
-    untrue, and a checkpoint that stayed "current" across a model change, so the
-    stage was skipped instead of re-run.
+    a provider that addresses its model some other way substitutes its own before
+    the request goes out. Stamping the generic value recorded a model name on work
+    a different model had done - a provenance claim that was simply untrue, and a
+    checkpoint that stayed "current" across a model change, so the stage was
+    skipped instead of re-run.
     """
-    if settings.llm.provider == "gemini":
-        return settings.llm.gemini_model_simple
     if settings.llm.provider == "azure_openai" and settings.llm.azure_openai_deployment:
         # Azure addresses a deployment, and the deployment name is what actually
         # determines the model that answered. `LLM_MODEL_SIMPLE` is not consulted
@@ -241,14 +239,16 @@ def current_versions_for_stage(
     *,
     profile_id: str | None = None,
     profile_version: str | None = None,
-    chunk_strategy: str | None = None,
-    prompt_ids: list[str] | None = None,
 ) -> ComponentVersions:
     """Build the version payload a stage should stamp on its checkpoint.
 
     Each stage declares only what genuinely affects its output. This is what
     keeps regeneration surgical: an embedding-model change must not invalidate
-    the chunking checkpoint.
+    the parser's checkpoint.
+
+    A stage with no branch here stamps an empty payload, which is what a retired
+    stage on a historical job gets - it cannot be dispatched, so nothing compares
+    it against anything.
     """
     settings = get_settings()
     parser_name = settings.parser.active_parser
@@ -289,50 +289,6 @@ def current_versions_for_stage(
             embedding_model=settings.embedding.model,
             embedding_dim=settings.embedding.dim,
             embedding_version=settings.embedding.version,
-        )
-
-    if stage is PipelineStage.ENRICHMENT:
-        return ComponentVersions(
-            cdm_version=CDM_VERSION,
-            parser_name=parser_name,
-            parser_adapter_version=PARSER_ADAPTER_VERSIONS.get(parser_name, "unknown"),
-            enrichment_engine_version=ENRICHMENT_ENGINE_VERSION,
-        )
-
-    if stage is PipelineStage.CLASSIFICATION:
-        return ComponentVersions(
-            cdm_version=CDM_VERSION,
-            classification_engine_version=CLASSIFICATION_ENGINE_VERSION,
-            classification_taxonomy_version=CLASSIFICATION_TAXONOMY_VERSION,
-        )
-
-    if stage is PipelineStage.CHUNKING:
-        strategy = chunk_strategy or "hybrid"
-        return ComponentVersions(
-            cdm_version=CDM_VERSION,
-            profile_id=profile_id,
-            profile_version=profile_version,
-            chunk_engine_version=CHUNK_ENGINE_VERSION,
-            chunk_strategy=strategy,
-            chunk_strategy_version=CHUNK_STRATEGY_VERSIONS.get(strategy, "unknown"),
-        )
-
-    if stage is PipelineStage.AI_EXTRACTION:
-        return ComponentVersions(
-            profile_id=profile_id,
-            profile_version=profile_version,
-            extraction_engine_version=EXTRACTION_ENGINE_VERSION,
-            extraction_schema_version=EXTRACTION_SCHEMA_VERSION,
-            validation_rules_version=VALIDATION_RULES_VERSION,
-            risk_model_version=RISK_MODEL_VERSION,
-            prompt_versions={
-                pid: PROMPT_VERSIONS.get(pid, "unknown")
-                for pid in (
-                    prompt_ids or [k for k in PROMPT_VERSIONS if k.startswith("extraction.")]
-                )
-            },
-            model_name=settings.llm.model,
-            model_version=settings.llm.model,
         )
 
     if stage is PipelineStage.EMBEDDING:

@@ -40,10 +40,11 @@ x-backend-env: &backend-env
   # silently ignored - the app kept talking to the container while the operator
   # believed it had been repointed at an external database.
   DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-cip}:${POSTGRES_PASSWORD:-carbonadmin}@postgres:5432/${POSTGRES_DB:-cip}}
-  # Schema the application's tables live in. Empty means `public`. Set this when
-  # the database is shared with another application that already owns table names
-  # we also use - see DatabaseSettings.schema_name.
-  DB_SCHEMA: ${DB_SCHEMA:-}
+  # The schema every table lives in. NOT a hint: it goes onto the SQLAlchemy
+  # metadata, so every ORM query is qualified with it (`cip.contracts`) rather
+  # than resolved through the search_path - which is why a wrong value fails
+  # every query rather than quietly falling back. Alembic creates it.
+  DB_SCHEMA: ${DB_SCHEMA:-cip}
   DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-60000}
   # Must exceed the slowest stage. A stage runs in one transaction and
   # ai_extraction spends minutes in provider calls, so the connection is idle
@@ -97,17 +98,19 @@ x-backend-env: &backend-env
   OIDC_AUTO_PROVISION_USERS: ${OIDC_AUTO_PROVISION_USERS:-true}
   OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
   OIDC_ALLOWED_EMAIL_DOMAINS: ${OIDC_ALLOWED_EMAIL_DOMAINS:-}
-  STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
+  # Document bytes on the filesystem, on the `storagedata` volume. MinIO and the
+  # S3/Azure adapters are gone from this stack: nothing publishes a bucket, and
+  # no S3 credential is forwarded, so `local` is not merely the default - it is
+  # the only storage this compose file can produce.
+  #
+  # Because it is a filesystem, a download is served BY THE APP rather than by a
+  # presigned URL to another host, which is what removed the old two-endpoint
+  # problem (the app reaching MinIO by service name while the browser could not
+  # resolve it, so the PDF viewer showed nothing while every check reported
+  # healthy).
+  STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
   STORAGE_CONTAINER: ${STORAGE_CONTAINER:-contracts}
-  # Two endpoints, deliberately. The app reaches MinIO by service name on the
-  # compose network; the browser cannot resolve that name, so presigned URLs are
-  # signed for the host-published address instead. Without the second one the PDF
-  # viewer silently shows nothing while every server-side check reports healthy.
-  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
-  S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://127.0.0.1:9000}
-  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
-  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
-  S3_USE_PATH_STYLE: "true"
+  STORAGE_LOCAL_ROOT: ${STORAGE_LOCAL_ROOT:-/var/lib/cip/storage}
   # --- parsing ---
   # `idoc` is the active adapter: the in-house layout service, which returns real
   # layout roles and coordinates. `pymupdf` is the local fallback. Docling is not
@@ -157,32 +160,34 @@ x-backend-env: &backend-env
   IDOC_VERIFY_TLS: ${IDOC_VERIFY_TLS:-true}
 
   # --- inference and embeddings ---
-  # This stack runs end to end with no LLM vendor account and no API key: both
-  # providers default to `mock`, and neither the `anthropic` nor the `openai`
-  # package is installed in the base image.
+  # Both providers default to Azure OpenAI: chat on AZURE_OPENAI_DEPLOYMENT and
+  # embeddings on AZURE_OPENAI_EMBEDDING_DEPLOYMENT, which routinely live on
+  # different Azure resources. The image must be built with the `ai` extra for the
+  # `openai` package to be present.
   #
-  # What that costs you: mock extractions are SYNTHESISED rather than read from the
-  # contract, and mock embeddings are not semantically meaningful, so clause
-  # attributes, risk scores and semantic search are demo-grade. The API logs a
-  # warning on every start while either is active, and `APP_ENV=production` refuses
-  # to boot unless ALLOW_MOCK_AI is set deliberately.
+  # `LLM_PROVIDER=mock` / `EMBEDDING_PROVIDER=mock` still run the stack end to end
+  # with no vendor account at all. What that costs you: mock extractions are
+  # SYNTHESISED rather than read from the contract, and mock embeddings are not
+  # semantically meaningful, so clause attributes, risk scores and semantic search
+  # are demo-grade. The API logs a warning on every start while either is active,
+  # and `APP_ENV=production` refuses to boot unless ALLOW_MOCK_AI is set
+  # deliberately.
   #
   # To use a real provider, set LLM_PROVIDER/EMBEDDING_PROVIDER and the matching key
   # below, and build the image with the `ai` extra.
-  LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
-  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+  LLM_PROVIDER: ${LLM_PROVIDER:-azure_openai}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-azure_openai}
   ALLOW_MOCK_AI: ${ALLOW_MOCK_AI:-false}
-  # Model names used only when a real provider is selected; inert under `mock`.
+  # Model names, used only by providers that address a model *by name*. On Azure
+  # the deployment name wins (see OpenAIProvider._model_for), so these are inert
+  # under `LLM_PROVIDER=azure_openai` and AZURE_OPENAI_DEPLOYMENT is the knob.
   #
-  # All three tiers must be forwarded. Compose passes only the variables named
+  # All three tiers are still forwarded. Compose passes only the variables named
   # here, so a tier left out of this block silently falls back to its Pydantic
-  # default no matter what .env says - and the default is an Anthropic-native
-  # model id, which a gateway like OpenRouter rejects with
-  # `<model> is not a valid model ID`. Every simple-tier call then 400s, which is
-  # most of the pipeline.
-  LLM_MODEL: ${LLM_MODEL:-claude-opus-5}
-  LLM_MODEL_SIMPLE: ${LLM_MODEL_SIMPLE:-claude-haiku-4-5}
-  LLM_MODEL_COMPLEX: ${LLM_MODEL_COMPLEX:-claude-opus-5}
+  # default no matter what .env says.
+  LLM_MODEL: ${LLM_MODEL:-gpt-4.1}
+  LLM_MODEL_SIMPLE: ${LLM_MODEL_SIMPLE:-gpt-4.1}
+  LLM_MODEL_COMPLEX: ${LLM_MODEL_COMPLEX:-gpt-4.1}
   # Empty falls back to LLM_MODEL_COMPLEX - see ModelRouter._model_for_tier.
   LLM_MODEL_REASONING: ${LLM_MODEL_REASONING:-}
   LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-4096}
@@ -203,41 +208,31 @@ x-backend-env: &backend-env
   # `none` for models behind an OpenAI-compatible gateway that do not implement
   # the strict json_schema response format - see LLMSettings.llm_structured_output.
   LLM_STRUCTURED_OUTPUT: ${LLM_STRUCTURED_OUTPUT:-json_schema}
-  # NVIDIA Nemotron 3 Embed 1B. 2048 is the model's real output width, and
-  # `halfvec` is required rather than preferred: pgvector's HNSW index stops at
-  # 2000 dimensions for the `vector` type, so a vector(2048) column cannot be
-  # indexed and every similarity search becomes a sequential scan.
+  # text-embedding-3-small at its native 1536 dimensions. `halfvec` is required
+  # rather than preferred: pgvector's HNSW index stops at 2000 dimensions for the
+  # `vector` type, so a wider column cannot be indexed at all and every similarity
+  # search silently degrades to a sequential scan.
   EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
   EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
   EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
   EMBEDDING_VERIFY_ON_STARTUP: ${EMBEDDING_VERIFY_ON_STARTUP:-true}
-  NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
-  NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
-  # All optional. Left empty the platform stays on the mock providers.
-  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-  # Azure OpenAI. The embedding block is separate because embeddings routinely
-  # live on a different resource from the chat model; each falls back to the
-  # AZURE_OPENAI_* value when unset, so one resource for both needs nothing here.
+  # Azure OpenAI, chat and embeddings - the only inference vendor configured.
+  # The embedding block is separate because embeddings routinely live on a
+  # different resource from the chat model; each value falls back to its
+  # AZURE_OPENAI_* counterpart when unset, so one resource for both needs
+  # nothing in the second group.
+  #
+  # No other provider is forwarded. The adapters still exist behind
+  # IInferenceProvider, but nothing here supplies them credentials, so there is
+  # no half-configured second vendor to pick up by accident.
   AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
   AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
   AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}
-  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+  AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4.1}
   AZURE_OPENAI_EMBEDDING_ENDPOINT: ${AZURE_OPENAI_EMBEDDING_ENDPOINT:-}
   AZURE_OPENAI_EMBEDDING_API_KEY: ${AZURE_OPENAI_EMBEDDING_API_KEY:-}
   AZURE_OPENAI_EMBEDDING_API_VERSION: ${AZURE_OPENAI_EMBEDDING_API_VERSION:-2024-02-01}
-  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
-  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-  GEMINI_MODEL_SIMPLE: ${GEMINI_MODEL_SIMPLE:-gemini-2.5-flash-lite}
-  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  # Points the OpenAI-compatible client at a gateway instead of OpenAI itself
-  # (OpenRouter, Together, vLLM, LM Studio). Empty means OpenAI.
-  #
-  # Must be forwarded explicitly: compose passes only the variables named here,
-  # so omitting it lets the key through while silently dropping the endpoint -
-  # every request then goes to api.openai.com and fails with "Incorrect API key
-  # provided", which reads like a bad key rather than a missing base URL.
-  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-small}
 
   # --- Queue ---
   #
@@ -377,40 +372,6 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
-  minio:
-    image: minio/minio:latest
-    container_name: ${COMPOSE_PROJECT:-cip}-minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
-    ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - miniodata:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    restart: unless-stopped
-    logging: *default-logging
-
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin} &&
-      mc mb --ignore-existing local/${STORAGE_CONTAINER:-contracts} &&
-      mc mb --ignore-existing local/${STORAGE_CONTAINER:-contracts}-artifacts &&
-      mc mb --ignore-existing local/${STORAGE_CONTAINER:-contracts}-exports &&
-      echo 'minio buckets ready'"
-    restart: "no"
-
   # --------------------------------------------------------------- migrations
   migrate:
     build:
@@ -436,10 +397,10 @@ services:
     environment:
       <<: *backend-env
       OTEL_SERVICE_NAME: cip-backend
-      # Under `--profile nvidia`, EMBEDDING_PROVIDER is exported as `nvidia` by
-      # `make nvidia-up` (or set in .env). Startup validation then probes the
-      # endpoint and refuses to boot on a bad configuration.
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      # EMBEDDING_PROVIDER is deliberately NOT repeated here. It was, defaulted to
+      # `mock`, and a per-service value overrides the anchor - so the API ran on
+      # mock embeddings while `x-backend-env` plainly said otherwise, and the only
+      # symptom was retrieval that returned nothing useful.
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
@@ -577,37 +538,30 @@ services:
   # if a deployment prefers that. Nothing about this is BullMQ's `QueueScheduler`, which
   # this queue has never used and which v5 does not have.
 
-  # ------------------------------------------------------------ nvidia profile
+  # ----------------------------------------------------------- verify profile
   #
-  #   docker compose --profile nvidia up embedding-check
+  #   docker compose --profile verify up embedding-check
   #
   # A gate, not a service. It runs the same probe the API runs at startup and exits
-  # non-zero if NVIDIA is unreachable, the credentials are rejected, or the model's
-  # dimension disagrees with the schema - so a bad configuration fails here, in
-  # seconds, instead of on stage seven of the first upload.
-  #
-  # The default stack does not include it: `EMBEDDING_PROVIDER=mock` needs no vendor
-  # account, and `docker compose up` must keep working with no credentials at all.
+  # non-zero if the embedding provider is unreachable, the credentials are
+  # rejected, or the model's dimension disagrees with the schema - so a bad
+  # configuration fails here, in seconds, instead of midway through the first
+  # upload.
   embedding-check:
-    profiles: ["nvidia"]
+    # Not in the default stack: it is a check you run, not a service you keep.
+    #   podman compose --profile verify up embedding-check
+    profiles: ["verify"]
     build:
       context: ./backend
       dockerfile: Dockerfile
       target: runtime
     container_name: ${COMPOSE_PROJECT:-cip}-embedding-check
     environment:
+      # Inherits the stack's own embedding configuration rather than overriding
+      # it: the point of the probe is to prove that THE configured provider
+      # answers and that the vector column matches it, so pinning a different one
+      # here would verify something nobody runs.
       <<: *backend-env
-      EMBEDDING_PROVIDER: nvidia
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
-      EMBEDDING_STORAGE: ${EMBEDDING_STORAGE:-halfvec}
-      # Plain substitution, NOT `${NVIDIA_API_KEY:?...}`. podman-compose evaluates
-      # the required-variable form for every service at parse time, including ones
-      # behind an inactive profile - so a `:?` here breaks `podman compose up` for
-      # the default stack, which needs no NVIDIA key at all. The probe below fails
-      # with a clearer message anyway.
-      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
-      NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -635,12 +589,6 @@ services:
         VITE_ENABLE_MICROSOFT_SSO: ${VITE_ENABLE_MICROSOFT_SSO:-false}
         API_HOST: backend
         API_PORT: "8000"
-        # nginx also proxies object storage, so a presigned download URL can be
-        # same-origin rather than needing MinIO published on its own port. The
-        # bucket name is the proxied path, so the two must agree.
-        STORAGE_HOST: minio
-        STORAGE_PORT: "9000"
-        STORAGE_BUCKET: ${STORAGE_CONTAINER:-cip-documents}
     container_name: ${COMPOSE_PROJECT:-cip}-frontend
     ports:
       # The container serves on 8080 and runs as an unprivileged user.
@@ -720,6 +668,5 @@ volumes:
   storagedata:
   pgdata:
   redisdata:
-  miniodata:
   promdata:
   grafanadata:

@@ -207,16 +207,19 @@ _loaded = False
 #: unavailable rather than only that it is.
 _load_errors: dict[str, str] = {}
 
-#: One module per stage, in pipeline order.
+#: One module per stage, in pipeline order - and exactly the six of ``STAGE_ORDER``.
+#:
+#: ``enrichment``, ``classification``, ``chunking`` and ``ai_extraction`` were the
+#: old pipeline. They were listed here long after they stopped being dispatched,
+#: so every worker paid their import cost - and a broken one logged an error on
+#: boot - for stages nothing could reach. The modules are now deleted;
+#: ``extraction_base`` keeps the extraction persistence they shared, and is
+#: imported by ``extraction`` rather than discovered as a stage of its own.
 _STAGE_MODULES: tuple[str, ...] = (
     "validation",
     "parser",
     "docpipeline",
     "extraction",
-    "enrichment",
-    "classification",
-    "chunking",
-    "ai_extraction",
     "embedding",
     "indexing",
 )

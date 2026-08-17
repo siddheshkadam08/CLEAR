@@ -219,14 +219,10 @@ _ROLE_STAGES: dict[str, tuple[PipelineStage, ...]] = {
     "parser": (
         PipelineStage.VALIDATION,
         PipelineStage.PARSER,
-        PipelineStage.ENRICHMENT,
-        PipelineStage.CLASSIFICATION,
-        PipelineStage.CHUNKING,
     ),
     "ai": (
         PipelineStage.DOCPIPELINE,
         PipelineStage.EXTRACTION,
-        PipelineStage.AI_EXTRACTION,
         PipelineStage.EMBEDDING,
         PipelineStage.INDEXING,
     ),

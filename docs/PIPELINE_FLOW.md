@@ -4,6 +4,17 @@ What happens between a user pressing Upload and a contract reaching `READY`. Eve
 constant and stage name below is taken from the source, not from memory; the file
 references let you check any of it.
 
+**This is the whole pipeline.** There is no longer a second one. The earlier
+eight-stage path — `enrichment → classification → chunking → ai_extraction` — has
+been deleted: its handler modules are gone, it is absent from `_STAGE_MODULES`,
+and no code can dispatch it. Its four `PipelineStage` members survive as *labels
+only*, because `job_stage_runs.stage` is a native Postgres enum and historical
+rows still name them.
+
+**One vendor.** Every model call — classification, both clause-detection passes,
+extraction, and embeddings — goes to **Azure OpenAI**. No other provider is
+configured, and the Gemini adapter has been removed outright.
+
 ---
 
 ## The flow
@@ -199,6 +210,66 @@ follows detection is mapping to the Clause Master taxonomy.
 
 ---
 
+## Configuration
+
+One file — `.env` at the repo root — serves the API, the workers, the scheduler,
+the CLI and Alembic. Every settings group sets `env_file=(".env", "../.env")`, and
+compose interpolates the same file into its `x-backend-env` allow-list. There is
+no second env file. (`frontend/.env.local` is Vite's own, and is not backend
+configuration.)
+
+**Inference and embeddings — Azure OpenAI, two different resources.** The chat
+deployment is a dev resource; embeddings run on a shared production one. Azure
+addresses a *deployment*, not a model name, so `AZURE_OPENAI_DEPLOYMENT` is what
+decides which model answers — `LLM_MODEL*` is not consulted on this path at all
+(`OpenAIProvider._model_for`).
+
+```env
+LLM_PROVIDER=azure_openai
+AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com/
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_DEPLOYMENT=gpt-4.1
+AZURE_OPENAI_API_VERSION=2024-12-01-preview
+
+EMBEDDING_PROVIDER=azure_openai
+AZURE_OPENAI_EMBEDDING_ENDPOINT=https://<other-resource>.openai.azure.com
+AZURE_OPENAI_EMBEDDING_API_KEY=<key>
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
+AZURE_OPENAI_EMBEDDING_API_VERSION=2024-02-01
+EMBEDDING_DIM=1536
+EMBEDDING_STORAGE=halfvec
+```
+
+Each `AZURE_OPENAI_EMBEDDING_*` value falls back to its `AZURE_OPENAI_*`
+counterpart when empty, so a deployment using one resource for both needs none of
+the second block.
+
+**Database.** `DB_SCHEMA=cip` — and it is not a hint. The value goes onto the
+SQLAlchemy metadata, so every ORM query is qualified with it (`cip.contracts`)
+rather than resolved through the `search_path`. A wrong value therefore fails
+*every* query with "relation ... does not exist" rather than quietly falling back,
+and Alembic is what creates the schema (`CREATE SCHEMA IF NOT EXISTS`,
+`migrations/env.py`). Migrations 0004 and 0012 once hardcoded a schema name
+instead of reading this; both now resolve it like 0005 and 0007 always did.
+
+**Storage.** `STORAGE_PROVIDER=local`. MinIO is gone from the stack — no bucket
+is published and no S3 credential exists in any config file, so document bytes
+are served by the API from the filesystem rather than by a presigned URL to
+another host.
+
+**Parser.** `ACTIVE_PARSER=idoc` with `PARSER_MODE=live`. `fixture` mode replays
+recorded responses and never calls the service, which is right for tests and
+useless for a document nobody has recorded.
+
+The fallback chain for PDFs is `idoc → pdfextract → pymupdf`. Note it is chosen by
+*capability*, not reachability: `get_parser` asks whether the configured parser
+handles PDFs, and iDoc does whether or not it answers. With the service down,
+leaving `ACTIVE_PARSER=idoc` spends `IDOC_TIMEOUT_SECONDS` per document and then
+fails the job — switch to `pdfextract`, whose adapter subclasses the iDoc one and
+returns the same Azure `prebuilt-layout` payload, so nothing downstream changes.
+
+---
+
 ## Source references
 
 | Fact | Where |
@@ -210,3 +281,7 @@ follows detection is mapping to the Clause Master taxonomy.
 | Clause taxonomy | `backend/app/ai/docpipeline/mapping.py` |
 | Embedding levels | `backend/app/orchestrator/stages/embedding.py` |
 | Graph edges | `backend/app/orchestrator/stages/indexing.py` |
+| Which stages are loadable | `_STAGE_MODULES`, `backend/app/orchestrator/stages/base.py` |
+| Provider selection | `get_inference_provider`, `backend/app/ai/rag/providers.py` |
+| Azure deployment vs model | `OpenAIProvider._model_for`, `backend/app/ai/rag/openai_provider.py` |
+| Task → model tier | `backend/app/ai/routing.py` |

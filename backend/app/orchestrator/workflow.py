@@ -270,20 +270,10 @@ class WorkflowEngine:
     def _versions_for(
         self, stage: PipelineStage, profile: DocumentProfile | None
     ) -> ComponentVersions:
-        chunk_strategy = None
-        if profile is not None and stage is PipelineStage.CHUNKING:
-            chunk_strategy = str(profile.chunk_strategy)
-        prompt_ids = None
-        if profile is not None and stage is PipelineStage.AI_EXTRACTION:
-            templates = (profile.extraction_strategy or {}).get("prompt_templates") or {}
-            prompt_ids = sorted(str(value) for value in templates.values())
-
         return current_versions_for_stage(
             stage,
             profile_id=str(profile.id) if profile else None,
             profile_version=profile.version if profile else None,
-            chunk_strategy=chunk_strategy,
-            prompt_ids=prompt_ids,
         )
 
     def _validate_prerequisites(
@@ -383,18 +373,12 @@ class WorkflowEngine:
             PipelineStage.PARSER: (3, 35),
             # Clause location, then typed extraction. Extraction owns the larger
             # share because it makes several model calls to docpipeline's few.
-            # The bands below are for stages no longer in STAGE_ORDER, kept so a
-            # historical run still renders.
             PipelineStage.DOCPIPELINE: (35, 50),
             PipelineStage.EXTRACTION: (50, 85),
             # Embedding gives up its tail to indexing. Both used to end at 100,
             # so the bar hit 100% while a stage was still running and then sat
             # there - the one reading a progress bar has of being lied to.
             PipelineStage.EMBEDDING: (85, 95),
-            PipelineStage.ENRICHMENT: (35, 45),
-            PipelineStage.CLASSIFICATION: (45, 50),
-            PipelineStage.CHUNKING: (50, 58),
-            PipelineStage.AI_EXTRACTION: (58, 85),
             PipelineStage.INDEXING: (95, 100),
         }
         start, end = weights.get(stage, (0, 100))

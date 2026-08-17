@@ -118,6 +118,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             embedding=settings.embedding.provider,
         )
 
+    # Louder, and in every environment: a mock provider whose real credentials are
+    # configured is a value that failed to arrive, not a decision. Production
+    # refuses to boot on it; everywhere else this is the only sign it happened.
+    for conflict in settings.accidental_mock_providers():
+        logger.error("mock_provider_overrides_configured_credentials", detail=conflict)
+
     # Embedding diagnostics, and an abort if the configuration cannot work.
     #
     # This is the one dependency where "degrade and report via readiness" is the

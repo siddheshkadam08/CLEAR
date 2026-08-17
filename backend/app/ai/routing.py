@@ -120,7 +120,7 @@ LEGACY_PURPOSE_TASKS: dict[str, LLMTask] = {
     "rag": LLMTask.COPILOT_CHAT,
     "comparison": LLMTask.CLAUSE_COMPARISON,
     "report": LLMTask.CONTRACT_ANALYSIS,
-    # The Gemini adapter routed these two to its complex model from a set of its
+    # These two used to be routed by the provider adapter from a model set of its
     # own, so they never reached this table and `coerce` treated them as unknown
     # - which sends them to the *cheap* tier. Listing them here makes the tier a
     # property of the task rather than of whichever provider happens to be
@@ -176,8 +176,9 @@ class ModelRouter:
 
     def __init__(self, *, provider_models: dict[ModelTier, str] | None = None) -> None:
         #: Optional override, injected by a provider whose model names differ from
-        #: the generic ``LLM_MODEL_*`` values (Gemini has its own trio). Passing
-        #: them in keeps provider specifics in the provider.
+        #: the generic ``LLM_MODEL_*`` values - Azure addresses a *deployment*
+        #: rather than a model name. Passing them in keeps provider specifics in
+        #: the provider.
         self._provider_models = provider_models or {}
 
     # ------------------------------------------------------------------ resolve

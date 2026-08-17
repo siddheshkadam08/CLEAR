@@ -51,7 +51,17 @@ Purpose = Literal[
 
 #: Published per-MTok pricing, used for cost attribution on jobs and answers.
 #: Cache reads bill at ~0.1x input; 5-minute cache writes at 1.25x.
+#:
+#: Azure addresses a *deployment*, and the deployment name is what the response
+#: reports, so the GPT rows are keyed on the model name the deployment is created
+#: from - ``AZURE_OPENAI_DEPLOYMENT=gpt-4.1`` matches directly, and
+#: :func:`_pricing_key` prefix-matches a deployment named after a dated snapshot.
+#: An unlisted model prices at zero, which reads as "this run was free" rather
+#: than as "we have no rate for it" - which is why the model in use is listed.
 _PRICING: dict[str, tuple[float, float]] = {
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
     "claude-fable-5": (10.00, 50.00),
     "claude-mythos-5": (10.00, 50.00),
     "claude-opus-5": (5.00, 25.00),
@@ -500,13 +510,16 @@ class AnthropicProvider(IInferenceProvider):
         max_tokens: int | None = None,
         cache_prefix: bool = True,
     ) -> StructuredResult:
+        from app.ai.rag.schema_compat import compile_strict, restore_payload
+
+        compiled = compile_strict(schema)
         request = self._build_request(
             system=system,
             prompt=prompt,
             purpose=purpose,
             max_tokens=max_tokens,
             cache_prefix=cache_prefix,
-            schema=_sanitise_schema(schema),
+            schema=compiled.schema,
         )
         result = await self._invoke(request, purpose=purpose)
 
@@ -525,7 +538,12 @@ class AnthropicProvider(IInferenceProvider):
                 details={"max_tokens": request["max_tokens"]},
             )
         return StructuredResult(
-            data=self.parse_json(result.text, context="structured response"),
+            # Undoes the free-form rewrite, so the caller receives the shape its
+            # own schema described rather than the one the provider could carry.
+            data=restore_payload(
+                self.parse_json(result.text, context="structured response"),
+                compiled.freeform_paths,
+            ),
             inference=result,
         )
 
@@ -789,91 +807,17 @@ def _translate_anthropic_error(exc: Exception, provider: str) -> ProviderError:
 
 
 def _sanitise_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Strip JSON Schema keywords the structured-output engine rejects.
+    """The provider-ready form of ``schema``, without the restoration plan.
 
-    Numeric and string constraints (``minimum``, ``maxLength``, ...) are not
-    supported and would fail schema compilation. They are dropped here and
-    enforced by the business validator instead, which is where a range violation
-    belongs anyway - it is a data-quality finding, not a parse failure.
-
-    Strict mode also demands that every object forbid extra properties *and*
-    list every one of its properties in ``required``. Three seeded Clause Master
-    rules - ``insurance``, ``notice``, ``definitions`` - have a nested array item
-    with no ``required`` at all, and the provider rejects the whole request:
-
-        Invalid schema for response_format 'extraction': In context=(...,
-        'notice_addresses', 'items'), 'required' is required to be supplied and
-        to be an array including every key in properties. Missing 'email'.
-
-    That 400 costs the entire category, so it is repaired here rather than left
-    to whoever next edits the seed data. Optionality is preserved by widening a
-    newly-required property to accept ``null``, which is how strict mode expects
-    "may be absent" to be written - and how these three schemas already write it
-    for every field but the one that tripped the check.
+    Kept as the module's public spelling because several call sites and tests use
+    it. Anything sending a *strict* request should call
+    :func:`~app.ai.rag.schema_compat.compile_strict` instead and keep the
+    :class:`~app.ai.rag.schema_compat.CompiledSchema`, so the response can be
+    restored - see that module for what "restored" means and why it is needed.
     """
-    unsupported = {
-        "minimum",
-        "maximum",
-        "exclusiveMinimum",
-        "exclusiveMaximum",
-        "multipleOf",
-        "minLength",
-        "maxLength",
-        "pattern",
-        "minItems",
-        "maxItems",
-        "uniqueItems",
-        "minProperties",
-        "maxProperties",
-    }
+    from app.ai.rag.schema_compat import compile_strict
 
-    def clean(node: Any) -> Any:
-        if isinstance(node, dict):
-            result = {key: clean(value) for key, value in node.items() if key not in unsupported}
-            # Every object must forbid extra properties, or compilation fails.
-            if result.get("type") == "object" and "additionalProperties" not in result:
-                result["additionalProperties"] = False
-
-            properties = result.get("properties")
-            if isinstance(properties, dict) and properties:
-                required = set(result.get("required") or ())
-                for name in properties:
-                    if name not in required:
-                        properties[name] = _accepts_null(properties[name])
-                result["required"] = list(properties)
-            return result
-        if isinstance(node, list):
-            return [clean(item) for item in node]
-        return node
-
-    return clean(schema)  # type: ignore[no-any-return]
-
-
-def _accepts_null(subschema: Any) -> Any:
-    """Widen a subschema so ``null`` is a valid value.
-
-    Left alone when the type is already nullable, or when there is no ``type``
-    to widen - a ``$ref`` or an ``anyOf`` branch is not ours to rewrite, and
-    guessing at one risks producing a schema that compiles but means something
-    else. An ``enum`` gains ``null`` alongside the type, since a value outside
-    the enumeration fails validation however the type is declared.
-    """
-    if not isinstance(subschema, dict):
-        return subschema
-    declared = subschema.get("type")
-    if declared is None:
-        return subschema
-
-    types = list(declared) if isinstance(declared, list) else [declared]
-    if "null" in types:
-        return subschema
-
-    widened = dict(subschema)
-    widened["type"] = [*types, "null"]
-    enum = widened.get("enum")
-    if isinstance(enum, list) and None not in enum:
-        widened["enum"] = [*enum, None]
-    return widened
+    return compile_strict(schema).schema
 
 
 # =============================================================================
@@ -898,10 +842,6 @@ def get_inference_provider() -> IInferenceProvider:
         from app.ai.rag.mock_provider import MockInferenceProvider
 
         _provider = MockInferenceProvider()
-    elif configured == "gemini":
-        from app.ai.rag.gemini_provider import GeminiProvider
-
-        _provider = GeminiProvider()
     elif configured == "anthropic":
         _provider = AnthropicProvider()
     elif configured == "openai":

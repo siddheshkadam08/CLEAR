@@ -62,7 +62,7 @@ ParserName = Literal["idoc", "pdfextract", "adi", "pymupdf", "textract", "google
 #:   way through so the next run can replay it.
 ParserMode = Literal["fixture", "live"]
 StorageProvider = Literal["azure", "s3", "minio", "local"]
-LLMProvider = Literal["gemini", "anthropic", "openai", "azure_openai", "local", "mock"]
+LLMProvider = Literal["anthropic", "openai", "azure_openai", "local", "mock"]
 EmbeddingProvider = Literal["nvidia", "openai", "azure_openai", "sentence_transformers", "mock"]
 
 #: How the vector column is physically stored.
@@ -674,45 +674,28 @@ class LLMSettings(BlankIsUnsetMixin, BaseSettings):
 
     model_config = _group_config(allow_model_prefix=True)
 
-    #: Gemini Flash by default. The choice is configuration, not architecture:
-    #: every provider below sits behind ``IInferenceProvider`` and switching is one
-    #: environment variable with no code change.
+    #: Azure OpenAI by default, which is the only inference vendor this
+    #: deployment is configured for. The choice is still configuration rather
+    #: than architecture: every provider sits behind ``IInferenceProvider``, so
+    #: switching is one environment variable and no code change.
     #:
-    #: Flash rather than a frontier model because the two workloads that dominate
-    #: token spend here - clause extraction and classification - are constrained
-    #: schema-filling, not open-ended reasoning, and a cheaper model does them just
-    #: as well at a fraction of the cost.
+    #: On Azure the *deployment name* addresses the model, so
+    #: ``AZURE_OPENAI_DEPLOYMENT`` is what decides which model answers - the
+    #: ``LLM_MODEL*`` values below are not consulted on that path (see
+    #: ``OpenAIProvider._model_for``).
     #:
     #: Set ``LLM_PROVIDER=mock`` to run with no vendor account at all; the pipeline
     #: still completes end to end, with synthesised extractions.
-    provider: Annotated[LLMProvider, Field(validation_alias="LLM_PROVIDER")] = "gemini"
-    #: Default model when the provider is Anthropic. Claude Opus 5 unless a
-    #: deployment opts down explicitly.
-    model: Annotated[str, Field(validation_alias="LLM_MODEL")] = "claude-opus-5"
-    model_complex: Annotated[str, Field(validation_alias="LLM_MODEL_COMPLEX")] = "claude-opus-5"
-    model_simple: Annotated[str, Field(validation_alias="LLM_MODEL_SIMPLE")] = "claude-haiku-4-5"
+    provider: Annotated[LLMProvider, Field(validation_alias="LLM_PROVIDER")] = "azure_openai"
+    #: Model names for the providers that address a model by name rather than by
+    #: deployment. Ignored on Azure, where the deployment name wins.
+    model: Annotated[str, Field(validation_alias="LLM_MODEL")] = "gpt-4.1"
+    model_complex: Annotated[str, Field(validation_alias="LLM_MODEL_COMPLEX")] = "gpt-4.1"
+    model_simple: Annotated[str, Field(validation_alias="LLM_MODEL_SIMPLE")] = "gpt-4.1"
     #: Chain-of-thought tier. Empty falls back to `model_complex` - deliberately
     #: not to `model`, so an unset reasoning model degrades to "strong" rather
     #: than to whatever the default happens to be. See app.ai.routing.
     model_reasoning: Annotated[str, Field(validation_alias="LLM_MODEL_REASONING")] = ""
-
-    # --- Google Gemini -------------------------------------------------------
-    #: Read from the environment only. Never committed, never defaulted to a real
-    #: value - the platform's rule is secrets via env or a secret manager.
-    google_api_key: Annotated[str, Field(validation_alias="GOOGLE_API_KEY")] = ""
-    gemini_base_url: Annotated[str, Field(validation_alias="GEMINI_BASE_URL")] = (
-        "https://generativelanguage.googleapis.com/v1beta"
-    )
-    #: Flash-tier by default: the cost-per-quality sweet spot for clause extraction,
-    #: which is a constrained-schema task rather than an open-ended reasoning one.
-    #: `gemini_model_complex` is used only for the intents the router marks complex.
-    gemini_model: Annotated[str, Field(validation_alias="GEMINI_MODEL")] = "gemini-2.5-flash"
-    gemini_model_complex: Annotated[str, Field(validation_alias="GEMINI_MODEL_COMPLEX")] = (
-        "gemini-2.5-flash"
-    )
-    gemini_model_simple: Annotated[str, Field(validation_alias="GEMINI_MODEL_SIMPLE")] = (
-        "gemini-2.5-flash-lite"
-    )
 
     #: Reasoning effort, inside ``output_config`` (low|medium|high|xhigh|max).
     #: Clause extraction is intelligence-sensitive, so the floor is ``high``;
@@ -1360,6 +1343,43 @@ class Settings(BaseSettings):
     #: application logs a warning on every start while it is set.
     allow_mock_ai: Annotated[bool, Field(validation_alias="ALLOW_MOCK_AI")] = False
 
+    def accidental_mock_providers(self) -> list[str]:
+        """Providers left on ``mock`` while their real credentials are configured.
+
+        This is narrower than "mock is active", and deliberately so: running on
+        mock is a legitimate choice, and saying so on every start is noise that
+        gets filtered out. Mock *while an Azure endpoint and key are sitting right
+        there* is not a choice - it is a value that failed to arrive.
+
+        That is not hypothetical. ``docker-compose.yml`` re-declared
+        ``EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}`` on the backend service
+        while the shared ``x-backend-env`` anchor set the real one. A service-level
+        value overrides the anchor, so the API ran on mock embeddings with the
+        credentials present and the configuration file plainly saying otherwise.
+        Nothing failed: vectors were produced, the pipeline completed, and search
+        quietly returned nothing useful. Detected here so the next such override
+        announces itself instead.
+        """
+        conflicts: list[str] = []
+        if self.llm.provider == "mock" and (
+            self.llm.azure_openai_api_key or self.llm.anthropic_api_key or self.llm.openai_api_key
+        ):
+            conflicts.append(
+                "LLM_PROVIDER=mock, but inference credentials are configured. "
+                "Extractions will be synthesised rather than read from the contract."
+            )
+        if self.embedding.provider == "mock" and (
+            self.embedding.azure_api_key
+            or self.embedding.azure_endpoint
+            or self.llm.azure_openai_api_key
+        ):
+            conflicts.append(
+                "EMBEDDING_PROVIDER=mock, but embedding credentials are configured. "
+                "Vectors will be meaningless and semantic search will return nothing "
+                "useful, without erroring."
+            )
+        return conflicts
+
     # Single-organization deployment: this is a label, NOT a security boundary.
     # The Project is the boundary (see reconciliation note §1.1).
     organization_id: Annotated[uuid.UUID, Field(validation_alias="ORGANIZATION_ID")] = uuid.UUID(
@@ -1475,6 +1495,10 @@ class Settings(BaseSettings):
                     "search will not work. Configure a real provider, or set "
                     "ALLOW_MOCK_AI=true to run without one deliberately."
                 )
+        # A mock provider with its real credentials present is never deliberate,
+        # so ALLOW_MOCK_AI does not excuse it: that flag states "we run without a
+        # vendor", which is contradicted by the vendor's key being configured.
+        problems.extend(self.accidental_mock_providers())
         if not self.parser.idoc_verify_tls:
             # Contract text is uploaded to this service. Skipping certificate
             # verification would make that upload interceptable.

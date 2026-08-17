@@ -1,11 +1,12 @@
 """Typed knowledge extraction, running on what the document pipeline located.
 
-The stage `ai_extraction` used to do this, and its engine still does - untouched.
-What changed is where the text comes from and what happens when it finds nothing.
+The retired `ai_extraction` stage used to do this, and its engine still does -
+untouched, in `extraction_base`. What changed is where the text comes from and
+what happens when it finds nothing.
 
 **Where the text comes from.** `ai_extraction` read the `chunks` table, which the
-retired chunking stage filled. Nothing writes it now, so this stage builds its
-chunks from the parser's cached page JSON instead - the same payloads
+retired chunking stage filled. Neither stage exists any more, so this stage builds
+its chunks from the parser's cached page JSON instead - the same payloads
 `docpipeline` reads, keyed on the file hash, so the vendor is not called again.
 
 **Why they are sections and not paragraphs.** The first version of this stage
@@ -57,8 +58,8 @@ from app.core.versions import (
     ComponentVersions,
     current_versions_for_stage,
 )
-from app.orchestrator.stages.ai_extraction import AIExtractionStage
 from app.orchestrator.stages.base import StageArtifact, StageContext, register_stage
+from app.orchestrator.stages.extraction_base import ExtractionStageBase
 from app.repositories.chunk import ChunkRepository
 from app.repositories.embedding import EmbeddingRepository
 
@@ -71,8 +72,8 @@ CHUNK_STRATEGY = "section_based"
 logger = get_logger(__name__)
 
 
-class ExtractionStage(AIExtractionStage):
-    """`AIExtractionStage` with a different chunk source and a softer failure mode.
+class ExtractionStage(ExtractionStageBase):
+    """`ExtractionStageBase` with a different chunk source and a softer failure mode.
 
     Subclassed rather than rewritten so `cleanup()` and `_persist()` are inherited
     exactly. Both are load-bearing and neither is obvious: `cleanup` deletes
