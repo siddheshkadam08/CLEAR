@@ -78,7 +78,7 @@ class FixtureRecord:
 class FixtureStore:
     """Reads and writes parser fixtures on the local filesystem."""
 
-    def __init__(self, directory: Path | str | None = None, *, parser: str = "idoc") -> None:
+    def __init__(self, directory: Path | str | None = None, *, parser: str = "adi") -> None:
         settings = get_settings().parser
         self.parser = parser
         self.directory = Path(directory or settings.fixture_dir) / parser

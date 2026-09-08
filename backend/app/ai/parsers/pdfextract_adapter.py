@@ -1,11 +1,11 @@
-"""Local layout parser backed by a `pdf_text_extractor` checkout.
+"""Local layout parser backed by a `pdf_text_extractor` container or checkout.
 
-A drop-in alternative to the iDoc service, not a degraded fallback. The extractor's
-``--adi`` export maps its elements onto Azure Document Intelligence's
-``analyzeResult`` - flat polygons in inches, a top-level ``paragraphs[]`` carrying
-``role``, ``pages[].pageNumber`` - which is byte-for-byte the shape iDoc returns.
-So this subclasses :class:`~app.ai.parsers.idoc_adapter.IDocParser` and replaces
-exactly one method: where the payloads come from.
+The fallback for PDFs when Azure Document Intelligence is unavailable, and not a
+degraded one. The extractor's ``--adi`` export maps its elements onto Document
+Intelligence's ``analyzeResult`` - flat polygons in inches, a top-level
+``paragraphs[]`` carrying ``role``, ``pages[].pageNumber`` - so it shares
+:class:`~app.ai.parsers.layout.LayoutParser` with the Azure adapter and differs
+only in where the payloads come from.
 
 That matters more than it looks. ``docpipeline`` does not read the parser's
 normalised output; it reads the raw per-page layout JSON back out of the parser
@@ -14,16 +14,18 @@ good ``NormalizedDocument`` but no layout JSON - ``pymupdf``, for instance - lea
 that stage with nothing to work from. This one produces the JSON, so the entire
 pipeline runs unchanged.
 
-**Why a subprocess rather than an import.** The extractor's dependency set is large
-and partly non-Python: pdfplumber, OpenCV, Pillow, and the Tesseract and poppler
-binaries at the OS level. Importing it would put an OCR stack into every deployment
-of this service, including those that never parse a scanned page. Running its own
-virtualenv keeps that boundary where the iDoc service used to draw it.
+**Two ways to reach it, and the container is preferred.** With ``PDFEXTRACT_URL``
+set it is an HTTP service - the ``clear-extractor`` container - and this adapter
+posts the PDF to it. Without one it is a local checkout invoked as a subprocess
+against its own virtualenv. The dependency set is large and partly non-Python
+(pdfplumber, OpenCV, Pillow, plus Tesseract and poppler as OS packages), so
+importing it would put an OCR stack into every deployment of this service,
+including those that never parse a scanned page.
 
 **Why one whole-document call, split afterwards.** The extractor emits a single
-``analyzeResult`` covering every page; iDoc returned a ZIP of per-page files. The
-cache and ``docpipeline`` both expect the per-page list, so :func:`split_pages`
-does that division here rather than teaching two consumers a second shape.
+``analyzeResult`` covering every page, while the cache and ``docpipeline`` both
+expect a per-page list, so :func:`split_pages` does that division here rather than
+teaching two consumers a second shape.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from app.ai.parsers.base import ParserCapabilities, ParseRequest
-from app.ai.parsers.idoc_adapter import IDocParser
+from app.ai.parsers.layout import LayoutParser
 from app.core.config import get_settings
 from app.core.enums import FileType
 from app.core.errors import ParserError
@@ -50,7 +52,7 @@ ADAPTER_VERSION = "1.0.0"
 def split_pages(adi: dict[str, Any]) -> list[dict[str, Any]]:
     """One whole-document ``analyzeResult`` -> one self-contained payload per page.
 
-    Each payload is what ``IDocParser._build_page`` and
+    Each payload is what ``LayoutParser._build_page`` and
     ``app.ai.docpipeline.source._build_page`` both expect: ``pages[0]`` carries the
     dimensions, unit and page number, and ``paragraphs`` carries that page's text.
 
@@ -87,8 +89,8 @@ def split_pages(adi: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-class PdfTextExtractorParser(IDocParser):
-    """Layout parser that shells out to a local pdf_text_extractor checkout."""
+class PdfTextExtractorParser(LayoutParser):
+    """Layout parser backed by the local pdf_text_extractor service or checkout."""
 
     @property
     def capabilities(self) -> ParserCapabilities:
@@ -111,15 +113,81 @@ class PdfTextExtractorParser(IDocParser):
             is_remote=bool(get_settings().parser.pdfextract_url),
         )
 
-    def _upload_target(self) -> tuple[str, int]:
-        """The extractor's own URL when it runs as a service.
-
-        `?format=adi` is the extractor's ADI *output shape* - the same payload its
-        CLI writes with `--adi`, which is what every downstream stage is written
-        against. Nothing is routed to Azure; only the transport changes.
-        """
+    def _fixture_source(self) -> str:
         settings = get_settings().parser
-        return settings.pdfextract_url, settings.pdfextract_timeout_seconds
+        return settings.pdfextract_url or settings.pdfextract_path
+
+    async def _post_to_service(self, request: ParseRequest) -> dict[str, Any]:
+        """Upload the PDF to the extractor service and return its ADI envelope.
+
+        ``PDFEXTRACT_URL`` carries `?format=adi`, the extractor's ADI *output
+        shape* - the same payload its CLI writes with `--adi`, which is what every
+        downstream stage is written against. Nothing is routed to Azure; only the
+        transport differs from the subprocess path.
+        """
+        import httpx
+
+        settings = get_settings().parser
+        endpoint = settings.pdfextract_url
+        timeout_seconds = settings.pdfextract_timeout_seconds
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(float(timeout_seconds), connect=15.0),
+                follow_redirects=True,
+            ) as client:
+                response = await client.post(
+                    endpoint,
+                    files={"file": (request.file_name, request.content, "application/pdf")},
+                )
+        except httpx.TimeoutException as exc:
+            # Retryable: a timeout on a long document says nothing about the document.
+            raise ParserError(
+                f"The extractor did not respond within {timeout_seconds}s.",
+                retryable=True,
+                details={"endpoint": endpoint},
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ParserError(
+                f"Could not reach the extractor service: {exc}",
+                retryable=True,
+                details={"endpoint": endpoint},
+            ) from exc
+
+        if response.status_code >= 400:
+            # 4xx is the document's fault and will fail identically on retry; 5xx is
+            # the service's and may not.
+            raise ParserError(
+                f"The extractor rejected the document ({response.status_code}).",
+                retryable=response.status_code >= 500,
+                details={"status": response.status_code, "body": response.text[:500]},
+            )
+
+        if not response.content:
+            raise ParserError(
+                "The extractor returned an empty response.",
+                retryable=True,
+                details={"endpoint": endpoint},
+            )
+
+        try:
+            parsed = json.loads(response.content.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ParserError(
+                "The extractor response was not JSON.",
+                retryable=False,
+                details={
+                    "content_type": response.headers.get("content-type", ""),
+                    "head": response.content[:200].hex(),
+                },
+            ) from exc
+
+        if not isinstance(parsed, dict):
+            raise ParserError(
+                "The extractor response was not an ADI envelope.",
+                retryable=False,
+            )
+        return parsed
 
     async def health(self) -> bool:
         """Is a usable checkout configured?
@@ -142,21 +210,15 @@ class PdfTextExtractorParser(IDocParser):
         """Run the extractor over the PDF and return the per-page payloads."""
         settings = get_settings().parser
         if settings.pdfextract_url:
-            # Service mode. `IDocParser._analyse` does the multipart upload and the
-            # ADI unpacking, and `_upload_target` above has already pointed it at
-            # the extractor - so this is the same parser, reached differently.
-            payloads = await super()._analyse(request)
-            # ...but not the same *shape*. iDoc returns a ZIP of per-page files;
-            # the extractor returns one whole-document envelope
-            # (`{schemaVersion, status, analyzeResult:{pages, paragraphs}}`) which
-            # `_unpack` hands back as a single-element list. Left alone every page
+            # Service mode: one whole-document envelope
+            # (`{schemaVersion, status, analyzeResult:{pages, paragraphs}}`), which
+            # has to be divided before it is returned. Left undivided every page
             # collapses into payload one and each clause cites page 1.
             #
             # Measured against the live service: a 27-page agreement comes back as
-            # one payload with 424 paragraphs. `split_pages` unwraps `analyzeResult`
-            # itself, so it is applied to the envelope as-is - and it is the same
-            # division the subprocess path performs.
-            return split_pages(payloads[0]) if len(payloads) == 1 else payloads
+            # one envelope with 424 paragraphs. This is the same division the
+            # subprocess path performs below.
+            return split_pages(await self._post_to_service(request))
 
         python = settings.pdfextract_python
         root = Path(settings.pdfextract_path) if settings.pdfextract_path else None
@@ -196,7 +258,7 @@ class PdfTextExtractorParser(IDocParser):
                 # Inches, matching ADI's own convention for PDFs. `_coordinates`
                 # and the document pipeline both read the unit off the page, but
                 # asking for points here would make every stored polygon disagree
-                # with the ones iDoc produced for documents parsed earlier.
+                # with the ones stored for documents parsed earlier.
                 "--adi-unit",
                 "inch",
                 "--backend",

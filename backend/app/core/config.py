@@ -17,6 +17,7 @@ import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal
+from urllib.parse import urlsplit
 
 from pydantic import (
     AliasChoices,
@@ -30,26 +31,28 @@ from pydantic import (
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 Environment = Literal["development", "test", "staging", "production"]
-#: Parser options. Only ``idoc``, ``pymupdf`` and ``mock`` are implemented here.
+#: Parser options. ``adi``, ``pdfextract``, ``pymupdf``, ``docx`` and ``mock`` are
+#: implemented here.
 #:
-#: * ``idoc`` - the in-house layout service (see ``ParserSettings.idoc_endpoint``),
-#:   which wraps the Azure Document Intelligence layout model. The default.
-#: * ``pdfextract`` - a local checkout of pdf_text_extractor, run as a subprocess.
-#:   Produces the *same* Azure ``prebuilt-layout`` payloads as ``idoc`` via its
-#:   ``--adi`` export, so it is a drop-in for the whole pipeline rather than a
-#:   degraded fallback: the document pipeline reads those raw payloads directly
-#:   and cannot tell the two apart. Requires ``PDFEXTRACT_PATH``.
-#: * ``pymupdf`` - local, dependency-light fallback when the service is unreachable.
-#:   Unlike the two above it does *not* produce layout JSON, so the document
-#:   pipeline cannot run on it.
-#: * ``adi``, ``textract``, ``googledocai`` - reserved names, so a future deployment
-#:   can add one without changing this contract. Selecting one raises an actionable
-#:   error rather than failing obscurely.
+#: * ``adi`` - Azure Document Intelligence ``prebuilt-layout``, called directly.
+#:   The default, and the only remote parser.
+#: * ``pdfextract`` - pdf_text_extractor, reached as a local container over
+#:   ``PDFEXTRACT_URL`` or run as a subprocess from ``PDFEXTRACT_PATH``. Its
+#:   ``--adi`` export produces the *same* ``prebuilt-layout`` payloads as ``adi``,
+#:   so it is a drop-in for the whole pipeline rather than a degraded fallback:
+#:   the document pipeline reads those raw payloads directly and cannot tell the
+#:   two apart. This is what ``adi`` falls back to.
+#: * ``pymupdf`` - dependency-light last resort. Unlike the two above it does *not*
+#:   produce layout JSON, so the document pipeline cannot run on it, which is why
+#:   it is selectable but outside the automatic fallback chain.
+#: * ``textract``, ``googledocai`` - reserved names, so a future deployment can add
+#:   one without changing this contract. Selecting one raises an actionable error
+#:   rather than failing obscurely.
 #:
 #: Docling is deliberately absent: it is not used by this deployment, and listing a
 #: name the registry cannot build turns a configuration typo into a runtime parse
 #: failure instead of a startup error naming the valid options.
-ParserName = Literal["idoc", "pdfextract", "adi", "pymupdf", "textract", "googledocai"]
+ParserName = Literal["pdfextract", "adi", "pymupdf", "textract", "googledocai"]
 
 #: How a parser adapter obtains its response.
 #:
@@ -85,6 +88,40 @@ def _csv_list(value: str | list[str] | None) -> list[str]:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _azure_resource_origin(value: str) -> str:
+    """Reduce an Azure OpenAI endpoint to the resource origin the SDK wants.
+
+    ``AsyncAzureOpenAI(azure_endpoint=...)`` builds the rest of the URL itself -
+    it appends ``/openai/deployments/{deployment}/chat/completions`` (or
+    ``/embeddings``). Give it a value that already carries that path and the two
+    are concatenated, producing
+    ``.../deployments/x/embeddings/openai/deployments/x/embeddings`` and a flat
+    ``404 Resource not found``.
+
+    Which is a genuinely expensive 404 to read: the startup embedding probe
+    treats it as an unusable configuration and aborts the process, so the API
+    never binds and the only clue is a status code that suggests a wrong
+    deployment name or a dead resource rather than one env var with a path stuck
+    on the end. The Azure portal invites it, too - the field it shows is the full
+    target URI, so pasting what is on screen is the natural thing to do.
+
+    Stripping is safe because there is no path a resource endpoint legitimately
+    carries: this is canonicalising the one accepted form, not guessing between
+    several. A non-URL is returned untouched for the endpoint's own validation to
+    reject with a better message than this function could give.
+    """
+    endpoint = value.strip()
+    if not endpoint.startswith(("http://", "https://")):
+        return endpoint
+
+    parsed = urlsplit(endpoint)
+    if not parsed.netloc:
+        return endpoint
+    # Keep the trailing slash: the SDK joins onto this and an origin without one
+    # is the shape every Azure example shows.
+    return f"{parsed.scheme}://{parsed.netloc}/"
 
 
 # =============================================================================
@@ -258,9 +295,20 @@ class SecuritySettings(BaseSettings):
     ] = "argon2"  # noqa: S105 - an algorithm name, not a credential
     password_min_length: Annotated[int, Field(validation_alias="PASSWORD_MIN_LENGTH", ge=8)] = 8
 
+    #: How long a password-reset link stays valid. Short, because the link is a
+    #: bearer credential sitting in a mailbox; long enough to survive a mail queue.
+    password_reset_token_ttl_minutes: Annotated[
+        int, Field(validation_alias="PASSWORD_RESET_TOKEN_TTL_MINUTES", ge=5, le=1440)
+    ] = 60
+
     rate_limit_enabled: Annotated[bool, Field(validation_alias="RATE_LIMIT_ENABLED")] = True
     rate_limit_default: Annotated[str, Field(validation_alias="RATE_LIMIT_DEFAULT")] = "120/minute"
     rate_limit_login: Annotated[str, Field(validation_alias="RATE_LIMIT_LOGIN")] = "10/minute"
+    #: Deliberately far tighter than the login bucket: this endpoint sends mail to
+    #: an address the caller chooses, so abuse costs someone else an inbox.
+    rate_limit_password_reset: Annotated[
+        str, Field(validation_alias="RATE_LIMIT_PASSWORD_RESET")
+    ] = "5/hour"  # noqa: S105 - a rate, not a credential; the field name trips the check
 
     # Shared secret the queue shim presents to /internal/* endpoints.
     internal_api_token: Annotated[str, Field(validation_alias="INTERNAL_API_TOKEN")] = (
@@ -295,20 +343,9 @@ class OIDCSettings(BaseSettings):
 
     enabled: Annotated[bool, Field(validation_alias="OIDC_ENABLED")] = False
     provider: Annotated[str, Field(validation_alias="OIDC_PROVIDER")] = "microsoft"
-    #: How long a password-reset link stays valid. Short, because the link is a
-    #: bearer credential sitting in a mailbox; long enough to survive a mail queue.
-    password_reset_token_ttl_minutes: Annotated[
-        int, Field(validation_alias="PASSWORD_RESET_TOKEN_TTL_MINUTES", ge=5, le=1440)
-    ] = 60
-
     tenant_id: Annotated[str, Field(validation_alias="AZURE_AD_TENANT_ID")] = ""
     client_id: Annotated[str, Field(validation_alias="AZURE_AD_CLIENT_ID")] = ""
     client_secret: Annotated[str, Field(validation_alias="AZURE_AD_CLIENT_SECRET")] = ""
-    #: Deliberately far tighter than the login bucket: this endpoint sends mail to
-    #: an address the caller chooses, so abuse costs someone else an inbox.
-    rate_limit_password_reset: Annotated[
-        str, Field(validation_alias="RATE_LIMIT_PASSWORD_RESET")
-    ] = "5/hour"  # noqa: S105 - a rate, not a credential; the field name trips the check
     redirect_uri: Annotated[str, Field(validation_alias="OIDC_REDIRECT_URI")] = (
         "http://localhost:8000/api/v1/auth/oidc/callback"
     )
@@ -531,10 +568,11 @@ class ParserSettings(BaseSettings):
 
     model_config = _group_config()
 
-    #: Defaults to the iDoc layout service: it returns real layout roles and
-    #: coordinates, so section structure comes from the service rather than from
-    #: font-size heuristics.
-    active_parser: Annotated[ParserName, Field(validation_alias="ACTIVE_PARSER")] = "idoc"
+    #: Defaults to Azure Document Intelligence: it returns real layout roles and
+    #: coordinates, so section structure comes from the model rather than from
+    #: font-size heuristics. Falls back to the local extractor - see the registry's
+    #: ``_FALLBACKS``.
+    active_parser: Annotated[ParserName, Field(validation_alias="ACTIVE_PARSER")] = "adi"
 
     #: See :data:`ParserMode`. Defaults to ``fixture`` so nothing calls the layout
     #: service unless a deployment says so.
@@ -565,36 +603,46 @@ class ParserSettings(BaseSettings):
     ] = 40
     ocr_dpi: Annotated[int, Field(validation_alias="OCR_DPI", ge=72, le=600)] = 200
 
+    # --- Azure Document Intelligence (ACTIVE_PARSER=adi) ----------------------
+    #
+    #: The **resource origin**, e.g. ``https://<name>.cognitiveservices.azure.com/``.
+    #: The adapter appends the operation path itself, so a full analyse URL pasted
+    #: here is reduced to its origin rather than doubled - the same canonicalisation
+    #: `_azure_resource_origin` performs for the OpenAI endpoints, and for the same
+    #: reason: the portal shows a full target URI, so pasting it is the natural
+    #: mistake. Note the resource *root* answers `200` with an empty body, which is
+    #: a liveness reply and not an analysis, so getting this wrong does not fail
+    #: loudly by itself.
     azure_docintel_endpoint: Annotated[str, Field(validation_alias="AZURE_DOCINTEL_ENDPOINT")] = ""
     azure_docintel_key: Annotated[str, Field(validation_alias="AZURE_DOCINTEL_KEY")] = ""
     azure_docintel_model: Annotated[str, Field(validation_alias="AZURE_DOCINTEL_MODEL")] = (
         "prebuilt-layout"
     )
-
-    # --- iDoc layout service --------------------------------------------------
-    #: In-house document layout service. Takes a PDF on a multipart ``file`` field
-    #: and returns a ZIP of per-page Document Intelligence layout JSON. Used in place
-    #: of calling Azure Document Intelligence directly, so no Azure credential is
-    #: needed in the application at all.
-    idoc_endpoint: Annotated[str, Field(validation_alias="IDOC_ENDPOINT")] = (
-        "https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json"
-    )
-    #: Optional bearer token or API key, if the service is placed behind auth.
-    idoc_api_key: Annotated[str, Field(validation_alias="IDOC_API_KEY")] = ""
-    idoc_api_key_header: Annotated[str, Field(validation_alias="IDOC_API_KEY_HEADER")] = "X-API-Key"
-    #: Layout analysis on a long agreement is slow, and this is a remote call - so it
-    #: gets its own timeout rather than sharing the local-parse budget.
-    idoc_timeout_seconds: Annotated[
-        int, Field(validation_alias="IDOC_TIMEOUT_SECONDS", ge=30, le=3600)
+    #: Pins the request path as well as the payload: ``2024-11-30`` and later are
+    #: served under ``/documentintelligence/``, while ``2023-07-31`` is under
+    #: ``/formrecognizer/``. The adapter chooses between them from this value.
+    azure_docintel_api_version: Annotated[
+        str, Field(validation_alias="AZURE_DOCINTEL_API_VERSION")
+    ] = "2024-11-30"
+    #: Budget for the whole analysis - the submit plus every poll - not per request.
+    azure_docintel_timeout_seconds: Annotated[
+        int, Field(validation_alias="AZURE_DOCINTEL_TIMEOUT_SECONDS", ge=30, le=3600)
     ] = 600
-    #: Verify TLS. Only ever disabled for a self-signed internal deployment, and the
-    #: production guard refuses to boot when it is off.
-    idoc_verify_tls: Annotated[bool, Field(validation_alias="IDOC_VERIFY_TLS")] = True
+    #: Gap between polls. Azure returns `retry-after` on the operation and that wins
+    #: when present; this is the floor used when it does not.
+    azure_docintel_poll_seconds: Annotated[
+        float, Field(validation_alias="AZURE_DOCINTEL_POLL_SECONDS", ge=0.5, le=60.0)
+    ] = 2.0
+
+    @field_validator("azure_docintel_endpoint")
+    @classmethod
+    def _normalise_docintel_endpoint(cls, value: str) -> str:
+        return _azure_resource_origin(value)
 
     # --- pdf_text_extractor (local layout, no service) ------------------------
     #
-    # A local checkout that produces the same Azure ``prebuilt-layout`` shape iDoc
-    # returns, via its ``--adi`` export. Selecting ``ACTIVE_PARSER=pdfextract``
+    # A local container or checkout that produces the same ``prebuilt-layout``
+    # shape Azure returns, via its ``--adi`` export. Selecting ``ACTIVE_PARSER=pdfextract``
     # therefore changes only where the layout JSON comes from - every downstream
     # stage, including the document pipeline that reads the raw per-page payloads,
     # is unaffected.
@@ -621,9 +669,7 @@ class ParserSettings(BaseSettings):
     pdfextract_backend: Annotated[str, Field(validation_alias="PDFEXTRACT_BACKEND")] = "baseline"
     #: OCR render resolution. The extractor's own default is 400, which is slow on a
     #: long scanned agreement; 300 is the usual accuracy/time trade.
-    pdfextract_dpi: Annotated[
-        int, Field(validation_alias="PDFEXTRACT_DPI", ge=72, le=600)
-    ] = 300
+    pdfextract_dpi: Annotated[int, Field(validation_alias="PDFEXTRACT_DPI", ge=72, le=600)] = 300
     #: Local, but not fast: OCR over a 100-page scan is minutes of CPU.
     pdfextract_timeout_seconds: Annotated[
         int, Field(validation_alias="PDFEXTRACT_TIMEOUT_SECONDS", ge=30, le=7200)
@@ -820,6 +866,11 @@ class LLMSettings(BlankIsUnsetMixin, BaseSettings):
     def _parse_fallbacks(cls, value: str | list[str] | None) -> list[str]:
         return _csv_list(value)
 
+    @field_validator("azure_openai_endpoint")
+    @classmethod
+    def _normalise_azure_endpoint(cls, value: str) -> str:
+        return _azure_resource_origin(value)
+
 
 #: Native output width per known model, so a truncation request can be recognised
 #: as deliberate Matryoshka slicing rather than a misconfiguration. A model absent
@@ -896,6 +947,11 @@ class EmbeddingSettings(BaseSettings):
     #: Probe the provider during startup. Off in tests and local UI work, where a
     #: network round trip per boot is pure friction.
     verify_on_startup: Annotated[bool, Field(validation_alias="EMBEDDING_VERIFY_ON_STARTUP")] = True
+
+    @field_validator("azure_endpoint")
+    @classmethod
+    def _normalise_azure_endpoint(cls, value: str) -> str:
+        return _azure_resource_origin(value)
 
     @property
     def native_dim(self) -> int:
@@ -1342,6 +1398,17 @@ class Settings(BaseSettings):
         "http://localhost:5173"
     ]
 
+    #: Where the SPA is served from, used to build links that land in a browser -
+    #: currently the password-reset email.
+    #:
+    #: Deliberately its own setting rather than the first entry of `cors_origins`:
+    #: that list is an allow-list of origins permitted to *call* the API, it is
+    #: routinely several entries long, and its order carries no meaning. Guessing
+    #: from it would send users a link to whichever host happened to be listed first.
+    frontend_base_url: Annotated[str, Field(validation_alias="FRONTEND_BASE_URL")] = (
+        "http://localhost:5173"
+    )
+
     #: Permit the mock inference/embedding providers in production.
     #:
     #: Off by default, and the production guard refuses to boot without it, because
@@ -1398,17 +1465,6 @@ class Settings(BaseSettings):
     )
     organization_name: Annotated[str, Field(validation_alias="ORGANIZATION_NAME")] = "IRIS RegTech"
 
-    #: Where the SPA is served from, used to build links that land in a browser -
-    #: currently the password-reset email.
-    #:
-    #: Deliberately its own setting rather than the first entry of `cors_origins`:
-    #: that list is an allow-list of origins permitted to *call* the API, it is
-    #: routinely several entries long, and its order carries no meaning. Guessing
-    #: from it would send users a link to whichever host happened to be listed first.
-    frontend_base_url: Annotated[str, Field(validation_alias="FRONTEND_BASE_URL")] = (
-        "http://localhost:5173"
-    )
-
     #: Legal names and aliases by which this organisation appears in contracts.
     #: Extraction matches party names against these to decide which side of an
     #: agreement is "us", which is what makes per-side questions answerable -
@@ -1442,9 +1498,9 @@ class Settings(BaseSettings):
     #: different processes and usually different pods, so this needs to point at a
     #: shared volume in any deployment where the dashboard is expected to show
     #: anything.
-    evaluation_results_dir: Annotated[
-        str, Field(validation_alias="EVALUATION_RESULTS_DIR")
-    ] = "evaluation-results"
+    evaluation_results_dir: Annotated[str, Field(validation_alias="EVALUATION_RESULTS_DIR")] = (
+        "evaluation-results"
+    )
 
     review_confidence_threshold: Annotated[
         float, Field(validation_alias="REVIEW_CONFIDENCE_THRESHOLD", ge=0.0, le=1.0)
@@ -1521,12 +1577,16 @@ class Settings(BaseSettings):
         # so ALLOW_MOCK_AI does not excuse it: that flag states "we run without a
         # vendor", which is contradicted by the vendor's key being configured.
         problems.extend(self.accidental_mock_providers())
-        if not self.parser.idoc_verify_tls:
-            # Contract text is uploaded to this service. Skipping certificate
-            # verification would make that upload interceptable.
-            problems.append("IDOC_VERIFY_TLS must be true in production")
-        if self.parser.active_parser == "idoc" and not self.parser.idoc_endpoint:
-            problems.append("ACTIVE_PARSER=idoc requires IDOC_ENDPOINT to be set")
+        if self.parser.active_parser == "adi" and not (
+            self.parser.azure_docintel_endpoint and self.parser.azure_docintel_key
+        ):
+            problems.append(
+                "ACTIVE_PARSER=adi requires AZURE_DOCINTEL_ENDPOINT and AZURE_DOCINTEL_KEY"
+            )
+        if self.parser.active_parser == "pdfextract" and not (
+            self.parser.pdfextract_url or self.parser.pdfextract_path
+        ):
+            problems.append("ACTIVE_PARSER=pdfextract requires PDFEXTRACT_URL or PDFEXTRACT_PATH")
 
         if problems:
             raise ValueError(

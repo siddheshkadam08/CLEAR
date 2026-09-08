@@ -70,11 +70,11 @@ def _exploding_transport() -> httpx.MockTransport:
 @pytest.fixture
 def store(tmp_path: Path, settings_env: Any) -> FixtureStore:
     settings_env(
-        ACTIVE_PARSER="idoc",
+        ACTIVE_PARSER="adi",
         PARSER_MODE="fixture",
         PARSER_FIXTURE_DIR=str(tmp_path),
     )
-    return FixtureStore(parser="idoc")
+    return FixtureStore(parser="adi")
 
 
 # =============================================================================
@@ -86,7 +86,7 @@ def test_saves_and_loads_by_content_hash(store: FixtureStore) -> None:
 
     assert record is not None
     assert record.payloads == SAMPLE_PAYLOAD
-    assert record.parser == "idoc"
+    assert record.parser == "adi"
     assert record.recorded_at
 
 
@@ -154,13 +154,13 @@ def test_missing_everything_is_an_actionable_error(store: FixtureStore) -> None:
 # Adapter integration - the guarantee that matters
 # =============================================================================
 async def test_fixture_mode_makes_no_network_call(store: FixtureStore) -> None:
-    from app.ai.parsers.idoc_adapter import IDocParser
+    from app.ai.parsers.adi_adapter import AzureDocumentIntelligenceParser
 
     store.save("b" * 64, SAMPLE_PAYLOAD)
-    parser = IDocParser()
+    parser = AzureDocumentIntelligenceParser()
 
     # Any attempt to reach the service raises inside the transport.
-    import app.ai.parsers.idoc_adapter as module
+    import app.ai.parsers.adi_adapter as module
 
     original = httpx.AsyncClient
     httpx.AsyncClient = lambda **kw: original(transport=_exploding_transport(), **kw)  # type: ignore[assignment,misc]
@@ -179,10 +179,10 @@ async def test_fixture_mode_makes_no_network_call(store: FixtureStore) -> None:
 
 async def test_fixture_mode_preserves_coordinates(store: FixtureStore) -> None:
     """Polygons must survive replay - they are what powers PDF highlighting."""
-    from app.ai.parsers.idoc_adapter import IDocParser
+    from app.ai.parsers.adi_adapter import AzureDocumentIntelligenceParser
 
     store.save("b" * 64, SAMPLE_PAYLOAD)
-    document = await IDocParser().parse(_request("b" * 64))
+    document = await AzureDocumentIntelligenceParser().parse(_request("b" * 64))
 
     boxes = [
         block.coordinates
@@ -196,10 +196,10 @@ async def test_fixture_mode_preserves_coordinates(store: FixtureStore) -> None:
 
 
 async def test_fixture_mode_fails_clearly_with_no_fixture(store: FixtureStore) -> None:
-    from app.ai.parsers.idoc_adapter import IDocParser
+    from app.ai.parsers.adi_adapter import AzureDocumentIntelligenceParser
 
     with pytest.raises(ParserError, match="PARSER_MODE=fixture"):
-        await IDocParser().parse(_request("e" * 64))
+        await AzureDocumentIntelligenceParser().parse(_request("e" * 64))
 
 
 # =============================================================================
@@ -208,7 +208,7 @@ async def test_fixture_mode_fails_clearly_with_no_fixture(store: FixtureStore) -
 def test_fixture_is_the_default_mode(settings_env: Any) -> None:
     """An accidental live call costs money and a rate-limit slot; an accidental
     replay is a logged fallback. The safe default is the cheap failure."""
-    settings = settings_env(ACTIVE_PARSER="idoc")
+    settings = settings_env(ACTIVE_PARSER="adi")
     assert settings.parser.parser_mode == "fixture"
     assert settings.parser.is_fixture_mode
 
@@ -230,6 +230,6 @@ def test_recorded_fixture_is_readable_json(store: FixtureStore) -> None:
     path = store.save("b" * 64, SAMPLE_PAYLOAD, file_name="x.pdf")
     raw = json.loads(path.read_text(encoding="utf-8"))
 
-    assert raw["parser"] == "idoc"
+    assert raw["parser"] == "adi"
     assert raw["file_name"] == "x.pdf"
     assert isinstance(raw["payloads"], list)

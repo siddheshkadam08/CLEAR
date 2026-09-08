@@ -1,15 +1,17 @@
-"""iDoc layout-service parser adapter.
+"""Shared mapping for Document Intelligence layout results.
 
-Calls the in-house document layout service, which takes a PDF on a multipart
-``file`` field and returns a **ZIP of per-page JSON**, one entry per page named
-``page_<n>.json``. Each entry is a Document Intelligence ``prebuilt-layout``
-analyse result for that page.
+Every PDF parser in this deployment speaks the Azure Document Intelligence
+``prebuilt-layout`` shape - Azure itself does natively, and pdf_text_extractor
+emits it deliberately via its ADI export. That shape is what the whole pipeline
+downstream is written against, so the mapping from it into the CDM lives here,
+once, and each adapter supplies only its own transport.
 
-Preferred over calling Azure Document Intelligence directly: the service holds the
-Azure credential, so this application never does, and swapping the layout backend
-becomes an infrastructure change rather than a code change.
+:class:`LayoutParser` is abstract in the way that matters: it has no idea where
+its payloads come from. A subclass implements :meth:`LayoutParser._analyse` to
+return **one payload per page**, and inherits the caching, fixture record/replay,
+coordinate maths, section planning and table de-duplication unchanged.
 
-Three properties of the response shape drive this file, and getting any of them
+Three properties of the payload shape drive this file, and getting any of them
 wrong corrupts the document silently rather than loudly:
 
 * **Spans are page-local.** Every page's JSON restarts ``span.offset`` at zero, so
@@ -19,22 +21,23 @@ wrong corrupts the document silently rather than loudly:
   in ``tables[].cells[]`` and as standalone entries in ``paragraphs[]``. Emitting
   both would duplicate every figure in a fee schedule - once inside the table and
   again as loose prose - so cell-backed paragraphs are excluded by resolving each
-  cell's ``elements`` references.
+  cell's ``elements`` references. Those references are *indices into the payload's
+  own paragraph list*, which is why an adapter splitting a whole-document result
+  into pages has to renumber them.
 * **Coordinates are polygons in inches.** Four corners, not a rectangle, and the
   page is measured in inches. They are converted to a point-based bounding box so
   they share a coordinate space with the PyMuPDF adapter and the PDF viewer can
   draw a highlight without knowing which parser ran.
 
 Roles (``title``, ``sectionHeading``, ``pageHeader``, ``pageFooter``, ``pageNumber``,
-``footnote``) come from the service, so heading detection and page-furniture removal
-are read from the response rather than inferred from font sizes.
+``footnote``) come from the layout model, so heading detection and page-furniture
+removal are read from the response rather than inferred from font sizes.
 """
 
 from __future__ import annotations
 
-import io
 import re
-import zipfile
+from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -57,7 +60,6 @@ from app.ai.cdm.models import (
 )
 from app.ai.parsers.base import (
     IDocumentParser,
-    ParserCapabilities,
     ParseRequest,
 )
 from app.core.config import get_settings
@@ -76,7 +78,6 @@ _POINTS_PER_INCH = 72.0
 
 #: ``page_12.json`` -> 12. Sorted numerically, because a lexical sort puts page 10
 #: before page 2 and would silently reorder a ten-page contract.
-_PAGE_FILE = re.compile(r"page[_-]?(\d+)\.json$", re.IGNORECASE)
 
 #: DI roles that are page furniture, not document content.
 _FURNITURE_ROLES = frozenset({"pageHeader", "pageFooter", "pageNumber"})
@@ -136,35 +137,40 @@ class _Accumulator:
     model_ids: set[str] = field(default_factory=set)
 
 
-class IDocParser(IDocumentParser):
-    """Remote layout parser backed by the iDoc service."""
+class LayoutParser(IDocumentParser):
+    """Maps Document Intelligence layout payloads into the CDM.
 
-    @property
-    def capabilities(self) -> ParserCapabilities:
-        return ParserCapabilities(
-            name="idoc",
-            version=PARSER_FRAMEWORK_VERSION,
-            supported_types=frozenset({FileType.PDF}),
-            supports_coordinates=True,
-            supports_tables=True,
-            supports_sections=True,
-            supports_lists=True,
-            supports_images=False,
-            # The service runs its own OCR on scanned pages, so no local OCR pass is
-            # needed - but it does not report whether it applied any.
-            supports_ocr=True,
-            supports_signatures=True,
-            is_remote=True,
-        )
+    Subclasses provide :meth:`capabilities`, :meth:`_analyse`, :meth:`_fixture_source`
+    and :meth:`health`; everything else is inherited.
+    """
+
+    @abstractmethod
+    async def _analyse(self, request: ParseRequest) -> list[dict[str, Any]]:
+        """Fetch the layout result, as one payload per page, in page order.
+
+        Each payload is a ``prebuilt-layout`` analyse result whose ``pages[0]``
+        describes the page it belongs to. An adapter whose service answers with a
+        whole-document result splits it here.
+        """
+
+    @abstractmethod
+    def _fixture_source(self) -> str:
+        """What to record as the origin of a cached or recorded payload.
+
+        Stamped onto the shared cache entry and the on-disk fixture. A subclass
+        that reached one service and recorded another's address would leave an
+        artifact claiming a provenance it does not have, which is worse than no
+        provenance at all - it is the kind of record someone later trusts.
+        """
 
     # =========================================================================
     # Parse
     # =========================================================================
     async def parse(self, request: ParseRequest) -> NormalizedDocument:
         if request.file_type is not FileType.PDF:
-            # Named from the capability rather than hardcoded: subclasses reuse this
-            # method, and `PdfTextExtractorParser` reporting "the iDoc service" would
-            # send whoever reads the error looking at a service it never called.
+            # Named from the capability rather than hardcoded, so the error names the
+            # parser that actually ran rather than sending whoever reads it looking
+            # at a service that was never called.
             raise ParserError(
                 f"The {self.capabilities.name} parser accepts PDF only; "
                 f"received {request.file_type.value}.",
@@ -205,6 +211,7 @@ class IDocParser(IDocumentParser):
             return fixtures.resolve(store, request.file_hash, file_name=request.file_name)
 
         payloads = await self._analyse(request)
+        source = self._fixture_source()
 
         # Written before the local fixture: the shared copy is the one that saves
         # a future call, and a failure here is logged rather than raised.
@@ -212,7 +219,7 @@ class IDocParser(IDocumentParser):
             request.file_hash,
             payloads,
             file_name=request.file_name,
-            source=settings.idoc_endpoint,
+            source=source,
         )
 
         if settings.record_fixtures:
@@ -221,7 +228,7 @@ class IDocParser(IDocumentParser):
                     request.file_hash,
                     payloads,
                     file_name=request.file_name,
-                    source=settings.idoc_endpoint,
+                    source=source,
                 )
             except OSError as exc:
                 # A read-only or full disk must not fail a parse that already
@@ -231,26 +238,6 @@ class IDocParser(IDocumentParser):
 
         return payloads
 
-    async def health(self) -> bool:
-        """Is the service reachable?
-
-        A HEAD/GET on the upload path is expected to be rejected - the endpoint only
-        accepts POST - so anything that answers at all counts as reachable. What is
-        being tested is the network path and TLS, not the contract.
-        """
-        settings = get_settings().parser
-        if not settings.idoc_endpoint:
-            return False
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0, verify=settings.idoc_verify_tls) as client:
-                response = await client.get(settings.idoc_endpoint)
-            return response.status_code < 500
-        except httpx.HTTPError as exc:
-            logger.warning("idoc_health_failed", error=str(exc))
-            return False
-
     async def page_count(self, request: ParseRequest) -> int | None:
         """Unknown without analysing. Returning None avoids a second upload."""
         return None
@@ -258,141 +245,6 @@ class IDocParser(IDocumentParser):
     # =========================================================================
     # Transport
     # =========================================================================
-    def _upload_target(self) -> tuple[str, int]:
-        """Where to POST the document, and how long to wait.
-
-        A seam, not indirection for its own sake: the upload, the ADI unpacking,
-        page building and coordinate handling are all worth sharing, and the only
-        thing that differs between the layout service and a self-hosted extractor
-        is the URL and its timeout.
-        """
-        settings = get_settings().parser
-        return settings.idoc_endpoint, settings.idoc_timeout_seconds
-
-    async def _analyse(self, request: ParseRequest) -> list[dict[str, Any]]:
-        """Upload the PDF and return the per-page payloads, ordered by page number."""
-        import httpx
-
-        settings = get_settings().parser
-        # Resolved through a method so a subclass can point the same upload at a
-        # different service. `PdfTextExtractorParser` uses this to reach the
-        # extractor over HTTP, which returns a byte-identical payload to the
-        # `--adi` export its CLI writes - so only the transport differs.
-        endpoint, timeout_seconds = self._upload_target()
-        if not endpoint:
-            raise ParserError(
-                "IDOC_ENDPOINT is not configured, so the iDoc parser cannot run.",
-                retryable=False,
-            )
-
-        headers: dict[str, str] = {}
-        if settings.idoc_api_key:
-            headers[settings.idoc_api_key_header] = settings.idoc_api_key
-
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(float(timeout_seconds), connect=15.0),
-                verify=settings.idoc_verify_tls,
-                headers=headers,
-                follow_redirects=True,
-            ) as client:
-                response = await client.post(
-                    endpoint,
-                    files={
-                        "file": (
-                            request.file_name,
-                            request.content,
-                            "application/pdf",
-                        )
-                    },
-                )
-        except httpx.TimeoutException as exc:
-            # Retryable: a timeout on a long document says nothing about the document.
-            raise ParserError(
-                f"The layout service did not respond within {timeout_seconds}s.",
-                retryable=True,
-                details={"endpoint": endpoint},
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ParserError(
-                f"Could not reach the iDoc service: {exc}",
-                retryable=True,
-                details={"endpoint": endpoint},
-            ) from exc
-
-        if response.status_code >= 400:
-            # 4xx is the document's fault and will fail identically on retry; 5xx is
-            # the service's and may not.
-            raise ParserError(
-                f"The iDoc service rejected the document ({response.status_code}).",
-                retryable=response.status_code >= 500,
-                details={
-                    "status": response.status_code,
-                    "body": response.text[:500],
-                },
-            )
-
-        return self._unpack(response.content, response.headers.get("content-type", ""))
-
-    def _unpack(self, body: bytes, content_type: str) -> list[dict[str, Any]]:
-        """Extract per-page payloads from the response.
-
-        The service returns a ZIP of ``page_<n>.json``. A single JSON object is also
-        accepted, so a future single-document response shape does not break the
-        adapter.
-        """
-        import json
-
-        if not body:
-            raise ParserError("The iDoc service returned an empty response.", retryable=True)
-
-        is_zip = body[:2] == b"PK" or "zip" in content_type.lower()
-        if not is_zip:
-            try:
-                parsed = json.loads(body.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise ParserError(
-                    "The iDoc response was neither a ZIP archive nor JSON.",
-                    retryable=False,
-                    details={"content_type": content_type, "head": body[:200].hex()},
-                ) from exc
-            return [parsed] if isinstance(parsed, dict) else list(parsed)
-
-        try:
-            with zipfile.ZipFile(io.BytesIO(body)) as archive:
-                entries: list[tuple[int, str]] = []
-                for name in archive.namelist():
-                    if name.endswith("/"):
-                        continue
-                    match = _PAGE_FILE.search(name)
-                    # Numeric sort: a lexical one puts page_10 before page_2 and would
-                    # silently reorder the document.
-                    entries.append((int(match.group(1)) if match else 1 << 30, name))
-                if not entries:
-                    raise ParserError(
-                        "The iDoc archive contained no page files.",
-                        retryable=False,
-                        details={"entries": archive.namelist()[:20]},
-                    )
-
-                payloads: list[dict[str, Any]] = []
-                for _, name in sorted(entries):
-                    raw = archive.read(name)
-                    try:
-                        parsed = json.loads(raw.decode("utf-8"))
-                    except (ValueError, UnicodeDecodeError) as exc:
-                        raise ParserError(
-                            f"Page file '{name}' in the iDoc archive is not valid JSON.",
-                            retryable=False,
-                        ) from exc
-                    if isinstance(parsed, dict):
-                        payloads.append(parsed)
-                return payloads
-        except zipfile.BadZipFile as exc:
-            raise ParserError(
-                "The iDoc response was not a readable ZIP archive.",
-                retryable=True,
-            ) from exc
 
     # =========================================================================
     # Mapping
@@ -666,7 +518,7 @@ class IDocParser(IDocumentParser):
 
         if not acc.pages:
             raise ParserError(
-                "The iDoc service returned no pages for this document.",
+                f"The {self.capabilities.name} parser returned no pages for this document.",
                 retryable=False,
             )
 
@@ -693,7 +545,8 @@ class IDocParser(IDocumentParser):
         )
 
         logger.info(
-            "idoc_parse_completed",
+            "layout_parse_completed",
+            parser=self.capabilities.name,
             document_id=request.document_id,
             pages=len(acc.pages),
             paragraphs=len(acc.paragraphs),
@@ -715,7 +568,11 @@ class IDocParser(IDocumentParser):
                 file_size=request.size,
                 hash=request.file_hash,
                 language=request.language_hint,
-                parser_name="idoc",
+                # The parser that actually ran. This was once hardcoded to a single
+                # name, which stamped every subclass's output with it - a local parse
+                # then claimed, in the metadata the evidence viewer reads, to have
+                # come from the remote service.
+                parser_name=self.capabilities.name,
                 parser_version=PARSER_FRAMEWORK_VERSION,
                 adapter_version=ADAPTER_VERSION,
                 created_at=datetime.now(UTC).isoformat(),
@@ -1049,4 +906,4 @@ def _coverage(
     return round(with_coords / len(elements), 4)
 
 
-__all__ = ["ADAPTER_VERSION", "IDocParser"]
+__all__ = ["ADAPTER_VERSION", "LayoutParser"]

@@ -1,11 +1,11 @@
 """The local extractor as a first-class parser.
 
-`pdfextract` is not a fallback: it emits the same Azure ``prebuilt-layout``
-payloads the iDoc service does, which is what lets the document pipeline - which
-reads those raw payloads rather than the normalised document - run unchanged
-against either. These tests pin the two things that make that true: the payload
-division, and the fact that the adapter inherits iDoc's mapping rather than
-carrying a second copy of it.
+`pdfextract` is the fallback behind `adi`, but not a degraded one: it emits the
+same ``prebuilt-layout`` payloads Azure does, which is what lets the document
+pipeline - which reads those raw payloads rather than the normalised document -
+run unchanged against either. These tests pin the two things that make that true:
+the payload division, and the fact that the adapter inherits the shared mapping
+rather than carrying a second copy of it.
 
 None of them need the extractor installed. The subprocess boundary is exercised
 only in its failure modes, which is where the interesting behaviour is anyway.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.ai.parsers.idoc_adapter import IDocParser
+from app.ai.parsers.layout import LayoutParser
 from app.ai.parsers.pdfextract_adapter import PdfTextExtractorParser, split_pages
 from app.core.enums import FileType
 
@@ -128,18 +128,18 @@ class TestSplitPages:
 # The adapter
 # =============================================================================
 class TestAdapter:
-    def test_it_reuses_idocs_mapping_rather_than_copying_it(self) -> None:
+    def test_it_reuses_the_shared_mapping_rather_than_copying_it(self) -> None:
         """The payload shapes are identical, so the conversion must be shared.
 
         Two implementations of the ADI -> CDM mapping would drift, and the
         coordinate maths is the part where drift is hardest to notice.
         """
-        assert issubclass(PdfTextExtractorParser, IDocParser)
+        assert issubclass(PdfTextExtractorParser, LayoutParser)
 
     def test_it_has_its_own_cache_namespace(self) -> None:
         # `_payloads` keys the object cache and fixture store on this name. Were
-        # it left as "idoc", a document parsed locally would be served back to a
-        # deployment that believed it came from the service.
+        # it left as the base class's, a document parsed locally would be served
+        # back to a deployment that believed Azure had produced it.
         assert PdfTextExtractorParser().capabilities.name == "pdfextract"
 
     def test_it_is_local_not_remote(self) -> None:
@@ -168,13 +168,23 @@ class TestAdapter:
 
         assert isinstance(get_parser_by_name("pdfextract"), PdfTextExtractorParser)
 
-    def test_it_is_a_pdf_fallback_ahead_of_pymupdf(self) -> None:
-        """Order matters: only these two produce the layout JSON.
+    def test_it_is_the_fallback_behind_azure(self) -> None:
+        """Order matters: `adi` leads and this catches it.
 
-        `pymupdf` returns a normalised document and writes no layout payloads, so
-        a PDF that falls through to it cannot run the document pipeline at all.
+        Both produce the layout JSON, so the fall from one to the other costs a
+        remote dependency rather than fidelity.
         """
         from app.ai.parsers.registry import _FALLBACKS
 
         chain = _FALLBACKS[FileType.PDF]
-        assert chain.index("pdfextract") < chain.index("pymupdf")
+        assert chain.index("adi") < chain.index("pdfextract")
+
+    def test_pymupdf_is_not_in_the_chain(self) -> None:
+        """It writes no layout payloads, so a PDF reaching it parses and then
+        strands `docpipeline` with nothing to pin clauses to - a failure that
+        surfaces two stages later as missing evidence. Selectable, never automatic.
+        """
+        from app.ai.parsers.registry import _FACTORIES, _FALLBACKS
+
+        assert "pymupdf" not in _FALLBACKS[FileType.PDF]
+        assert "pymupdf" in _FACTORIES

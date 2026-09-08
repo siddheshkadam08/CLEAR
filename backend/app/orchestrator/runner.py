@@ -252,12 +252,28 @@ async def _execute(message: StageMessage, max_attempts: int) -> StageOutcome:
         await jobs.mark_stage_started(job.id, message.stage, worker_id=WORKER_ID)
         await jobs.update_progress(job.id, workflow.progress_for(message.stage, completed=False))
 
+        # `attempt` is deliberately not passed: `start_run` numbers the row from
+        # the history it can see (`max(attempt) + 1`), and that is a different
+        # quantity from `message.attempt`.
+        #
+        # `message.attempt` is this dispatch's retry counter. It restarts at 1
+        # every time the stage is enqueued afresh, which is correct for the retry
+        # budget and backoff - but wrong as a row key, because
+        # `uq_job_stage_runs_job_stage_attempt` spans the job's whole history. A
+        # job whose parser already failed three times owns rows 1, 2 and 3, so
+        # `cip reprocess` collided on its first insert and burned all three
+        # retries doing it: reprocessing *any* previously failed stage was
+        # impossible, which is exactly what a fixed misconfiguration asks for.
+        #
+        # Numbering from history also repairs "the latest run": the accessors in
+        # `models/processing.py` pick by `max(attempt)`, and a reprocess that
+        # restarted at 1 would have been ranked below the stale failure it was
+        # meant to supersede.
         run = await runs.start_run(
             job_id=job.id,
             contract_id=contract.id,
             project_id=contract.project_id,
             stage=message.stage,
-            attempt=message.attempt,
             worker_id=WORKER_ID,
             versions=handler.versions_for(
                 StageContext(

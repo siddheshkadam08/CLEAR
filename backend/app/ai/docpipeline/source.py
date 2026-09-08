@@ -1,6 +1,6 @@
-"""Reading the iDoc page JSON off disk, paragraph by paragraph, page by page.
+"""Reading cached layout JSON off disk, paragraph by paragraph, page by page.
 
-The upstream service returns one JSON file per page, each an Azure
+The parser cache holds one JSON payload per page, each a
 ``prebuilt-layout`` analyse result for that page alone. This module turns a
 directory of them into an ordered list of pages, and nothing else - no network,
 no database, no settings. That is what makes it testable with a `tmp_path` and
@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.ai.cdm.models import Coordinates
-from app.ai.parsers.idoc_adapter import _SIGNATURE_HINTS, IDocParser
+from app.ai.parsers.layout import _SIGNATURE_HINTS, LayoutParser
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -89,7 +89,7 @@ class Paragraph:
         `None` when the vendor gave no geometry - real text worth extracting,
         simply not pointable-at.
 
-        The conversion is `IDocParser`'s, not a second copy of it: the
+        The conversion is `LayoutParser`'s, not a second copy of it: the
         polygon is four corners that a skewed scan leaves rotated, so the
         rectangle is the extent of all four, and two implementations that
         disagree on that rule would put the same clause in two different places
@@ -97,7 +97,7 @@ class Paragraph:
         """
         if not self.polygon:
             return None
-        return IDocParser._coordinates(
+        return LayoutParser._coordinates(
             list(self.polygon),
             self.page_number,
             self.page_width,
@@ -234,7 +234,7 @@ def _read_page(path: Path, *, fallback_number: int) -> PageContent:
 
 def _build_page(payload: dict, *, fallback_number: int, source: Path) -> PageContent:
     page_number = _page_number(payload, fallback_number)
-    width, height, unit = IDocParser._page_size(_page_data(payload))
+    width, height, unit = LayoutParser._page_size(_page_data(payload))
 
     paragraphs: list[Paragraph] = []
     for raw in payload.get("paragraphs") or []:

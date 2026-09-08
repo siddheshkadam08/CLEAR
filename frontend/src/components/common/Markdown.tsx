@@ -22,7 +22,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 export const Markdown = ({ children }: { children: string }) => (
-  <div className="text-sm leading-7 text-slate-800">
+  <div className="text-sm leading-7 text-slate-800 dark:text-slate-200">
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
@@ -48,7 +48,7 @@ export const Markdown = ({ children }: { children: string }) => (
             // opened page a handle back to this one.
             target="_blank"
             rel="noopener noreferrer"
-            className="text-blue-600 underline underline-offset-2 hover:text-blue-700"
+            className="text-blue-600 dark:text-blue-400 underline underline-offset-2 hover:text-blue-700 dark:hover:text-blue-300"
           >
             {content}
           </a>
@@ -64,12 +64,15 @@ export const Markdown = ({ children }: { children: string }) => (
           className?.startsWith('language-') ? (
             <code className={`${className} block`}>{content}</code>
           ) : (
-            <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-800">
+            <code className="rounded bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-800 dark:text-slate-200">
               {content}
             </code>
           ),
         pre: ({ children: content }) => (
-          <pre className="mb-3 overflow-x-auto rounded-xl bg-slate-900 p-3 font-mono text-xs leading-6 text-slate-100 last:mb-0">
+          // Dark in both themes - a code block reads as one - so it needs a rule
+          // in dark mode, where it would otherwise dissolve into the page behind
+          // it and the answer would appear to have a hole in it.
+          <pre className="mb-3 overflow-x-auto rounded-xl border border-transparent bg-slate-900 p-3 font-mono text-xs leading-6 text-slate-100 last:mb-0 dark:border-slate-700">
             {content}
           </pre>
         ),
@@ -84,7 +87,9 @@ export const Markdown = ({ children }: { children: string }) => (
           </th>
         ),
         td: ({ children: content }) => (
-          <td className="border-b border-slate-100 px-2 py-1.5 align-top">{content}</td>
+          <td className="border-b border-slate-100 dark:border-slate-800 px-2 py-1.5 align-top">
+            {content}
+          </td>
         ),
         hr: () => <hr className="my-4 border-slate-200 dark:border-slate-700" />,
       }}

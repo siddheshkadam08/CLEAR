@@ -39,7 +39,13 @@ import { EmptyState } from '@/components/common/EmptyState';
 import { FilterChip } from '@/components/common/FilterChip';
 import { selectClasses, SelectChevron } from '@/components/common/Field';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
-import { formatDateTime, formatDateTimeFull, formatDuration, humanise } from '@/lib/format';
+import {
+  formatDateTime,
+  formatDateTimeFull,
+  formatDuration,
+  formatStage,
+  humanise,
+} from '@/lib/format';
 import { groupByArchive } from '@/lib/job-grouping';
 import { useProjectScope } from '@/lib/scope';
 
@@ -403,7 +409,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
         </div>
         <div className="mt-2 flex flex-col gap-1 text-xs text-slate-500 sm:flex-row sm:justify-between">
           <span>
-            {job.current_stage ? humanise(job.current_stage) : humanise(job.state)} Â· started{' '}
+            {job.current_stage ? formatStage(job.current_stage) : humanise(job.state)} Â· started{' '}
             {formatDateTime(job.created_at)}
           </span>
           {job.finished_at ? <span>finished {formatDateTimeFull(job.finished_at)}</span> : null}
@@ -413,7 +419,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
       {job.error_message || detail?.error ? (
         <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
           <p className="font-semibold">
-            {failedStage ? `${humanise(failedStage.stage)} failed` : 'Processing failed'}
+            {failedStage ? `${formatStage(failedStage.stage)} failed` : 'Processing failed'}
           </p>
           <p className="mt-1">
             {String(
@@ -460,7 +466,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
                 <tbody className="divide-y divide-slate-100">
                   {(detail?.stages ?? []).map((stage) => (
                     <tr key={stage.id}>
-                      <td className="py-2 pr-4 text-slate-700">{humanise(stage.stage)}</td>
+                      <td className="py-2 pr-4 text-slate-700">{formatStage(stage.stage)}</td>
                       <td className="py-2 pr-4">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <Badge
@@ -506,7 +512,7 @@ function JobCard({ job, defaultOpen }: { job: JobListItem; defaultOpen?: boolean
             >
               {STAGES.map((stage) => (
                 <option key={stage} value={stage}>
-                  {humanise(stage)}
+                  {formatStage(stage)}
                 </option>
               ))}
             </select>

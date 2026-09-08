@@ -267,7 +267,7 @@ make reprocess job=<job-uuid> stage=embedding
 Every parser implements `IDocumentParser` and emits a **Normalized Document**;
 the CDM builder turns that into the immutable **Canonical Document Model**.
 Downstream code never sees parser JSON. Switching parsers is a config change
-(`ACTIVE_PARSER=idoc|pymupdf|adi|…`) plus one adapter — chunking, extraction,
+(`ACTIVE_PARSER=adi|pdfextract|pymupdf|…`) plus one adapter — chunking, extraction,
 embedding, search and RAG are untouched.
 
 ### Document Intelligence Profiles
@@ -369,7 +369,7 @@ All configuration is environment-based (`pydantic-settings`); no secrets in code
 
 | Variable | Purpose |
 | --- | --- |
-| `ACTIVE_PARSER` | `idoc` (default) · `pymupdf` · `adi` · `textract` · `googledocai` |
+| `ACTIVE_PARSER` | `adi` (default, Azure Document Intelligence) · `pdfextract` (local container, the fallback) · `pymupdf` · `textract` · `googledocai` |
 | `LLM_PROVIDER` / `LLM_MODEL` | inference provider and model |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` | vector provider |
 | `STORAGE_PROVIDER` | `azure` · `s3` · `minio` · `local` |

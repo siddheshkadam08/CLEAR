@@ -7,17 +7,17 @@ them, so switching parsers is a configuration change plus one adapter.
 
 Adapters resolved by :mod:`app.ai.parsers.registry`:
 
-===========  =========================================  ===================
-``idoc``     in-house layout service (default)          layout + coordinates
-``mock``     deterministic fixture                      tests / CI / no deps
-``pymupdf``  local PDF text layer + OCR fallback        always available
-``docx``     python-docx                                DOCX
-``adi``      Azure Document Intelligence                remote, high fidelity
-===========  =========================================  ===================
+==============  =====================================  ====================
+``adi``         Azure Document Intelligence (default)  layout + coordinates
+``pdfextract``  local extractor container or checkout   layout + coordinates
+``mock``        deterministic fixture                  tests / CI / no deps
+``pymupdf``     local PDF text layer + OCR fallback    always available
+``docx``        python-docx                            DOCX
+==============  =====================================  ====================
 
-The registry falls back automatically when the configured parser is absent or
-cannot handle a file type, so a missing optional dependency degrades fidelity
-rather than failing ingestion.
+``adi`` and ``pdfextract`` produce the identical ``prebuilt-layout`` payload, so
+the registry falls from the first to the second without anything downstream
+noticing - the difference is a remote dependency, not fidelity.
 """
 
 from app.ai.parsers.base import IDocumentParser, ParserCapabilities, ParseRequest

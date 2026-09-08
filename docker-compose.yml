@@ -127,10 +127,11 @@ x-backend-env: &backend-env
   STORAGE_CONTAINER: ${STORAGE_CONTAINER:-contracts}
   STORAGE_LOCAL_ROOT: ${STORAGE_LOCAL_ROOT:-/var/lib/cip/storage}
   # --- parsing ---
-  # `idoc` is the active adapter: the in-house layout service, which returns real
-  # layout roles and coordinates. `pymupdf` is the local fallback. Docling is not
-  # used by this deployment and is not an accepted value.
-  ACTIVE_PARSER: ${ACTIVE_PARSER:-idoc}
+  # `adi` is the active adapter: Azure Document Intelligence `prebuilt-layout`,
+  # which returns real layout roles and coordinates. `pdfextract` - the local
+  # extractor container - is its fallback and emits the identical payload. Docling
+  # is not used by this deployment and is not an accepted value.
+  ACTIVE_PARSER: ${ACTIVE_PARSER:-adi}
   # `live` calls the PDF service; `fixture` replays a recorded response and is
   # for offline development and tests. Defaulting to fixture meant a running
   # deployment could not process any document it had not already seen - the
@@ -139,7 +140,6 @@ x-backend-env: &backend-env
   # sends a given PDF to the vendor once, ever.
   PARSER_MODE: ${PARSER_MODE:-live}
   PARSER_FIXTURE_DIR: ${PARSER_FIXTURE_DIR:-/app/storage/fixtures/parser}
-  IDOC_ENDPOINT: ${IDOC_ENDPOINT:-https://devidocapi2.iriscarbon.com/pdf/upload-pdf-to-json}
 
   # Absolute, and under the shared storage volume, deliberately. The default is
   # the relative `evaluation-results`, which the benchmark CLI writes relative to
@@ -149,9 +149,9 @@ x-backend-env: &backend-env
   # no error anywhere. An absolute path removes the whole class of confusion.
   EVALUATION_RESULTS_DIR: ${EVALUATION_RESULTS_DIR:-/app/storage/evaluation-results}
 
-  # `ACTIVE_PARSER=pdfextract` runs a local pdf_text_extractor checkout instead of
-  # the layout service. It emits the same Azure prebuilt-layout payloads, so the
-  # document pipeline is unaffected by the swap.
+  # `ACTIVE_PARSER=pdfextract` runs the local pdf_text_extractor instead of Azure.
+  # It emits the same prebuilt-layout payloads, so the document pipeline is
+  # unaffected by the swap.
   #
   # In a container the path must be a *mounted* checkout with its virtualenv built
   # for this image's platform - a .venv created on a Windows host will not run
@@ -167,12 +167,21 @@ x-backend-env: &backend-env
   # allow-list trap as the OIDC block above.
   PDFEXTRACT_URL: ${PDFEXTRACT_URL:-}
 
-  # The iDoc layout service. `IDOC_ENDPOINT` was forwarded but its API key was not,
-  # so a deployment needing one authenticated against nothing and every parse 401'd.
-  IDOC_API_KEY: ${IDOC_API_KEY:-}
-  IDOC_API_KEY_HEADER: ${IDOC_API_KEY_HEADER:-X-API-Key}
-  IDOC_TIMEOUT_SECONDS: ${IDOC_TIMEOUT_SECONDS:-600}
-  IDOC_VERIFY_TLS: ${IDOC_VERIFY_TLS:-true}
+  # Azure Document Intelligence, the default parser. Every one of these has to be
+  # listed: a value in .env that is missing from this block never reaches the
+  # container, and the adapter would then refuse to start a parse with an empty
+  # endpoint - the same allow-list trap as PDFEXTRACT_URL above.
+  #
+  # The endpoint is the resource ORIGIN; the adapter appends the operation path.
+  AZURE_DOCINTEL_ENDPOINT: ${AZURE_DOCINTEL_ENDPOINT:-}
+  AZURE_DOCINTEL_KEY: ${AZURE_DOCINTEL_KEY:-}
+  AZURE_DOCINTEL_MODEL: ${AZURE_DOCINTEL_MODEL:-prebuilt-layout}
+  # Selects the request path as well as the payload: 2024-11-30 and later are
+  # served under /documentintelligence/, 2023-07-31 under /formrecognizer/.
+  AZURE_DOCINTEL_API_VERSION: ${AZURE_DOCINTEL_API_VERSION:-2024-11-30}
+  # Budget for the whole analysis - the submit plus every poll after it.
+  AZURE_DOCINTEL_TIMEOUT_SECONDS: ${AZURE_DOCINTEL_TIMEOUT_SECONDS:-600}
+  AZURE_DOCINTEL_POLL_SECONDS: ${AZURE_DOCINTEL_POLL_SECONDS:-2.0}
 
   # --- inference and embeddings ---
   # Both providers default to Azure OpenAI: chat on AZURE_OPENAI_DEPLOYMENT and

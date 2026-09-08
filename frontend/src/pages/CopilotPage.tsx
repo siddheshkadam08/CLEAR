@@ -315,7 +315,7 @@ export function CopilotPage() {
 
   const sessionList = (
     <>
-      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
         Conversations
       </p>
       {sessionsQuery.data?.length ? (
@@ -331,13 +331,13 @@ export function CopilotPage() {
                   'block w-full rounded-xl px-3 py-2.5 text-left transition',
                   active
                     ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-100'
-                    : 'text-slate-600 hover:bg-slate-100',
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800',
                 ].join(' ')}
               >
                 <span className="block truncate text-sm font-medium">
                   {session.title ?? 'Untitled'}
                 </span>
-                <span className="mt-0.5 block text-xs text-slate-500">
+                <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
                   {formatDateTime(session.updated_at ?? session.created_at)}
                 </span>
               </button>
@@ -345,7 +345,7 @@ export function CopilotPage() {
           })}
         </div>
       ) : (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-slate-500 dark:text-slate-400">
           No conversations yet. Ask a question and one starts automatically.
         </p>
       )}
@@ -546,7 +546,7 @@ function TurnView({
 
       <Card dense>
         {turn.plan && turn.streaming && !turn.answer ? (
-          <p className="mb-3 text-xs text-slate-500">
+          <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
             Searching {humanise(turn.plan.scope)} · {humanise(turn.plan.strategy)}…
           </p>
         ) : null}
@@ -583,7 +583,7 @@ function TurnView({
               </div>
             ) : null}
 
-            <div className="text-sm leading-7 text-slate-800">
+            <div className="text-sm leading-7 text-slate-800 dark:text-slate-200">
               {/* Streaming text is rendered raw: a half-arrived `**` or an unclosed
                   table row makes the markdown parser reflow the whole answer on
                   every token. It is parsed once the stream closes. */}
@@ -601,7 +601,7 @@ function TurnView({
             </div>
 
             {turn.warnings.length && !turn.streaming ? (
-              <ul className="mt-3 space-y-1 text-xs text-slate-500">
+              <ul className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
                 {turn.warnings.map((warning, index) => (
                   <li key={index}>{warning}</li>
                 ))}
@@ -698,7 +698,7 @@ function SourceList({ turn }: { turn: Turn }) {
 
   return (
     <div className="mt-4 border-t border-slate-100 pt-4">
-      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+      <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
         Sources
       </p>
       <ol className="space-y-3">
@@ -714,8 +714,10 @@ function SourceList({ turn }: { turn: Turn }) {
               >
                 {row.title}
               </Link>
-              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500">
-                {row.heading ? <span className="font-medium text-slate-600">{row.heading}</span> : null}
+              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500 dark:text-slate-400">
+                {row.heading ? (
+                  <span className="font-medium text-slate-600 dark:text-slate-300">{row.heading}</span>
+                ) : null}
                 {row.section ? <span>Section {row.section}</span> : null}
                 {row.page ? <span>{row.page}</span> : null}
                 {row.similarity != null ? (

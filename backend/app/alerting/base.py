@@ -111,16 +111,17 @@ class AlertCategory(StrEnum):
 
 #: First-line guidance per category, included in the payload so the person woken
 #: at 03:00 has somewhere to start. Deliberately about *this* system rather than
-#: generic advice - "check IDOC_API_KEY" beats "investigate the parser".
+#: generic advice - "check AZURE_DOCINTEL_KEY" beats "investigate the parser".
 _RESOLUTIONS: dict[AlertCategory, str] = {
     AlertCategory.DOCUMENT_PROCESSING: (
         "Inspect the job's stage runs (`/api/v1/jobs/{id}`). Retry with "
         "`make reprocess job=<id> stage=<stage>` once the cause is understood."
     ),
     AlertCategory.PARSER: (
-        "Check the active parser's health (`ACTIVE_PARSER`). For `idoc`, confirm "
-        "IDOC_ENDPOINT is reachable and IDOC_API_KEY is set; the registry falls back "
-        "to `pymupdf` when it is not."
+        "Check the active parser's health (`ACTIVE_PARSER`). For `adi`, confirm "
+        "AZURE_DOCINTEL_ENDPOINT and AZURE_DOCINTEL_KEY are set and that this host's "
+        "public address is allowed by the resource's firewall; the registry falls "
+        "back to `pdfextract` when it is not."
     ),
     AlertCategory.OCR: (
         "Confirm the OCR engine is installed in the image and OCR_ENABLED is set. "

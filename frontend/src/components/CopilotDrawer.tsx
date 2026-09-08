@@ -71,14 +71,18 @@ function WaitingIndicator({ scope }: { scope: string | null }) {
     scope && elapsed < 15 ? `Searching ${scope}` : (stage?.text ?? 'Reading the contract');
 
   return (
-    <div className="flex items-center gap-2 text-xs text-slate-500" role="status" aria-live="polite">
+    <div
+      className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400"
+      role="status"
+      aria-live="polite"
+    >
       <span className="flex gap-1" aria-hidden>
         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.3s]" />
         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400 [animation-delay:-0.15s]" />
         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" />
       </span>
       <span>
-        {label}…{elapsed >= 5 ? <span className="ml-1 tabular-nums text-slate-400">{elapsed}s</span> : null}
+        {label}…{elapsed >= 5 ? <span className="ml-1 tabular-nums text-slate-400 dark:text-slate-500">{elapsed}s</span> : null}
       </span>
     </div>
   );
@@ -230,7 +234,7 @@ export function CopilotDrawer({ open, onClose, contractId, contractTitle }: Copi
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">Contract Copilot</h2>
           </div>
-          <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600">
+          <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -245,8 +249,10 @@ export function CopilotDrawer({ open, onClose, contractId, contractTitle }: Copi
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-50 to-violet-50">
                 <Bot className="h-7 w-7 text-blue-600" />
               </div>
-              <p className="text-sm font-medium text-slate-700">Ask about this contract</p>
-              <p className="max-w-xs text-xs text-slate-500">
+              <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                Ask about this contract
+              </p>
+              <p className="max-w-xs text-xs text-slate-500 dark:text-slate-400">
                 Whole questions work better than keywords — the search matches on
                 meaning, and two words carry very little of it.
               </p>
@@ -304,12 +310,12 @@ export function CopilotDrawer({ open, onClose, contractId, contractTitle }: Copi
                             answer the stream dropped - gets said out loud here
                             rather than rendering as nothing. */}
                         {!turn.streaming && !turn.answer ? (
-                          <div className="space-y-2 text-sm leading-7 text-slate-600">
+                          <div className="space-y-2 text-sm leading-7 text-slate-600 dark:text-slate-300">
                             <p>
                               I could not find wording in this contract that answers
                               that, so I would rather say so than guess.
                             </p>
-                            <p className="text-xs leading-6 text-slate-500">
+                            <p className="text-xs leading-6 text-slate-500 dark:text-slate-400">
                               Asking in a full sentence usually fixes it — “What is
                               the limitation of liability?” finds an answer where
                               “liability?” does not. If the contract was uploaded

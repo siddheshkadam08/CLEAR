@@ -269,9 +269,26 @@ async def check_database(
     ``pg_attribute`` rather than trusting the migration to have been applied. A
     schema one migration behind is the single most common cause of "search returns
     nothing" after an embedding-model change.
+
+    The lookup is schema-qualified, for the same reason the metadata carries a
+    schema (see :func:`app.db.base._configured_schema`): ``embeddings`` routinely
+    exists in more than one schema of a shared database - ``public`` left by an
+    earlier deployment, plus the configured ``DB_SCHEMA``. Matching on the table
+    name alone found both, and ``scalar_one_or_none`` turned that into
+    "Multiple rows were found when one or none was required" - reported as a
+    warning, which meant the two *fatal* checks below never ran at all. A column
+    whose width or type disagrees with the configuration would then have started
+    the API cleanly, which is precisely what those checks exist to prevent.
     """
     resolved = settings or get_settings()
     findings: list[Finding] = []
+
+    # `to_regclass` resolves the name exactly as the rest of the app does: the
+    # configured schema when there is one, otherwise the connection's
+    # search_path. It returns NULL rather than raising when nothing matches, so a
+    # missing table still falls through to the "run migrations" finding below.
+    schema = resolved.db.schema_name.strip()
+    qualified_table = f"{schema}.embeddings" if schema else "embeddings"
 
     try:
         row = (
@@ -280,14 +297,13 @@ async def check_database(
                     """
                     SELECT format_type(a.atttypid, a.atttypmod) AS coltype
                     FROM pg_attribute a
-                    JOIN pg_class c ON c.oid = a.attrelid
-                    JOIN pg_namespace n ON n.oid = c.relnamespace
-                    WHERE c.relname = 'embeddings'
+                    WHERE a.attrelid = to_regclass(:table)
                       AND a.attname = 'embedding'
                       AND a.attnum > 0
                       AND NOT a.attisdropped
                     """
-                )
+                ),
+                {"table": qualified_table},
             )
         ).scalar_one_or_none()
     except Exception as exc:  # noqa: BLE001 - a DB that is not up yet is not a config error
@@ -357,11 +373,20 @@ async def check_database(
 
     # A mixed index is worse than an empty one: vectors from two models occupy
     # unrelated spaces, so neighbours are meaningless while still being returned.
+    #
+    # Qualified for the same reason as the column lookup above: unqualified, this
+    # reads whichever `embeddings` the search_path reaches first, and the path
+    # ends in `public` so that extension-owned types resolve. An empty or absent
+    # table in our own schema would therefore be answered by another
+    # deployment's, and the models it reports back would belong to that one.
     try:
         models = (
             (
                 await db.execute(
-                    text("SELECT DISTINCT model FROM embeddings WHERE model IS NOT NULL LIMIT 5")
+                    text(
+                        f"SELECT DISTINCT model FROM {qualified_table} "  # noqa: S608 - config identifier, not user input
+                        "WHERE model IS NOT NULL LIMIT 5"
+                    )
                 )
             )
             .scalars()

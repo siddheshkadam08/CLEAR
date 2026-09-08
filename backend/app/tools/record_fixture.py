@@ -3,21 +3,24 @@
     python -m app.tools.record_fixture contract.pdf
     python -m app.tools.record_fixture *.pdf --extractor D:/pdf_text_extractor/pdf_text_extractor
 
-Pre-records a document's layout JSON as an ``idoc`` fixture, so it can be replayed
-later with ``PARSER_MODE=fixture`` and no service or extractor present at all.
+Pre-records a document's layout JSON as an ``adi`` fixture, so it can be replayed
+later with ``PARSER_MODE=fixture`` and no Azure resource or extractor present at
+all.
 
 This is *not* the way to run the extractor in the pipeline - ``ACTIVE_PARSER=pdfextract``
 does that natively, on upload, with no pre-step. Use this tool when you want the
 result committed rather than computed:
 
 * CI, which must parse the same document identically on every run and has neither
-  the iDoc service nor Tesseract installed;
+  an Azure credential nor Tesseract installed;
 * a demo machine that should not depend on a checkout being present;
 * pinning a known-good parse of a document whose extraction you are about to
   change, so a regression is visible as a diff.
 
-Writes into the ``idoc`` fixture namespace deliberately: fixtures record *what the
-layout was*, and a replay should not care which implementation produced it.
+Writes into the ``adi`` fixture namespace deliberately: fixtures record *what the
+layout was*, and a replay should not care which implementation produced it. That
+namespace is the default parser's, so a fixture recorded here is the one a default
+deployment replays.
 
 Shares :func:`~app.ai.parsers.pdfextract_adapter.split_pages` with the adapter, so
 the whole-document-to-per-page division cannot drift between the two paths.
@@ -59,7 +62,7 @@ def extract_adi(pdf: Path, extractor: Path, backend: str) -> dict[str, Any]:
             str(adi_path),
             "--adi-unit",
             # Inches: what ADI uses for PDFs, and what `source._polygon_of` and
-            # `IDocParser._coordinates` assume when converting back to points.
+            # `LayoutParser._coordinates` assume when converting back to points.
             "inch",
             "--backend",
             backend,
@@ -83,7 +86,7 @@ def record(pdf: Path, extractor: Path, backend: str) -> None:
     digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
     print(f"{pdf.name}  sha256={digest[:16]}...")
 
-    store = FixtureStore(parser="idoc")
+    store = FixtureStore(parser="adi")
     if store.load(digest) is not None:
         print("  already recorded - skipping (fixtures are never overwritten)")
         return
@@ -130,7 +133,7 @@ def main() -> int:
             continue
         record(pdf, args.extractor, args.backend)
 
-    print("\nSet PARSER_MODE=fixture so the iDoc adapter replays these.")
+    print("\nSet PARSER_MODE=fixture so the parser replays these.")
     return 0
 
 

@@ -28,7 +28,6 @@ logger = get_logger(__name__)
 
 #: Adapter constructors, imported lazily so a deployment only loads the SDK it uses.
 _FACTORIES: dict[str, str] = {
-    "idoc": "app.ai.parsers.idoc_adapter:IDocParser",
     "pdfextract": "app.ai.parsers.pdfextract_adapter:PdfTextExtractorParser",
     "pymupdf": "app.ai.parsers.pymupdf_adapter:PyMuPdfParser",
     "docx": "app.ai.parsers.docx_adapter:DocxParser",
@@ -38,21 +37,20 @@ _FACTORIES: dict[str, str] = {
 
 #: Preference order when the configured parser cannot handle a file type.
 #:
-#: ``idoc`` and ``pdfextract`` lead for PDFs, in that order: both return real layout
-#: roles and coordinates, so section structure comes from the parser rather than from
-#: font-size heuristics, and both emit the per-page layout JSON the document pipeline
-#: reads. ``pdfextract`` sits second because it is local - preferred when the service
-#: is unreachable, but the service is the one with the tuned model behind it.
+#: ``adi`` leads for PDFs and ``pdfextract`` catches it: Azure Document
+#: Intelligence has the tuned model, and the extractor container runs locally, so
+#: the chain degrades from "best available" to "no external dependency" without
+#: changing the *shape* of what comes back - both emit the per-page layout JSON the
+#: document pipeline reads, with real layout roles and coordinates, so section
+#: structure comes from the parser rather than from font-size heuristics.
 #:
-#: PyMuPDF remains the last resort: dependency-light and always present, so a
-#: degraded parse beats a failed upload. Note it produces no layout JSON, so a
-#: document that falls all the way through cannot run the document pipeline.
-#:
-#: Deliberately excludes ``adi``: it is not implemented here, and listing an
-#: unavailable parser in a fallback chain only delays the real error while making the
-#: logs harder to read.
+#: Deliberately just those two. ``pymupdf`` stays registered and selectable, but is
+#: out of the chain: it produces no layout JSON, so a document that fell through to
+#: it would parse and then strand ``docpipeline`` with nothing to pin clauses to -
+#: a failure that surfaces two stages later as missing evidence rather than as a
+#: parser problem. A deployment that wants it says so with ``ACTIVE_PARSER=pymupdf``.
 _FALLBACKS: dict[FileType, tuple[str, ...]] = {
-    FileType.PDF: ("idoc", "pdfextract", "pymupdf"),
+    FileType.PDF: ("adi", "pdfextract"),
     FileType.DOCX: ("docx",),
 }
 
