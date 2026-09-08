@@ -57,22 +57,6 @@ class ChangePasswordRequest(BaseSchema):
         return self
 
 
-class ForgotPasswordRequest(BaseSchema):
-    email: EmailStr
-
-
-class ResetPasswordRequest(BaseSchema):
-    token: str
-    new_password: str = Field(min_length=8, max_length=256)
-    confirm_password: str = Field(min_length=8, max_length=256)
-
-    @model_validator(mode="after")
-    def _validate(self) -> Self:
-        if self.new_password != self.confirm_password:
-            raise ValueError("New password and confirmation do not match")
-        return self
-
-
 class OIDCCallbackRequest(BaseSchema):
     """Authorization-code callback from the identity provider."""
 
@@ -179,14 +163,12 @@ __all__ = [
     "AuthMethodsResponse",
     "ChangePasswordRequest",
     "CurrentUser",
-    "ForgotPasswordRequest",
     "LoginRequest",
     "LogoutRequest",
     "OIDCAuthorizeResponse",
     "OIDCCallbackRequest",
     "ProjectMembershipInfo",
     "RefreshRequest",
-    "ResetPasswordRequest",
     "SessionInfo",
     "TokenResponse",
 ]

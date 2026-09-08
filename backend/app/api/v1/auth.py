@@ -26,12 +26,10 @@ from app.schemas.auth import (
     AuthMethodsResponse,
     ChangePasswordRequest,
     CurrentUser,
-    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     OIDCAuthorizeResponse,
     RefreshRequest,
-    ResetPasswordRequest,
     SessionInfo,
     TokenResponse,
 )
@@ -214,68 +212,6 @@ async def change_password(
     return MessageResponse(
         message="Password changed.",
         detail="All other sessions have been signed out. Please sign in again.",
-    )
-
-
-# =============================================================================
-# Password reset
-# =============================================================================
-#: What the request endpoint says, whatever actually happened.
-#:
-#: A single constant rather than a message built per branch, because the value of
-#: this endpoint to an attacker is entirely in the differences between its
-#: answers. Unknown address, deactivated account, Microsoft-only account and
-#: "email on its way" are one response.
-_RESET_REQUESTED = MessageResponse(
-    message="If that email address has an account, a reset link is on its way.",
-    detail="The link expires shortly and can be used once.",
-)
-
-
-@router.post(
-    "/forgot-password",
-    response_model=MessageResponse,
-    summary="Request a password reset link",
-)
-async def forgot_password(
-    payload: ForgotPasswordRequest,
-    db: DbSession,
-    info: RequestInfoDep,
-) -> MessageResponse:
-    """Start a password reset.
-
-    Public by construction - a user who has forgotten their password has no
-    session to authenticate with. Rate limited per IP in the gateway middleware,
-    because it sends mail to an address the caller chooses.
-    """
-    await AuthService(db).request_password_reset(email=payload.email, ip=info.ip)
-    return _RESET_REQUESTED
-
-
-@router.post(
-    "/reset-password",
-    response_model=MessageResponse,
-    summary="Set a new password using a reset link",
-    responses={401: {"description": "The reset link is invalid, expired or already used"}},
-)
-async def reset_password(
-    payload: ResetPasswordRequest,
-    response: Response,
-    db: DbSession,
-    info: RequestInfoDep,
-) -> MessageResponse:
-    await AuthService(db).reset_password(
-        token=payload.token,
-        new_password=payload.new_password,
-        ip=info.ip,
-    )
-    # Every session was revoked. This browser has no session yet, but it may still
-    # hold a stale refresh cookie from before the reset - clear it so the next
-    # sign-in starts clean instead of failing a refresh against a dead token.
-    _clear_refresh_cookie(response)
-    return MessageResponse(
-        message="Password updated.",
-        detail="You can now sign in with your new password.",
     )
 
 

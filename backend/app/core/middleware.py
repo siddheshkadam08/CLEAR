@@ -203,15 +203,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ("/auth/login", "rate_limit_login"),
         ("/auth/refresh", "rate_limit_login"),
         ("/auth/oidc", "rate_limit_login"),
-        # Far tighter than the rest: this one sends mail to an address the caller
-        # chooses, so abuse lands in someone else's inbox rather than costing the
-        # caller anything. The service applies a second, per-address limit - this
-        # bucket keys on IP alone, which one attacker with a dial-up of addresses
-        # would otherwise walk straight through.
-        ("/auth/forgot-password", "rate_limit_password_reset"),
-        # Redemption is guarded by the token signature, so this only needs to stop
-        # the endpoint being free to hammer.
-        ("/auth/reset-password", "rate_limit_login"),
     )
 
     async def dispatch(self, request: Request, call_next: Handler) -> Response:

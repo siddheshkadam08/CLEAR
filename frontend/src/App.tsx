@@ -24,11 +24,7 @@ import { AuthCallbackPage } from '@/pages/AuthCallbackPage';
 // `must_change_password` can reach, so a failed lazy chunk would strand them with
 // no way to clear the flag and no way to use anything else.
 import { ChangePasswordPage } from '@/pages/ChangePasswordPage';
-// Static for the same reason: these two are reached from an email by someone who
-// cannot sign in, so a failed lazy chunk would leave them with no route back.
-import { ForgotPasswordPage } from '@/pages/ForgotPasswordPage';
 import { LoginPage } from '@/pages/LoginPage';
-import { ResetPasswordPage } from '@/pages/ResetPasswordPage';
 
 const AdminProjectsPage = lazy(() =>
   import('@/pages/admin/AdminProjectsPage').then((m) => ({ default: m.AdminProjectsPage })),
@@ -188,12 +184,6 @@ export default function App() {
           a session, and guarding it would bounce them back to the login screen
           in a loop. */}
       <Route path="/auth/callback" element={<AuthCallbackPage />} />
-      {/* Also public, and for the same reason: someone who has forgotten their
-          password has no session to guard. The reset route must stay declared —
-          the catch-all below redirects anything unknown to `/`, which would make
-          a perfectly good link from an email look broken. */}
-      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route element={<ProtectedRoute />}>
         {/* Outside AppShell: a user who must change their password cannot use the
             navigation the shell renders, and showing it would offer links that

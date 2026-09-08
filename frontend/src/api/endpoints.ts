@@ -101,25 +101,6 @@ export const auth = {
       confirm_password,
     }),
 
-  /**
-   * Ask for a reset link.
-   *
-   * `skipRefresh` on both of these: the caller has no session by definition, so
-   * the client's automatic refresh-and-retry on 401 would spend a round trip
-   * failing and then report the refresh error instead of the real one.
-   *
-   * The response is deliberately the same whether or not the address is
-   * registered — do not branch on it.
-   */
-  forgotPassword: (email: string) =>
-    api.post<MessageResponse>('/auth/forgot-password', { email }, { skipRefresh: true }),
-
-  resetPassword: (token: string, new_password: string, confirm_password: string) =>
-    api.post<MessageResponse>(
-      '/auth/reset-password',
-      { token, new_password, confirm_password },
-      { skipRefresh: true },
-    ),
 };
 
 // =============================================================================

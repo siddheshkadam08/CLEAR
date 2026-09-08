@@ -295,21 +295,9 @@ class SecuritySettings(BaseSettings):
     ] = "argon2"  # noqa: S105 - an algorithm name, not a credential
     password_min_length: Annotated[int, Field(validation_alias="PASSWORD_MIN_LENGTH", ge=8)] = 8
 
-    #: How long a password-reset link stays valid. Short, because the link is a
-    #: bearer credential sitting in a mailbox; long enough to survive a mail queue.
-    password_reset_token_ttl_minutes: Annotated[
-        int, Field(validation_alias="PASSWORD_RESET_TOKEN_TTL_MINUTES", ge=5, le=1440)
-    ] = 60
-
     rate_limit_enabled: Annotated[bool, Field(validation_alias="RATE_LIMIT_ENABLED")] = True
     rate_limit_default: Annotated[str, Field(validation_alias="RATE_LIMIT_DEFAULT")] = "120/minute"
     rate_limit_login: Annotated[str, Field(validation_alias="RATE_LIMIT_LOGIN")] = "10/minute"
-    #: Deliberately far tighter than the login bucket: this endpoint sends mail to
-    #: an address the caller chooses, so abuse costs someone else an inbox.
-    rate_limit_password_reset: Annotated[
-        str, Field(validation_alias="RATE_LIMIT_PASSWORD_RESET")
-    ] = "5/hour"  # noqa: S105 - a rate, not a credential; the field name trips the check
-
     # Shared secret the queue shim presents to /internal/* endpoints.
     internal_api_token: Annotated[str, Field(validation_alias="INTERNAL_API_TOKEN")] = (
         "change-me-internal-token"  # noqa: S105 - placeholder; production boot rejects it

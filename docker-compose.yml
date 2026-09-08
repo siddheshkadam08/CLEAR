@@ -60,21 +60,6 @@ x-backend-env: &backend-env
   UPLOAD_DUPLICATE_CHECK: ${UPLOAD_DUPLICATE_CHECK:-false}
   JWT_SECRET: ${JWT_SECRET:-change-me-in-production-use-openssl-rand-hex-32}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-  # Where the SPA lives, for links that go into an email. Forwarded for the same
-  # allow-list reason as everything else here: unset, every password-reset link
-  # points at localhost and is useless to the person who received it.
-  FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
-  PASSWORD_RESET_TOKEN_TTL_MINUTES: ${PASSWORD_RESET_TOKEN_TTL_MINUTES:-60}
-  RATE_LIMIT_PASSWORD_RESET: ${RATE_LIMIT_PASSWORD_RESET:-5/hour}
-  # Outbound email for password resets. With SMTP_HOST empty the application logs
-  # the link instead of sending it, which is the intended state until a relay is
-  # available - it is not a failure.
-  SMTP_HOST: ${SMTP_HOST:-}
-  SMTP_PORT: ${SMTP_PORT:-587}
-  SMTP_USERNAME: ${SMTP_USERNAME:-}
-  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-  SMTP_FROM: ${SMTP_FROM:-}
-  SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
   # The `Secure` flag on the refresh cookie, defaulted to its secure value.
   #
   # Forwarded because this block is an allow-list: without the line, setting

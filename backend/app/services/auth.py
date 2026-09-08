@@ -20,16 +20,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from functools import lru_cache
-from html import escape
 from typing import Any
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import metrics
-from app.core.cache import cache_get, cache_set, make_key
 from app.core.config import get_settings
-from app.core.enums import AuditAction, AuthProvider, RoleName
+from app.core.enums import AuthProvider, RoleName
 from app.core.errors import (
     ForbiddenError,
     InvalidCredentialsError,
@@ -42,19 +40,15 @@ from app.core.logging import get_logger
 from app.core.security import (
     create_access_token,
     create_nonce,
-    create_password_reset_token,
     create_pkce_verifier,
     create_refresh_token,
     create_signed_state,
-    decode_token,
-    equalise_password_timing,
     hash_password,
     hash_token,
     needs_rehash,
     pkce_challenge,
     validate_password_strength,
     verify_password,
-    verify_password_reset_token,
     verify_signed_state,
 )
 from app.models.identity import User
@@ -69,14 +63,8 @@ from app.schemas.auth import (
     TokenResponse,
 )
 from app.services.audit import AuditService
-from app.services.mailer import send_mail
 
 logger = get_logger(__name__)
-
-#: How long one email address is left alone after a reset request. Long enough
-#: that a mailbox cannot be flooded, short enough that a user who deleted the
-#: first mail by accident is not locked out of trying again.
-_RESET_COOLDOWN_SECONDS = 120
 
 #: Entra error codes that mean "the silent attempt could not complete, ask the
 #: user". Anything else is a real failure and must not be retried - retrying a
@@ -615,125 +603,6 @@ class AuthService:
             user_id=user.id,
             user_email=user.email,
             after={"password_changed": True, "sessions_revoked": revoked},
-            ip=ip,
-        )
-
-    async def request_password_reset(self, *, email: str, ip: str | None = None) -> None:
-        """Email a reset link, if that address belongs to a resettable account.
-
-        Returns nothing in every case, and the endpoint says the same thing in
-        every case. Whether an address is registered is exactly the fact an
-        attacker wants from this endpoint, so the three outcomes - unknown
-        address, SSO-only account, link sent - are indistinguishable from
-        outside. `equalise_password_timing` burns the same CPU a real mint costs so the
-        answer is not readable from response timing either, which is the same
-        trick the login path uses.
-        """
-        # A second limit, keyed on the *address* rather than the caller's IP. The
-        # gateway bucket cannot tell that one attacker rotating IPs is mailing the
-        # same person over and over, and the mailbox is what suffers. Set for
-        # unknown addresses too, so the throttle itself reveals nothing.
-        cooldown_key = make_key("pwdreset", email.strip().lower())
-        if await cache_get(cooldown_key, cache_name="auth") is not None:
-            equalise_password_timing(email)
-            logger.info("password_reset_throttled_for_address", ip=ip)
-            return
-        await cache_set(cooldown_key, True, ttl=_RESET_COOLDOWN_SECONDS, cache_name="auth")
-
-        user = await self.users.get_by_email(email)
-
-        if user is None or not user.is_active or user.password_hash is None:
-            equalise_password_timing(email)
-            logger.info(
-                "password_reset_requested_no_action",
-                # Deliberately not the address: this log line would otherwise be
-                # the enumeration oracle the endpoint is careful not to be.
-                reason=(
-                    "unknown"
-                    if user is None
-                    else ("inactive" if not user.is_active else "sso_only")
-                ),
-                ip=ip,
-            )
-            return
-
-        token = create_password_reset_token(user.id, password_hash=user.password_hash)
-        settings = get_settings()
-        link = f"{settings.frontend_base_url.rstrip('/')}/reset-password?token={token}"
-        minutes = settings.security.password_reset_token_ttl_minutes
-
-        await send_mail(
-            to=user.email,
-            subject="Reset your iRIS CLEAR password",
-            text=(
-                f"Hello {user.full_name or ''},\n\n"
-                "We received a request to reset your iRIS CLEAR password.\n\n"
-                f"Open this link to choose a new one:\n{link}\n\n"
-                f"The link expires in {minutes} minutes and can be used once.\n\n"
-                "If you did not ask for this, you can ignore this message - your "
-                "password has not changed.\n"
-            ),
-            html=(
-                f"<p>Hello {escape(user.full_name or '')},</p>"
-                "<p>We received a request to reset your iRIS CLEAR password.</p>"
-                f'<p><a href="{escape(link)}">Choose a new password</a></p>'
-                f"<p>The link expires in {minutes} minutes and can be used once.</p>"
-                "<p>If you did not ask for this, you can ignore this message — "
-                "your password has not changed.</p>"
-            ),
-            fallback_log_body=link,
-        )
-
-        await self.audit.record(
-            action=AuditAction.UPDATE,
-            entity_type="user",
-            entity_id=user.id,
-            entity_label=user.email,
-            user_id=user.id,
-            user_email=user.email,
-            after={"password_reset_requested": True},
-            ip=ip,
-        )
-
-    async def reset_password(
-        self,
-        *,
-        token: str,
-        new_password: str,
-        ip: str | None = None,
-    ) -> None:
-        """Redeem a reset link and set a new password."""
-        payload = decode_token(token, expected_type="password_reset")
-        try:
-            user_id = uuid.UUID(str(payload.get("sub")))
-        except (TypeError, ValueError):
-            raise TokenInvalidError("This password reset link is not valid.") from None
-
-        user = await self.users.get(user_id)
-        # One message for every way this can fail. A distinct "no such account"
-        # would hand back the account existence the request step refused to give.
-        if user is None or not user.is_active or user.password_hash is None:
-            raise TokenInvalidError("This password reset link is not valid.")
-
-        # Re-checks the token against the *current* password, so redeeming it
-        # here invalidates it - as does any other change to the password.
-        verify_password_reset_token(token, password_hash=user.password_hash)
-
-        validate_password_strength(new_password)
-        await self.users.set_password(user, hash_password(new_password), must_change=False)
-
-        # Whoever prompted the reset may already hold a session.
-        revoked = await self.tokens.revoke_all_for_user(user.id)
-        logger.info("password_reset_completed", user_id=str(user.id), sessions_revoked=revoked)
-
-        await self.audit.record(
-            action=AuditAction.UPDATE,
-            entity_type="user",
-            entity_id=user.id,
-            entity_label=user.email,
-            user_id=user.id,
-            user_email=user.email,
-            after={"password_reset": True, "sessions_revoked": revoked},
             ip=ip,
         )
 

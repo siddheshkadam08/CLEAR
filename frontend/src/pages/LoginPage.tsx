@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { auth as authApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
@@ -213,12 +213,12 @@ export function LoginPage() {
                   <label htmlFor="login-password" style={{ display: 'block', fontSize: '13px', fontWeight: 500, color: '#0F172A' }}>
                     Password
                   </label>
-                  <Link
-                    to="/forgot-password"
-                    style={{ fontSize: '12.5px', fontWeight: 500, color: '#2563EB', textDecoration: 'none' }}
-                  >
-                    Forgot password?
-                  </Link>
+                  {/* There is no self-service reset. Saying so here is the point:
+                      without it a locked-out user retries the same password until
+                      the account locks, and never learns who can help. */}
+                  <span style={{ fontSize: '12.5px', color: '#5B6478' }}>
+                    Forgot it? Ask an admin to reset it.
+                  </span>
                 </div>
                 <input
                   id="login-password"
