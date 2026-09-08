@@ -883,11 +883,11 @@ function MetaInfoTab({
                 Open clause
               </Button>
             ) : null}
-            {section.clause?.evidence?.bounding_boxes?.length ? (
+            {section.clause?.bounding_boxes?.length ? (
               <EvidenceButton
                 onClick={() =>
                   onShowEvidence(
-                    section.clause?.evidence?.bounding_boxes ?? [],
+                    section.clause?.bounding_boxes ?? [],
                     section.clause?.page_start,
                   )
                 }
