@@ -1371,6 +1371,10 @@ SUPPORTING_CLAUSE_SEEDS: tuple[ClauseSeed, ...] = (
         group_name="Compliance",
         mandatory=False,
         missing_severity=RiskSeverity.HIGH,
+        # The headings and keywords were GDPR-shaped, which is the wrong default for
+        # an Indian deployment: a clause headed "Digital Personal Data Protection Act,
+        # 2023" and drafted in DPDP's vocabulary - Data Fiduciary, Data Principal -
+        # shares almost no wording with a GDPR clause and was being missed.
         extraction_rule=_rule(
             headings=[
                 "data protection",
@@ -1378,6 +1382,9 @@ SUPPORTING_CLAUSE_SEEDS: tuple[ClauseSeed, ...] = (
                 "personal data",
                 "gdpr",
                 "data processing",
+                "digital personal data protection",
+                "dpdp",
+                "dpdpa",
             ],
             keywords=[
                 "personal data",
@@ -1387,15 +1394,37 @@ SUPPORTING_CLAUSE_SEEDS: tuple[ClauseSeed, ...] = (
                 "processing of data",
                 "data subject",
                 "sub-processor",
+                # DPDP Act vocabulary. The Act names the same two roles differently,
+                # so without these a compliant Indian clause reads as no clause.
+                "data fiduciary",
+                "data principal",
+                "significant data fiduciary",
+                "consent manager",
+                "digital personal data",
             ],
         ),
-        synonyms=["Privacy", "GDPR Compliance", "Data Processing", "Data Processing Addendum"],
+        synonyms=[
+            "Privacy",
+            "GDPR Compliance",
+            "Data Processing",
+            "Data Processing Addendum",
+            "DPDP Compliance",
+            "Digital Personal Data Protection Act",
+        ],
         output_schema=_schema(
-            our_role=_string("Our role: controller, processor, joint_controller, none."),
+            our_role=_string(
+                "Our role: controller, processor, joint_controller, none. Under the "
+                "DPDP Act read Data Fiduciary as controller and Data Processor as "
+                "processor."
+            ),
             regulations={
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Named regimes: GDPR, UK_GDPR, CCPA, HIPAA, DPDP.",
+                "description": (
+                    "Named regimes, e.g. GDPR, UK_GDPR, CCPA, HIPAA, DPDPA. Use DPDPA "
+                    "for India's Digital Personal Data Protection Act 2023, however "
+                    "the clause spells it."
+                ),
             },
             has_dpa=_boolean("True when a data processing agreement is incorporated."),
             breach_notice_hours=_integer("Hours within which a breach must be notified."),

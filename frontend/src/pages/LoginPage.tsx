@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 
 import { auth as authApi } from '@/api/endpoints';
 import { errorMessage } from '@/api/errors';
@@ -209,9 +209,17 @@ export function LoginPage() {
               </div>
 
               <div>
-                <label htmlFor="login-password" style={{ display: 'block', fontSize: '13px', fontWeight: 500, color: '#0F172A', marginBottom: '6px' }}>
-                  Password
-                </label>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <label htmlFor="login-password" style={{ display: 'block', fontSize: '13px', fontWeight: 500, color: '#0F172A' }}>
+                    Password
+                  </label>
+                  <Link
+                    to="/forgot-password"
+                    style={{ fontSize: '12.5px', fontWeight: 500, color: '#2563EB', textDecoration: 'none' }}
+                  >
+                    Forgot password?
+                  </Link>
+                </div>
                 <input
                   id="login-password"
                   className="clear-field-input"

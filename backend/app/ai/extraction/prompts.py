@@ -368,17 +368,23 @@ class ExtractionPromptBuilder:
         clauses: list[ExtractedClause],
         parties: list[ExtractedParty],
         risk_notes: list[str],
+        clause_labels: dict[str, str] | None = None,
     ) -> PromptSpec:
-        """Executive summary, written from extracted facts only.
+        """Executive summary and the clause-by-clause digest, from extracted facts.
 
         The evidence here is the extraction output rather than the document, which is
         deliberate: a summary written from raw text can assert a term that extraction
         did not find, and then the summary and the clause list disagree with each
         other in front of the reviewer.
+
+        ``clause_labels`` maps a clause key to its Clause Master display name, so the
+        headings in the digest match the tab names the reviewer sees rather than the
+        model's own paraphrase of them.
         """
+        labels = clause_labels or {}
         lines = [
             "TASK: Write an executive summary of this agreement for a reviewer who has "
-            "not read it.",
+            "not read it, then a clause-by-clause digest in plain English.",
             "",
             "Use only the extracted facts below. Do not add commercial or legal "
             "commentary that these facts do not support, and do not restate a term "
@@ -401,17 +407,47 @@ class ExtractionPromptBuilder:
             for party in parties
         ] or ["- none identified"]
 
+        # One entry per clause *category*, not per extracted row: a contract with
+        # three confidentiality paragraphs is still one line in the reviewer's
+        # summary table, and asking for three would produce three near-duplicates.
+        grouped: dict[str, list[ExtractedClause]] = {}
+        for clause in clauses:
+            grouped.setdefault(clause.clause_type, []).append(clause)
+
         lines += ["", "EXTRACTED TERMS:"]
-        lines += [
-            f"- {clause.clause_type}"
-            + (f" (clause {clause.clause_number})" if clause.clause_number else "")
-            + f": {clause.summary or clause.text[:160]}"
-            for clause in clauses
-        ] or ["- none extracted"]
+        for key, rows in grouped.items():
+            numbers = [row.clause_number for row in rows if row.clause_number]
+            label = labels.get(key) or key.replace("_", " ").title()
+            head = f"- [{key}] {label}"
+            if numbers:
+                head += f" (clause {', '.join(numbers)})"
+            lines.append(head + ":")
+            lines += [f"    {row.summary or row.text[:200]}" for row in rows]
+        if not grouped:
+            lines.append("- none extracted")
 
         if risk_notes:
             lines += ["", "RISK FINDINGS:"]
             lines += [f"- {note}" for note in risk_notes]
+
+        lines += [
+            "",
+            "CLAUSE DIGEST RULES:",
+            "- Produce exactly one `clause_digest` entry for each bracketed key in "
+            "EXTRACTED TERMS, in the same order. Copy the key verbatim.",
+            "- A clause that is not listed above was not found in this document. "
+            "Never add an entry for it and never write that it is missing.",
+            "- Use the display name given after the key as the `heading`, unless a "
+            "more specific one is obvious from the extracted text.",
+            "- Write `lines` for a business reader, not a lawyer: say who must do "
+            "what, who carries the risk, and what the figures and deadlines are. "
+            "Prefer 'Either party can end the agreement with 30 days notice' over "
+            "'termination may be effected upon thirty (30) days written notice'.",
+            "- Give the amounts, periods and party names that were extracted. A "
+            "digest line that could describe any contract is of no use.",
+            "- `parties_background` names who is involved and what the agreement is "
+            "for, in one or two sentences.",
+        ]
 
         return PromptSpec(
             prompt_id="summary.document",

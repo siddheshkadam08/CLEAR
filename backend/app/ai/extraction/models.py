@@ -225,12 +225,35 @@ class ExtractedRelationship(ExtractedItem):
 
 
 @dataclass(slots=True)
+class ClauseDigestRow:
+    """One row of the clause-by-clause summary table.
+
+    Kept structured rather than folded into the prose summary because the table is
+    rendered, and because ``contract_metadata.summary`` has other jobs - it is the
+    document-level embedding input and the full-text search target, both of which a
+    table degrades. The prose stays there; these rows go to
+    ``contract_summaries.sections``.
+    """
+
+    clause_key: str
+    heading: str
+    lines: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"clause_key": self.clause_key, "heading": self.heading, "lines": list(self.lines)}
+
+
+@dataclass(slots=True)
 class ContractFacts:
     """Document-level facts, as they land on ``contract_metadata``."""
 
     title: str | None = None
     summary: str | None = None
     executive_summary: str | None = None
+    #: Plain-English "who and what", the first row of the summary table.
+    parties_background: str | None = None
+    #: One row per clause category actually found. Never carries an absent clause.
+    clause_digest: list[ClauseDigestRow] = field(default_factory=list)
     key_topics: list[str] = field(default_factory=list)
     party_a: str | None = None
     party_b: str | None = None
@@ -441,6 +464,7 @@ class ExtractionResult:
 
 __all__ = [
     "CategoryOutcome",
+    "ClauseDigestRow",
     "ContractFacts",
     "EvidenceRef",
     "ExtractedClause",

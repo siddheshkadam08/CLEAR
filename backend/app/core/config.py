@@ -295,9 +295,20 @@ class OIDCSettings(BaseSettings):
 
     enabled: Annotated[bool, Field(validation_alias="OIDC_ENABLED")] = False
     provider: Annotated[str, Field(validation_alias="OIDC_PROVIDER")] = "microsoft"
+    #: How long a password-reset link stays valid. Short, because the link is a
+    #: bearer credential sitting in a mailbox; long enough to survive a mail queue.
+    password_reset_token_ttl_minutes: Annotated[
+        int, Field(validation_alias="PASSWORD_RESET_TOKEN_TTL_MINUTES", ge=5, le=1440)
+    ] = 60
+
     tenant_id: Annotated[str, Field(validation_alias="AZURE_AD_TENANT_ID")] = ""
     client_id: Annotated[str, Field(validation_alias="AZURE_AD_CLIENT_ID")] = ""
     client_secret: Annotated[str, Field(validation_alias="AZURE_AD_CLIENT_SECRET")] = ""
+    #: Deliberately far tighter than the login bucket: this endpoint sends mail to
+    #: an address the caller chooses, so abuse costs someone else an inbox.
+    rate_limit_password_reset: Annotated[
+        str, Field(validation_alias="RATE_LIMIT_PASSWORD_RESET")
+    ] = "5/hour"  # noqa: S105 - a rate, not a credential; the field name trips the check
     redirect_uri: Annotated[str, Field(validation_alias="OIDC_REDIRECT_URI")] = (
         "http://localhost:8000/api/v1/auth/oidc/callback"
     )
@@ -1386,6 +1397,17 @@ class Settings(BaseSettings):
         "00000000-0000-0000-0000-000000000001"
     )
     organization_name: Annotated[str, Field(validation_alias="ORGANIZATION_NAME")] = "IRIS RegTech"
+
+    #: Where the SPA is served from, used to build links that land in a browser -
+    #: currently the password-reset email.
+    #:
+    #: Deliberately its own setting rather than the first entry of `cors_origins`:
+    #: that list is an allow-list of origins permitted to *call* the API, it is
+    #: routinely several entries long, and its order carries no meaning. Guessing
+    #: from it would send users a link to whichever host happened to be listed first.
+    frontend_base_url: Annotated[str, Field(validation_alias="FRONTEND_BASE_URL")] = (
+        "http://localhost:5173"
+    )
 
     #: Legal names and aliases by which this organisation appears in contracts.
     #: Extraction matches party names against these to decide which side of an

@@ -39,12 +39,15 @@ import {
 import { errorMessage } from '@/api/errors';
 import type {
   BoundingBox,
+  Clause,
   ContractDetail,
+  ContractKnowledge,
   KeyDate,
   Obligation,
   Party,
   Risk,
   RiskAssessment,
+  SummaryRow,
   UUID,
 } from '@/api/types';
 import { ClausePanel } from '@/components/ClausePanel';
@@ -65,11 +68,13 @@ import {
   formatDate,
   formatDateTimeFull,
   formatMoney,
+  formatStage,
   humanise,
 } from '@/lib/format';
 
 type FixedTab =
   | 'overview'
+  | 'meta_info'
   | 'risks'
   | 'obligations'
   | 'dates'
@@ -209,6 +214,7 @@ export function ContractDetailPage() {
   const tabs = useMemo(() => {
     const fixed: Array<{ key: FixedTab; label: string; count?: number }> = [
       { key: 'overview', label: 'Overview' },
+      { key: 'meta_info', label: 'Meta info' },
       { key: 'risks', label: 'Risks', count: knowledge?.assessment.risks.length },
       { key: 'obligations', label: 'Obligations', count: knowledge?.obligations.length },
       { key: 'dates', label: 'Key dates', count: knowledge?.key_dates.length },
@@ -266,8 +272,12 @@ export function ContractDetailPage() {
           {/* An `h2`, under the shell's "Contracts": this is the one heading the
               layout cannot know, so it sits below the screen's name rather than
               competing with it. */}
-          <h2 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
-            {contract.title ?? contract.original_file_name}
+          {/* The uploaded file name, matching the repository list. */}
+          <h2
+            className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl"
+            title={contract.original_file_name}
+          >
+            {contract.original_file_name}
           </h2>
           
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
@@ -311,7 +321,7 @@ export function ContractDetailPage() {
         <Card dense>
           <div className="flex items-center justify-between gap-3">
             <span className="text-sm font-medium text-slate-700">
-              Processing — {humanise(contract.processing.current_stage)}
+              Processing — {formatStage(contract.processing.current_stage)}
             </span>
             <span className="font-mono text-sm tabular-nums text-slate-500">
               {contract.processing.progress}%
@@ -451,10 +461,17 @@ export function ContractDetailPage() {
               <OverviewTab
                 contract={contract}
                 summary={knowledge?.summary}
-                topics={knowledge?.key_topics ?? []}
+                summaryRows={knowledge?.summary_rows ?? []}
                 missing={knowledge?.assessment.missing_mandatory_clauses ?? []}
                 unlimited={knowledge?.assessment.has_unlimited_liability ?? false}
                 onOpenTab={setActive}
+              />
+            ) : active === 'meta_info' ? (
+              <MetaInfoTab
+                contract={contract}
+                knowledge={knowledge}
+                onOpenTab={setActive}
+                onShowEvidence={showEvidence}
               />
             ) : active === 'risks' ? (
               <RisksTab assessment={knowledge?.assessment} onShowEvidence={showEvidence} />
@@ -489,7 +506,7 @@ export function ContractDetailPage() {
         open={copilotOpen}
         onClose={() => setCopilotOpen(false)}
         contractId={contractId}
-        contractTitle={contract.title ?? contract.original_file_name}
+        contractTitle={contract.original_file_name}
       />
     </div>
   );
@@ -571,20 +588,359 @@ const EvidenceButton = ({
   </Button>
 );
 
+/**
+ * The clause-by-clause summary.
+ *
+ * A real table rather than a list of headed paragraphs: reviewers scan the left
+ * column for the clause they care about, and prose defeats that. Each row that
+ * names a clause is clickable through to that clause's tab, so the summary is a
+ * route into the evidence rather than a dead end.
+ *
+ * Rows arrive already filtered to clauses the document contains — an absent
+ * clause is not rendered as an empty row, because a blank cell reads as "we found
+ * nothing to say" rather than "this is not in the contract".
+ */
+function SummaryTable({
+  rows,
+  onOpenTab,
+}: {
+  rows: SummaryRow[];
+  onOpenTab: (key: string) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700">
+      <table className="w-full border-collapse text-left align-top">
+        <tbody>
+          {rows.map((row, index) => {
+            const linkable = Boolean(row.clause_key);
+            return (
+              <tr
+                key={`${row.clause_key ?? 'background'}-${index}`}
+                className={[
+                  'border-b border-slate-200 last:border-b-0 dark:border-slate-700',
+                  index % 2 ? 'bg-slate-50/60 dark:bg-slate-800/40' : '',
+                ].join(' ')}
+              >
+                <th
+                  scope="row"
+                  className="w-[34%] border-r border-slate-200 px-4 py-3 align-top text-sm font-semibold text-slate-900 dark:border-slate-700 dark:text-slate-100 sm:w-[30%]"
+                >
+                  {linkable ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenTab(row.clause_key as string)}
+                      className="text-left underline decoration-slate-300 underline-offset-2 transition hover:text-blue-600 hover:decoration-blue-400 dark:decoration-slate-600"
+                      title="Open this clause"
+                    >
+                      {row.heading}
+                    </button>
+                  ) : (
+                    row.heading
+                  )}
+                </th>
+                <td className="px-4 py-3 align-top text-sm leading-6 text-slate-700 dark:text-slate-300">
+                  {row.lines.map((line, lineIndex) => (
+                    <p key={lineIndex} className={lineIndex ? 'mt-1' : undefined}>
+                      {line}
+                    </p>
+                  ))}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/**
+ * The provisions a reviewer is asked about first — liability, indemnity,
+ * privacy, confidentiality, term — gathered from wherever the pipeline happens
+ * to have put them.
+ *
+ * Everything here is already extracted; the value of the tab is that it is in one
+ * place. The values come from three sources and the difference matters when one
+ * looks wrong: `contract_metadata` columns, the derived `metadata.extra` blob,
+ * and clause `attributes` read straight off the clause rows. Each row links to
+ * the clause it came from, so a disputed value is one click from its evidence.
+ *
+ * A field with nothing behind it renders as an em dash rather than being hidden:
+ * "the contract does not say" and "we did not look" are different answers, and
+ * dropping the row would conflate them.
+ */
+function MetaInfoTab({
+  contract,
+  knowledge,
+  onOpenTab,
+  onShowEvidence,
+}: {
+  contract: ContractDetail;
+  knowledge?: ContractKnowledge;
+  onOpenTab: (key: string) => void;
+  onShowEvidence: (boxes: BoundingBox[], page?: number | null) => void;
+}) {
+  const metadata = contract.contract_metadata;
+  const extra = metadata?.extra ?? {};
+
+  /** First extracted clause of a category, wherever it was listed. */
+  const clauseOf = (key: string): Clause | undefined =>
+    knowledge?.tabs.find((tab) => tab.key === key)?.clauses[0] ??
+    knowledge?.clauses.find((clause) => clause.clause_type === key);
+
+  const liability = clauseOf('limitation_of_liability');
+  const indemnity = clauseOf('indemnification');
+  const confidentiality = clauseOf('confidentiality');
+  const privacy = clauseOf('data_protection');
+  const survival = clauseOf('survival');
+  const termination = clauseOf('termination_for_convenience');
+
+  const attr = (clause: Clause | undefined, field: string): unknown =>
+    clause?.attributes?.[field];
+
+  const carveOuts = (extra.liability_carve_outs ?? attr(liability, 'carve_outs')) as
+    | string[]
+    | null
+    | undefined;
+
+  const capBasis = (extra.liability_cap_basis ?? attr(liability, 'cap_basis')) as
+    | string
+    | null
+    | undefined;
+
+  const survivalYears =
+    (attr(confidentiality, 'survival_years') as number | null | undefined) ??
+    (attr(survival, 'survival_period_years') as number | null | undefined);
+
+  const sections: Array<{
+    title: string;
+    subtitle: string;
+    clauseKey?: string;
+    clause?: Clause;
+    fields: Array<{ label: string; value: ReactNode }>;
+  }> = [
+    {
+      title: 'Limitation of liability',
+      subtitle: 'How far exposure is capped, and what escapes the cap.',
+      clauseKey: 'limitation_of_liability',
+      clause: liability,
+      fields: [
+        {
+          label: 'Liability cap',
+          value: metadata?.has_unlimited_liability ? (
+            <Badge text="Unlimited" variant="danger" />
+          ) : metadata?.has_liability_cap ? (
+            <Badge text="Capped" variant="success" />
+          ) : (
+            '—'
+          ),
+        },
+        { label: 'Cap basis', value: capBasis ? humanise(capBasis) : '—' },
+        {
+          label: 'Cap multiple',
+          value:
+            extra.liability_cap_multiple != null ? `${extra.liability_cap_multiple}x` : '—',
+        },
+        {
+          label: 'Cap amount',
+          value: formatMoney(metadata?.liability_cap_amount, metadata?.currency),
+        },
+        {
+          label: 'Excludes consequential loss',
+          value: yesNo(attr(liability, 'excludes_consequential_damages')),
+        },
+        { label: 'Mutual', value: yesNo(attr(liability, 'is_mutual')) },
+        {
+          label: 'Carve-outs',
+          value: carveOuts?.length ? (
+            <div className="flex flex-wrap gap-1.5">
+              {carveOuts.map((item) => (
+                <Badge key={item} text={humanise(item)} variant="warning" />
+              ))}
+            </div>
+          ) : (
+            '—'
+          ),
+        },
+      ],
+    },
+    {
+      title: 'Indemnity',
+      subtitle: 'Who defends whom, and whether that promise is itself capped.',
+      clauseKey: 'indemnification',
+      clause: indemnity,
+      fields: [
+        { label: 'Posture', value: textOf(attr(indemnity, 'posture')) },
+        { label: 'Indemnifying party', value: textOf(attr(indemnity, 'indemnifying_party')) },
+        { label: 'Indemnified party', value: textOf(attr(indemnity, 'indemnified_party')) },
+        { label: 'Mutual', value: yesNo(attr(indemnity, 'is_mutual')) },
+        { label: 'Capped', value: yesNo(attr(indemnity, 'is_capped')) },
+        { label: 'Duty to defend', value: yesNo(attr(indemnity, 'requires_defence')) },
+      ],
+    },
+    {
+      title: 'Data privacy',
+      subtitle: 'Which regime applies, and the obligations that follow from it.',
+      clauseKey: 'data_protection',
+      clause: privacy,
+      fields: [
+        {
+          label: 'Clause present',
+          value: metadata?.has_data_protection_clause ? (
+            <Badge text="Yes" variant="success" />
+          ) : (
+            <Badge text="Not found" variant="warning" />
+          ),
+        },
+        { label: 'Regulations', value: listOf(attr(privacy, 'regulations')) },
+        { label: 'Our role', value: textOf(attr(privacy, 'our_role')) },
+        { label: 'Processing agreement', value: yesNo(attr(privacy, 'has_dpa')) },
+        {
+          label: 'Breach notice',
+          value: numberWith(attr(privacy, 'breach_notice_hours'), 'hours'),
+        },
+        {
+          label: 'Cross-border transfer',
+          value: yesNo(attr(privacy, 'cross_border_transfer_permitted')),
+        },
+      ],
+    },
+    {
+      title: 'Confidentiality',
+      subtitle: 'How long the duty of confidence outlives the agreement.',
+      clauseKey: 'confidentiality',
+      clause: confidentiality,
+      fields: [
+        { label: 'Mutual', value: yesNo(attr(confidentiality, 'is_mutual')) },
+        {
+          label: 'Survives termination',
+          value: yesNo(attr(confidentiality, 'survives_termination')),
+        },
+        { label: 'Survival period', value: numberWith(survivalYears, 'years') },
+        { label: 'Perpetual', value: yesNo(attr(confidentiality, 'is_perpetual')) },
+        {
+          label: 'Duration',
+          value: numberWith(attr(confidentiality, 'duration_years'), 'years'),
+        },
+      ],
+    },
+    {
+      title: 'Term and termination',
+      subtitle: 'How long it runs, how it renews, and how to get out.',
+      clauseKey: 'termination_for_convenience',
+      clause: termination,
+      fields: [
+        { label: 'Term', value: numberWith(metadata?.term_months, 'months') },
+        {
+          label: 'Auto-renewal',
+          value:
+            metadata?.auto_renewal == null
+              ? '—'
+              : metadata.auto_renewal
+                ? `Yes${
+                    metadata.auto_renewal_notice_days
+                      ? ` — ${metadata.auto_renewal_notice_days} days notice`
+                      : ''
+                  }`
+                : 'No',
+        },
+        {
+          label: 'Renewal term',
+          value: numberWith(metadata?.renewal_term_months, 'months'),
+        },
+        {
+          label: 'Termination for convenience',
+          value: yesNo(metadata?.has_termination_for_convenience),
+        },
+        {
+          label: 'Termination notice',
+          value: numberWith(metadata?.termination_notice_days, 'days'),
+        },
+        { label: 'Who may terminate', value: textOf(extra.can_we_terminate) },
+        { label: 'Notice deadline', value: formatDate(metadata?.notice_deadline) },
+        { label: 'Dispute resolution', value: textOf(extra.dispute_resolution) },
+      ],
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {sections.map((section) => (
+        <Card key={section.title}>
+          <SectionHeader title={section.title} subtitle={section.subtitle} />
+          <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+            {section.fields.map((field) => (
+              <DataField key={field.label} label={field.label} value={field.value} />
+            ))}
+          </dl>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {section.clauseKey ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onOpenTab(section.clauseKey as string)}
+              >
+                Open clause
+              </Button>
+            ) : null}
+            {section.clause?.evidence?.bounding_boxes?.length ? (
+              <EvidenceButton
+                onClick={() =>
+                  onShowEvidence(
+                    section.clause?.evidence?.bounding_boxes ?? [],
+                    section.clause?.page_start,
+                  )
+                }
+              />
+            ) : null}
+            {!section.clause ? (
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                No clause of this kind was found in this document.
+              </span>
+            ) : null}
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+/** `true`/`false`/absent as a reviewer reads them. */
+function yesNo(value: unknown): ReactNode {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return humanise(String(value));
+}
+
+function textOf(value: unknown): ReactNode {
+  if (value === null || value === undefined || value === '') return '—';
+  return humanise(String(value));
+}
+
+function listOf(value: unknown): ReactNode {
+  if (!Array.isArray(value) || !value.length) return '—';
+  return value.map((item) => humanise(String(item))).join(', ');
+}
+
+function numberWith(value: unknown, unit: string): ReactNode {
+  if (value === null || value === undefined || value === '') return '—';
+  return `${value} ${unit}`;
+}
+
 // =============================================================================
 // Fixed tabs
 // =============================================================================
 function OverviewTab({
   contract,
   summary,
-  topics,
+  summaryRows,
   missing,
   unlimited,
   onOpenTab,
 }: {
   contract: ContractDetail;
   summary?: string | null;
-  topics: string[];
+  summaryRows: SummaryRow[];
   missing: string[];
   unlimited: boolean;
   onOpenTab: (key: string) => void;
@@ -627,24 +983,20 @@ function OverviewTab({
         </Card>
       ) : null}
 
-      {summary ? (
+      {summaryRows.length ? (
+        <Card>
+          <SectionHeader
+            title="Summary"
+            subtitle="Clause by clause, in plain English. Only clauses found in this document appear."
+          />
+          <SummaryTable rows={summaryRows} onOpenTab={onOpenTab} />
+        </Card>
+      ) : summary ? (
+        // Contracts extracted before the clause digest existed have prose only.
+        // Reprocessing from the extraction stage fills in the table.
         <Card>
           <SectionHeader title="Summary" subtitle="Generated from the extracted clauses." />
-          <div className="max-h-48 overflow-y-auto pr-1">
-            <p className="text-sm leading-7 text-slate-700 dark:text-slate-300">{summary}</p>
-          </div>
-          {topics.length ? (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {/* {topics.map((topic) => (
-                <span
-                  key={topic}
-                  className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300"
-                >
-                  {humanise(topic)}
-                </span>
-              ))} */}
-            </div>
-          ) : null}
+          <p className="text-sm leading-7 text-slate-700 dark:text-slate-300">{summary}</p>
         </Card>
       ) : null}
 
@@ -1163,7 +1515,7 @@ function ProcessingTab({ contractId }: { contractId: string }) {
               <tbody className="divide-y divide-slate-100">
                 {job.stages.map((stage) => (
                   <tr key={stage.id}>
-                    <td className="py-2 pr-4 text-slate-700">{humanise(stage.stage)}</td>
+                    <td className="py-2 pr-4 text-slate-700">{formatStage(stage.stage)}</td>
                     <td className="py-2 pr-4">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <Badge

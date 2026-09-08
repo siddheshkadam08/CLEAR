@@ -36,10 +36,10 @@ PARSER_FRAMEWORK_VERSION = "1.0.0"
 
 #: Per-parser adapter versions - bump when an adapter's normalisation changes.
 #:
-#: ``idoc`` is absent and is left that way deliberately: its parses have always
-#: recorded ``unknown`` here, and adding it now would change the version stamped on
-#: every checkpoint and force a re-parse of the whole estate to fix a label. Worth
-#: correcting alongside a change that invalidates those checkpoints anyway.
+#: Historical note: the retired ``idoc`` parser never had an entry here, so its
+#: checkpoints recorded ``unknown``. Those rows are still readable and are left
+#: alone - restamping them would force a re-parse of the whole estate to correct a
+#: label.
 PARSER_ADAPTER_VERSIONS: dict[str, str] = {
     "adi": "1.0.0",
     "pdfextract": "1.0.0",
@@ -73,7 +73,7 @@ EXTRACTION_ENGINE_VERSION = "1.0.0"
 #: Bump when any of those change shape - it invalidates the stage's checkpoint
 #: and makes a re-run produce the new behaviour rather than replaying the old.
 DOCPIPELINE_VERSION = "1.0.0"
-EXTRACTION_SCHEMA_VERSION = "1.0.0"
+EXTRACTION_SCHEMA_VERSION = "1.1.0"
 
 #: How the extraction stage groups page-JSON paragraphs into the sections it
 #: both scores and persists as ``chunks``. Separate from ``CHUNK_ENGINE_VERSION``
@@ -97,7 +97,8 @@ PROMPT_VERSIONS: dict[str, str] = {
     "extraction.dates": "1.0.0",
     "extraction.relationships": "1.0.0",
     "classification.document": "1.0.0",
-    "summary.document": "1.0.0",
+    # 1.1.0 added `parties_background` and the per-clause `clause_digest`.
+    "summary.document": "1.1.0",
     "rag.qa": "1.0.0",
     "rag.contract_summary": "1.0.0",
     "rag.executive_summary": "1.0.0",

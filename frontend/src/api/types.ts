@@ -378,10 +378,34 @@ export interface UploadResult {
   message?: string | null;
 }
 
+/**
+ * The `extra` blob on contract metadata.
+ *
+ * These are answers the extraction stage derives from clause attributes and
+ * stores where the UI can read them without re-deriving. Typed rather than left
+ * as `unknown` because the Meta info tab reads every one of them, and a silent
+ * rename on the backend should fail the build rather than blank a field.
+ *
+ * Every key is optional: it is a JSONB column written by a pipeline that skips
+ * nulls, so an older contract will simply not have some of them.
+ */
+export interface ContractMetadataExtra {
+  liability_cap_basis?: string | null;
+  liability_cap_multiple?: number | null;
+  liability_carve_outs?: string[] | null;
+  can_we_terminate?: string | null;
+  we_retain_pre_existing_ip?: string | null;
+  dispute_resolution?: string | null;
+  review_reasons?: string[] | null;
+  [key: string]: unknown;
+}
+
 export interface ContractMetadata {
   effective_date?: string | null;
   execution_date?: string | null;
   expiration_date?: string | null;
+  renewal_date?: string | null;
+  notice_deadline?: string | null;
   term_months?: number | null;
   governing_law?: string | null;
   jurisdiction?: string | null;
@@ -394,11 +418,20 @@ export interface ContractMetadata {
   risk_band?: RiskBand | null;
   auto_renewal?: boolean | null;
   auto_renewal_notice_days?: number | null;
+  renewal_term_months?: number | null;
   missing_mandatory_clauses: string[];
   has_unlimited_liability: boolean;
+  // Liability, privacy and termination flags the pipeline projects from the
+  // matching clauses. `has_*` is false both when the clause was absent and when
+  // it was found without the feature, so pair them with the clause tab.
+  has_liability_cap?: boolean | null;
+  liability_cap_amount?: number | null;
+  has_data_protection_clause?: boolean | null;
+  has_termination_for_convenience?: boolean | null;
+  termination_notice_days?: number | null;
   summary?: string | null;
   key_topics: string[];
-  extra?: Record<string, unknown>;
+  extra?: ContractMetadataExtra;
 }
 
 // =============================================================================
@@ -520,6 +553,14 @@ export interface RiskAssessment {
   risks: Risk[];
 }
 
+/** One row of the clause-by-clause summary table. */
+export interface SummaryRow {
+  /** The clause tab this row came from. Absent on the Parties & Background row. */
+  clause_key?: string | null;
+  heading: string;
+  lines: string[];
+}
+
 export interface ContractKnowledge {
   contract_id: UUID;
   clause_count: number;
@@ -530,6 +571,14 @@ export interface ContractKnowledge {
   key_dates: KeyDate[];
   assessment: RiskAssessment;
   summary?: string | null;
+  /**
+   * The summary table. Holds only clauses the document actually contains, so an
+   * absent clause has no row rather than an empty one.
+   *
+   * Empty for contracts extracted before the digest existed — the screen falls
+   * back to the `summary` prose, so both must stay rendered.
+   */
+  summary_rows: SummaryRow[];
   key_topics: string[];
   needs_review: boolean;
   review_reasons: string[];

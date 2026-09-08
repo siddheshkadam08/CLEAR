@@ -44,6 +44,7 @@ from app.schemas.knowledge import (
     ObligationResponse,
     RiskAssessmentResponse,
     RiskResponse,
+    SummaryRowResponse,
 )
 
 logger = get_logger(__name__)
@@ -78,6 +79,7 @@ async def get_knowledge(ref: ContractContextDep, db: DbSession) -> ContractKnowl
     from app.repositories.contract import ContractMetadataRepository
     from app.repositories.knowledge import (
         ClauseRepository,
+        ContractSummaryRepository,
         EntityRepository,
         KeyDateRepository,
         ObligationRepository,
@@ -90,6 +92,9 @@ async def get_knowledge(ref: ContractContextDep, db: DbSession) -> ContractKnowl
     risks = list(await RiskRepository(db).list_for_contract(contract_id, project_id))
     dates = list(await KeyDateRepository(db).list_for_contract(contract_id, project_id))
     metadata = await ContractMetadataRepository(db).get_for_contract(contract_id)
+    stored_summary = await ContractSummaryRepository(db).get_for_contract(
+        contract_id, project_id, summary_type="executive"
+    )
 
     tabs, listed = await _build_tabs(db, clauses, metadata)
 
@@ -103,6 +108,7 @@ async def get_knowledge(ref: ContractContextDep, db: DbSession) -> ContractKnowl
         key_dates=[_key_date(row) for row in dates],
         assessment=_assessment(risks, metadata),
         summary=getattr(metadata, "summary", None),
+        summary_rows=_summary_rows(stored_summary),
         key_topics=list(getattr(metadata, "key_topics", None) or []),
         needs_review=bool(getattr(ref.project.project, "needs_review", False))
         or _needs_review(metadata),
@@ -512,6 +518,38 @@ def _provenance(row: Any) -> ProvenanceInfo | None:
         prompt_version=getattr(row, "prompt_version", None),
         profile_version=getattr(row, "profile_version", None),
     )
+
+
+def _summary_rows(stored: Any) -> list[SummaryRowResponse]:
+    """Adapt the stored `sections` blob into the summary table.
+
+    Tolerant of what it finds. `sections` was an unused JSONB column before the
+    digest was written into it, and older rows hold `[]` or shapes from no schema
+    at all; a contract extracted before this feature must render its prose summary
+    rather than raise.
+    """
+    sections = getattr(stored, "sections", None) or []
+    rows: list[SummaryRowResponse] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        lines = [str(line) for line in (section.get("lines") or []) if line]
+        if not lines:
+            continue
+        if section.get("kind") == "parties_background":
+            rows.append(SummaryRowResponse(heading="Parties & Background", lines=lines))
+            continue
+        heading = section.get("heading")
+        if not heading:
+            continue
+        rows.append(
+            SummaryRowResponse(
+                clause_key=section.get("clause_key") or None,
+                heading=str(heading),
+                lines=lines,
+            )
+        )
+    return rows
 
 
 def _clause(row: Any) -> ClauseResponse:

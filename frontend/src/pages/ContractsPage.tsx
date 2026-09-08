@@ -43,6 +43,7 @@ import {
   formatDateTimeFull,
   formatMoney,
   formatNumber,
+  formatStage,
   humanise,
 } from '@/lib/format';
 import { useProjectScope } from '@/lib/scope';
@@ -533,10 +534,20 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
   return (
     <tr onClick={onOpen} className="cursor-pointer transition hover:bg-blue-50/40 dark:hover:bg-blue-950/10">
       <td className="max-w-xs px-5 py-3">
-        <p className="truncate font-medium text-slate-900 dark:text-slate-100">
-          {contract.title ?? contract.original_file_name}
+        {/* The uploaded file name, verbatim. It is the name the document is known
+            by outside this system, so it is what someone matching a row against
+            their own records is looking for. The extracted title is not used: it
+            is the heading printed on page one, which for most agreements is just
+            the type again. */}
+        <p
+          className="truncate font-semibold text-slate-900 dark:text-slate-100"
+          title={contract.original_file_name}
+        >
+          {contract.original_file_name}
         </p>
-        <p className="truncate text-xs text-slate-500 dark:text-slate-400">{contract.original_file_name}</p>
+        <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+          {formatAgreementType(contract.agreement_type)}
+        </p>
         {contract.status === 'processing' && contract.processing ? (
           <div className="mt-2">
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
@@ -546,7 +557,7 @@ function ContractRow({ contract, onOpen }: { contract: ContractListItem; onOpen:
               />
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              {humanise(contract.processing.current_stage)}
+              {formatStage(contract.processing.current_stage)}
             </p>
           </div>
         ) : null}
@@ -612,10 +623,15 @@ function ContractCard({
       <div className="p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate font-semibold text-slate-900 dark:text-slate-100">
-            {contract.title ?? contract.original_file_name}
+          <p
+            className="truncate font-semibold text-slate-900 dark:text-slate-100"
+            title={contract.original_file_name}
+          >
+            {contract.original_file_name}
           </p>
-          <p className="truncate text-xs text-slate-500 dark:text-slate-400">{contract.original_file_name}</p>
+          <p className="truncate text-xs text-slate-500 dark:text-slate-400">
+            {formatAgreementType(contract.agreement_type)}
+          </p>
         </div>
         <Badge
           text={formatStatusLabel(contract.status)}
@@ -632,7 +648,7 @@ function ContractCard({
             />
           </div>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            {humanise(contract.processing.current_stage)}
+            {formatStage(contract.processing.current_stage)}
           </p>
         </div>
       ) : null}
@@ -645,7 +661,7 @@ function ContractCard({
         {contract.needs_review && contract.status !== 'needs_review' ? (
           <Badge text="Review" variant="warning" />
         ) : null}
-        <span className="text-xs text-slate-500 dark:text-slate-400">{formatAgreementType(contract.agreement_type)}</span>
+        {/* The agreement type sits under the name now, so it is not repeated here. */}
       </div>
 
       <dl className="mt-3 grid grid-cols-2 gap-3 border-t border-slate-100 pt-3 text-xs dark:border-slate-700">

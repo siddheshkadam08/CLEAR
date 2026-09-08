@@ -121,6 +121,17 @@ def _dummy_verify(password: str) -> None:
         )
 
 
+def equalise_password_timing(material: str = "") -> None:
+    """Spend the CPU a real password verification costs, then discard it.
+
+    The public counterpart of the guard inside :func:`verify_password`, for paths
+    that must not reveal by timing whether an account exists. The password-reset
+    request endpoint answers identically for a registered and an unregistered
+    address, and without this the difference would still be readable on a stopwatch.
+    """
+    _dummy_verify(material)
+
+
 def needs_rehash(password_hash: str) -> bool:
     """True when a stored hash uses outdated parameters or a legacy scheme."""
     settings = get_settings()
@@ -290,6 +301,67 @@ def verify_signed_state(token: str) -> dict[str, Any]:
     return decode_token(token, expected_type="oidc_state")
 
 
+def password_reset_fingerprint(password_hash: str | None) -> str:
+    """A short digest of the password a reset token was minted against.
+
+    This is what makes the link single-use without a table to revoke it in. The
+    fingerprint is embedded in the token and re-checked on redemption, so the
+    moment the password changes - by this reset, another one, an administrator,
+    or the forced first-sign-in change - every outstanding link stops working.
+
+    A digest rather than the hash itself: the token is emailed, and an argon2
+    hash sitting in a mailbox is worth far more to an attacker than eight bytes
+    of one. It is not a secret in its own right and is never compared against
+    anything but itself.
+    """
+    material = (password_hash or "").encode()
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
+def create_password_reset_token(
+    subject: uuid.UUID | str,
+    *,
+    password_hash: str | None,
+    ttl_seconds: int | None = None,
+) -> str:
+    """Mint the credential that travels in a password-reset email.
+
+    Like :func:`create_download_token` this rides in a URL rather than a header,
+    so it is bound as tightly as it can be: one user, one password state, and a
+    short window. ``type`` is ``password_reset`` so a token minted here can never
+    be presented as an access token - :func:`decode_token` enforces that.
+
+    ``sub`` is mandatory: :func:`decode_token` rejects a token without one, which
+    is the trap documented on :func:`create_signed_state`.
+    """
+    settings = get_settings()
+    ttl = ttl_seconds or settings.security.password_reset_token_ttl_minutes * 60
+    issued_at = _now()
+    payload = {
+        "sub": str(subject),
+        "type": "password_reset",
+        "pwf": password_reset_fingerprint(password_hash),
+        "iat": int(issued_at.timestamp()),
+        "exp": int((issued_at + timedelta(seconds=ttl)).timestamp()),
+        "jti": secrets.token_urlsafe(12),
+    }
+    return _encode(payload)
+
+
+def verify_password_reset_token(token: str, *, password_hash: str | None) -> dict[str, Any]:
+    """Validate a reset token against the account's *current* password.
+
+    Raises :class:`TokenInvalidError` for a token that has already been redeemed
+    just as it does for a forged one - the caller maps both onto the same
+    message, so a used link cannot be used to prove an account exists.
+    """
+    payload = decode_token(token, expected_type="password_reset")
+    if payload.get("pwf") != password_reset_fingerprint(password_hash):
+        logger.info("password_reset_token_already_used", subject=payload.get("sub"))
+        raise TokenInvalidError("This password reset link has already been used.")
+    return payload
+
+
 def create_download_token(
     subject: uuid.UUID | str,
     *,
@@ -419,18 +491,22 @@ def generate_api_key() -> str:
 __all__ = [
     "create_access_token",
     "create_nonce",
+    "create_password_reset_token",
     "create_pkce_verifier",
     "create_refresh_token",
     "create_signed_state",
     "decode_token",
+    "equalise_password_timing",
     "generate_api_key",
     "hash_password",
     "hash_token",
     "needs_rehash",
+    "password_reset_fingerprint",
     "pkce_challenge",
     "sha256_bytes",
     "validate_password_strength",
     "verify_internal_token",
     "verify_password",
+    "verify_password_reset_token",
     "verify_signed_state",
 ]

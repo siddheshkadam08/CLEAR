@@ -41,6 +41,7 @@ from app.ai.extraction.evidence import (
 )
 from app.ai.extraction.models import (
     CategoryOutcome,
+    ClauseDigestRow,
     ContractFacts,
     EvidenceRef,
     ExtractedClause,
@@ -1161,15 +1162,24 @@ class ExtractionEngine:
     # =========================================================================
     # Summary
     # =========================================================================
-    async def summarise(self, result: ExtractionResult) -> None:
-        """Add the executive summary, from extracted facts only.
+    async def summarise(
+        self,
+        result: ExtractionResult,
+        *,
+        definitions: list[ClauseDefinition] | None = None,
+    ) -> None:
+        """Add the executive summary and clause digest, from extracted facts only.
 
         Separate from ``extract`` because it depends on everything else having
         finished, and because a summary failure must not cost the extraction.
+
+        ``definitions`` supplies the Clause Master display names and their ordering,
+        so the digest reads in the same order as the clause tabs.
         """
         builder = ExtractionPromptBuilder(
             organisation_aliases=list(self._settings.organization_legal_names)
         )
+        labels = {d.key: d.name for d in definitions or []}
         outcome = CategoryOutcome(category="summary", prompt_id="summary.document")
         spec = builder.summary(
             facts=result.facts,
@@ -1179,6 +1189,7 @@ class ExtractionEngine:
                 f"{risk.severity.value}: {risk.description}"
                 for risk in result.assessment.risks[:10]
             ],
+            clause_labels=labels,
         )
         structured = await self._call(spec, outcome, result)
         if structured is None:
@@ -1186,11 +1197,58 @@ class ExtractionEngine:
 
         payload = structured.data
         result.facts.executive_summary = _clean(payload.get("executive_summary"))
+        result.facts.parties_background = _clean(payload.get("parties_background"))
+        result.facts.clause_digest = self._digest(payload.get("clause_digest"), result, labels)
         key_points = [str(point) for point in (payload.get("key_points") or []) if point]
         if key_points and not result.facts.key_topics:
             result.facts.key_topics = key_points[:10]
         outcome.item_count = 1
         result.outcomes.append(outcome)
+
+    @staticmethod
+    def _digest(
+        rows: Any,
+        result: ExtractionResult,
+        labels: dict[str, str],
+    ) -> list[ClauseDigestRow]:
+        """Keep only digest rows that name a clause extraction actually produced.
+
+        The schema cannot express "one entry per clause and no others", so the rule
+        is enforced here. A row for a clause the document does not contain is the
+        failure this whole feature exists to avoid: the summary table is read as a
+        statement of what the agreement says, and an invented row asserting, say, an
+        indemnity that was never found is worse than no summary at all.
+
+        Order follows the extraction order rather than the model's, so the table
+        matches the clause tabs beside it.
+        """
+        found = [clause.clause_type for clause in result.clauses]
+        rank = {key: index for index, key in enumerate(dict.fromkeys(found))}
+
+        digest: list[ClauseDigestRow] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            key = _clean(row.get("clause_key")) or ""
+            if key not in rank or key in seen:
+                if key and key not in rank:
+                    logger.info("summary_digest_row_dropped", clause_key=key)
+                continue
+            lines = [text for line in (row.get("lines") or []) if (text := _clean(str(line)))]
+            if not lines:
+                continue
+            seen.add(key)
+            digest.append(
+                ClauseDigestRow(
+                    clause_key=key,
+                    heading=_clean(row.get("heading")) or labels.get(key) or key,
+                    lines=lines,
+                )
+            )
+
+        digest.sort(key=lambda entry: rank[entry.clause_key])
+        return digest
 
     # =========================================================================
     # Provider plumbing

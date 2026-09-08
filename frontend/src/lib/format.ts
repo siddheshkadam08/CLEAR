@@ -123,6 +123,27 @@ export function formatAgreementType(value?: string | null): string {
   return AGREEMENT_TYPE_LABELS[value] ?? humanise(value);
 }
 
+/**
+ * Pipeline stages as the product names them.
+ *
+ * `docpipeline` is the stage's identifier everywhere it is durable — the queue
+ * name, the `pipeline_stage` enum in the database, the reprocess argument — so it
+ * cannot be renamed without a migration and a queue drain. What it *does* is
+ * detect clauses, which is what the screen should say. This maps the one to the
+ * other at the point of display and nowhere else.
+ *
+ * Same fallthrough as the agreement types above: a stage added to the backend
+ * still renders via `humanise` rather than showing blank.
+ */
+const STAGE_LABELS: Record<string, string> = {
+  docpipeline: 'Clause Detection',
+};
+
+export function formatStage(value?: string | null): string {
+  if (!value) return '—';
+  return STAGE_LABELS[value] ?? humanise(value);
+}
+
 export function formatDuration(ms?: number | null): string {
   if (ms === null || ms === undefined) return '—';
   if (ms < 1000) return `${ms} ms`;

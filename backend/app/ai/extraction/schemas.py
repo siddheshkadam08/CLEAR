@@ -378,6 +378,34 @@ def summary_schema() -> dict[str, Any]:
                 "what it is, the commercial shape, and the terms that carry risk."
             ),
             "key_points": _array({"type": "string"}, "Five to eight single-sentence takeaways."),
+            "parties_background": _str(
+                "One or two plain sentences naming who the parties are and what the "
+                "agreement is for, as you would explain it to someone who is not a "
+                "lawyer. No clause numbers, no defined terms."
+            ),
+            "clause_digest": _array(
+                _obj(
+                    {
+                        "clause_key": _req_str(
+                            "The clause key exactly as given in EXTRACTED TERMS. Never "
+                            "invent one and never emit a key that was not listed."
+                        ),
+                        "heading": _req_str(
+                            "Short title for this clause as it should read in the "
+                            "summary table, e.g. 'Ownership, Risk & Responsibility'."
+                        ),
+                        "lines": _array(
+                            {"type": "string"},
+                            "One to three short sentences in plain English saying what "
+                            "this clause means in practice - who must do what, who "
+                            "carries the risk, what the numbers are. Each sentence "
+                            "stands alone; do not number them or repeat the heading.",
+                        ),
+                    }
+                ),
+                "One entry per clause listed in EXTRACTED TERMS, in the order given. "
+                "Omit nothing that was listed and add nothing that was not.",
+            ),
             "obligations_summary": _str("One paragraph on what each side must do."),
             "risk_summary": _str("One paragraph on where the exposure sits."),
             "uncertainty": _UNCERTAINTY,

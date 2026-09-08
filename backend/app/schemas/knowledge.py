@@ -158,6 +158,16 @@ class RiskAssessmentResponse(ResponseSchema):
     risks: list[RiskResponse] = Field(default_factory=list)
 
 
+class SummaryRowResponse(ResponseSchema):
+    """One row of the clause-by-clause summary table."""
+
+    #: The Clause Master key, so the row can link to its tab. Absent on the
+    #: leading "Parties & Background" row, which belongs to no single clause.
+    clause_key: str | None = None
+    heading: str
+    lines: list[str] = Field(default_factory=list)
+
+
 class ContractKnowledgeResponse(ResponseSchema):
     """Everything extracted from one contract, as the detail screen needs it."""
 
@@ -172,6 +182,10 @@ class ContractKnowledgeResponse(ResponseSchema):
     key_dates: list[KeyDateResponse] = Field(default_factory=list)
     assessment: RiskAssessmentResponse = Field(default_factory=RiskAssessmentResponse)
     summary: str | None = None
+    #: The clause-by-clause table, in Clause Master order, holding only clauses
+    #: this document actually contains. Empty for contracts extracted before the
+    #: digest existed - the screen falls back to `summary` prose.
+    summary_rows: list[SummaryRowResponse] = Field(default_factory=list)
     key_topics: list[str] = Field(default_factory=list)
     needs_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
@@ -215,4 +229,5 @@ __all__ = [
     "ObligationResponse",
     "RiskAssessmentResponse",
     "RiskResponse",
+    "SummaryRowResponse",
 ]

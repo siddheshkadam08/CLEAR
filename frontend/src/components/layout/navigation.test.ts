@@ -40,7 +40,16 @@ const declaredPaths = [
  * rather than inferred: a new route defaults to needing a name, and opting one
  * out is a line somebody has to write.
  */
-const OUTSIDE_SHELL = ['/login', '/auth/callback', '/change-password', '/*'];
+const OUTSIDE_SHELL = [
+  '/login',
+  '/auth/callback',
+  '/change-password',
+  // Reached from a password-reset email by someone with no session, so they sit
+  // outside `ProtectedRoute` and have no shell to title.
+  '/forgot-password',
+  '/reset-password',
+  '/*',
+];
 
 /** `/contracts/:contractId` resolves by prefix, so any id will do. */
 const withSampleParams = (path: string) => path.replace(/:[^/]+/g, 'sample-id');

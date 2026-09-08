@@ -122,3 +122,16 @@ def test_the_auth_router_stays_open() -> None:
 def test_change_password_is_reachable() -> None:
     every_path = {path for included in included_routers() for path in paths_of(included)}
     assert "/auth/change-password" in every_path
+
+
+def test_password_reset_routes_are_reachable() -> None:
+    """Both reset routes must sit on the ungated auth router.
+
+    A user resetting a forgotten password has no session at all, so anything that
+    gated these would make the feature unreachable by exactly the people it is
+    for. They inherit that ungated status by living on `auth.router`; moving them
+    to a router of their own would silently break them.
+    """
+    every_path = {path for included in included_routers() for path in paths_of(included)}
+    assert "/auth/forgot-password" in every_path
+    assert "/auth/reset-password" in every_path

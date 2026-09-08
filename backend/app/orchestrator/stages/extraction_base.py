@@ -168,7 +168,7 @@ class ExtractionStageBase(StageHandler):
         # failure is not allowed to cost the extraction.
         if ctx.options.get("skip_summary") is not True:
             try:
-                await engine.summarise(result)
+                await engine.summarise(result, definitions=definitions)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "summary_generation_failed",
@@ -553,7 +553,18 @@ class ExtractionStageBase(StageHandler):
                 values={
                     "content": result.facts.executive_summary or result.facts.summary or "",
                     "key_points": result.facts.key_topics,
-                    "sections": [],
+                    # The clause-by-clause table. It lives here rather than in
+                    # `contract_metadata.summary` because that column is also the
+                    # document-level embedding input and the full-text index target,
+                    # and a table of headings embeds and searches far worse than the
+                    # prose does. `parties_background` leads the table, so it travels
+                    # with the rows rather than in a column of its own.
+                    "sections": (
+                        [{"kind": "parties_background", "lines": [result.facts.parties_background]}]
+                        if result.facts.parties_background
+                        else []
+                    )
+                    + [row.as_dict() for row in result.facts.clause_digest],
                     "citations": [
                         ref.as_dict()
                         for clause in result.clauses[:20]
